@@ -1,27 +1,28 @@
 # Ductile
 
-A declarative pipeline DSL with e-graph multi-path selection. Written in Rust, zero external dependencies.
+A declarative pipeline DSL with tag-based effects and runtime-learned path selection. Written in Rust, zero external dependencies.
 
 ## What is Ductile?
 
-Ductile lets you describe data-processing pipelines as a simple text file (`.pipeline`). Each pipeline declares:
+Ductile lets you describe data-processing pipelines as a simple text file (`.pipeline`):
 
 - **Procs** — discrete steps (search, write, run, etc.)
-- **Plans** — multiple implementation paths per proc, each with a cost
-- **E-graph selection** — automatically picks the cheapest path, falls back on failure
+- **Tags** — free-form labels on leaf nodes; pipeline effects auto-computed as union
+- **Fallback** — declaration order is priority; path A fails → try path B
+- **Runtime learning** — GCF records track success rate + latency per path; good paths rank higher, bad paths get blocked
 - **Checks** — validate results before passing them downstream
 - **Foreach** — fan out over a list of items
 - **Retry** — exponential backoff on transient failures
 
-## Install
+No cost declarations. No level/scope enums. No weights to tune.
 
-### From source (Rust)
+## Install
 
 ```bash
 cargo install --path .
 ```
 
-### Via pip (Python binding)
+Via pip (Python binding):
 
 ```bash
 pip install ductile
@@ -32,38 +33,35 @@ pip install ductile
 Write a `.pipeline` file:
 
 ```
-Pipeline("research", effects=[Search, File], min_level=L3)
-  .proc("search", level=L1, scope=Search)
-    .plan(
-      fast -> web_search(query="{topic}").cost(latency=3000, risk=0.1, tokens=0, money=0),
-      safe -> mcp_search(query="{topic}", engine=zai).cost(latency=2000, risk=0.05, tokens=0, money=0)
-    )
-    .pick
-    .check(result => has_results, "搜索无结果")
-  .proc("write", level=L2, scope=File)
-    .plan(
-      out -> write(to="/tmp/report.md", content=@search).cost(latency=50, risk=0, tokens=0, money=0)
-    )
-    .pick
-  .proc("deliver", level=L0)
-    .deliver(media=[@write])
+Pipeline("research", "Research a topic and write a report")
+
+.proc("search")
+  .plan(
+    web -> web_search(query="{topic}").tags(#search, #network).retry(n=3),
+    mcp -> mcp_search(query="{topic}").tags(#search)
+  )
+  .check(not_empty, "No search results")
+
+.proc("write")
+  .plan(
+    out -> write(to="/tmp/report.md", content=@search).tags(#file)
+  )
+
+.proc("deliver")
+  .deliver(media=[@write])
 ```
 
 Run it:
 
 ```bash
-ductile run research.pipeline "RISC-V架构最新进展"
+ductile run research.pipeline "RISC-V architecture"
 ```
 
-Check it without executing:
+Check, parse, graph:
 
 ```bash
 ductile check research.pipeline
-```
-
-Show the e-graph structure and parallel groups:
-
-```bash
+ductile parse research.pipeline
 ductile graph research.pipeline
 ```
 
@@ -72,48 +70,54 @@ ductile graph research.pipeline
 ### Pipeline header
 
 ```
-Pipeline("name", effects=[Search, File], min_level=L3)
+Pipeline("name", "description")
 ```
 
-- `effects` — declared scopes that procs in this pipeline may use
-- `min_level` — maximum execution level (L0=local, L1-L5=escalating privilege)
+- `name` — pipeline identifier
+- `description` (optional) — natural language description for future search/retrieval
 
 ### Proc
 
 ```
-.proc("name", level=L1, scope=Search)
+.proc("name")
 ```
 
-A discrete processing step. Each proc has one or more implementation paths.
+A processing step. Dependencies auto-derived from `@proc_name` references.
 
-### Plan
+### Plan (multi-path + fallback)
 
 ```
 .plan(
-  path_a -> web_search(query="AI").cost(latency=3000, risk=0.1, tokens=0, money=0),
-  path_b -> mcp_search(query="AI", engine=zai).cost(latency=2000, risk=0.05, tokens=0, money=0)
+  path_a -> body.tags(#tag1),
+  path_b -> body.tags(#tag2)
 )
 ```
 
-Multiple paths compete. The engine picks the lowest-cost one first; if it fails, falls back to the next.
+Declaration order = priority. A fails → try B automatically.
 
-### Pick
+### Tags
 
 ```
-.pick
-.pick(by=cost + history)
-.pick(by=latency)
+.tags(#search, #network)
 ```
 
-Selection strategy. Default is `cost + history` (cost-weighted with failure penalty from recent runs). Bare `.pick` uses the default.
+Only on leaf impls. Pipeline effects auto-computed as union of all impl tags. Tags stored sorted (BTreeSet) for deterministic matching.
 
 ### Check
 
 ```
-.check(result => has_results, "搜索无结果")
+.check(not_empty, "Result is empty")
 ```
 
-Built-in predicates: `has_results`, `has_items`, `has_summary`, `has_content`, `not_empty`, `no_error`, `has_date`, `min_length(N)`.
+Core predicates: `not_empty`, `no_error`, `min_length(N)`, `has_items`.
+
+### Retry
+
+```
+.retry(n=3)
+```
+
+Exponential backoff: 2s → 4s → 8s.
 
 ### Foreach
 
@@ -123,47 +127,55 @@ Built-in predicates: `has_results`, `has_items`, `has_summary`, `has_content`, `
 
 Fan out: iterate over each line of the source proc's result, substituting `{subtask}` in downstream bodies.
 
-### Retry
-
-```
-sh("ffmpeg -i input.mp4 output.mp4").cost(...).retry(n=3)
-```
-
-Exponential backoff: 2s → 4s → 8s.
-
-### Ensure (inline check)
-
-```
-sh("make build").cost(...).ensure(not has_error, "编译失败")
-```
-
-Impl-level check that runs after execution.
-
 ### Deliver
 
 ```
-.proc("deliver", level=L0)
+.proc("deliver")
   .deliver(media=[@write])
 ```
 
-Terminal proc that marks pipeline outputs for delivery.
+Terminal node marking pipeline output.
 
-## Built-in functions
+### When (conditional routing)
 
-| Function | Description |
-|---|---|
-| `web_search(query="...")` | Web search via bridge script |
-| `mcp_search(query="...", engine=zai)` | MCP-based search |
-| `llm("desc", input=@prev, template="...")` | LLM call via bridge |
-| `write(to="path", content=@prev)` | Write file |
-| `read(from="path")` | Read file |
-| `run("shell command")` | Execute shell command |
-| `sh("shell command")` | Alias for `run()` |
-| `merge(@a, @b)` | Concatenate results |
+```
+.when(mode == "deep")
+```
+
+### Disabled
+
+```
+.disabled
+```
+
+Temporarily disable a path.
+
+## Path selection (no cost, no weights)
+
+Path ranking is entirely runtime-driven:
+
+| Stage | Strategy |
+|-------|----------|
+| Cold start (< 3 runs) | Declaration order; new paths explored first |
+| Has data | Sort by recent-20 success rate (high→low), tie-break by avg latency (low→high) |
+| 3 consecutive failures | BLOCKED — skipped |
+
+## GCF record format
+
+Each execution appends to `~/.local/share/ductile/records/<proc>/runs.gcf`:
+
+```
+GCF profile=generic
+## runs
+2026-08-13T00:04:51|web|Ok|3124|A|-|-
+2026-08-13T00:04:52|mcp|Fail|5100|B|a1b2c3d4|search.mcp.step
+```
+
+Fields: `timestamp | path | status | latency_ms | pick | err_hash | err_at`
 
 ## ##DSL_RESULT protocol
 
-External programs called via `run()`/`sh()` can return structured data by appending a block to stdout:
+External programs called via `run()`/`sh()` can return structured data:
 
 ```
 ##DSL_RESULT
@@ -173,19 +185,38 @@ frames=243
 ##DSL_END
 ```
 
-Fields are accessible downstream via `@proc.field` references (e.g. `@convert.duration`).
+Access downstream via `@proc.field` references.
 
-## Record (GCF)
+## Built-in functions
 
-Each proc execution is logged to `~/.local/share/ductile/records/<proc>/runs.gcf` in append-only GCF format. The engine uses a sliding window (last 20 runs) to penalize frequently failing paths.
+| Function | Description |
+|---|---|
+| `web_search(query="...")` | Web search via bridge |
+| `mcp_search(query="...", engine=zai)` | MCP-based search |
+| `llm("desc", input=@prev, template="...")` | LLM call via bridge |
+| `write(to="path", content=@prev)` | Write file |
+| `read(from="path")` | Read file |
+| `run("shell command")` | Execute shell command |
+| `sh("shell command")` | Alias for `run()` |
+| `merge(@a, @b)` | Concatenate results |
+
+## CLI commands
+
+| Command | Description |
+|---|---|
+| `check <file>` | Parse + type check |
+| `run <file> [topic]` | Parse + check + execute |
+| `graph <file>` | Show DAG structure (parallel groups, critical path) |
+| `parse <file>` | Parse only (show structure) |
 
 ## Performance
 
-| Metric | Haskell | Rust |
-|---|---|---|
-| Startup (check) | 11ms | 1ms |
-| Dependencies | 12+ packages | 0 (std only) |
-| Binary size | ~30MB | ~400KB |
+| Metric | Value |
+|---|---|
+| Startup (check) | 1ms |
+| Dependencies | 0 (std only) |
+| Binary size | ~400KB |
+| Tests | 90, all passing |
 
 ## License
 
