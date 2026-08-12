@@ -125,13 +125,11 @@ mod tests {
     fn mk_pipeline_with_procs(proc_names: &[&str], refs: &[(&str, &str)]) -> Pipeline {
         let procs: Vec<Proc> = proc_names.iter().map(|name| Proc {
             name: (*name).into(),
-            level: Level::L0,
-            scope: None,
             plan: refs.iter()
                 .filter(|(from, to)| *to == *name)
                 .map(|(from, _)| Impl {
                     name: format!("{}_impl", from),
-                    level: Level::L0,
+                    tags: std::collections::BTreeSet::new(),
                     cost: Cost::default(),
                     enabled: true,
                     when: None,
@@ -151,8 +149,6 @@ mod tests {
 
         Pipeline {
             name: "test".into(),
-            effects: vec![],
-            min_level: Level::L0,
             procs,
             weights: Weights::default(),
         }
@@ -236,8 +232,6 @@ mod tests {
     fn empty_pipeline_egraph() {
         let pl = Pipeline {
             name: "empty".into(),
-            effects: vec![],
-            min_level: Level::L0,
             procs: vec![],
             weights: Weights::default(),
         };

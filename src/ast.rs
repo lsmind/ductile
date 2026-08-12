@@ -1,69 +1,14 @@
 //! Ductile AST — type definitions for the pipeline DSL.
 //!
-//! Mirrors the Haskell AST.hs but uses Rust idioms (enums, Box, Vec).
+//! v0.4: Level/Scope replaced by tag system. Tags live only on leaf impls.
+//! Pipeline effects auto-computed as union of all impl tags.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-// ── §1 Execution Level ──
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Level {
-    L0, L1, L2, L3, L4, L5,
-}
-
-impl std::fmt::Display for Level {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl Level {
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "L0" => Some(Level::L0),
-            "L1" => Some(Level::L1),
-            "L2" => Some(Level::L2),
-            "L3" => Some(Level::L3),
-            "L4" => Some(Level::L4),
-            "L5" => Some(Level::L5),
-            _ => None,
-        }
-    }
-}
-
-// ── §10 Scope ──
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Scope {
-    Search, File, Image, Convert, Deliver,
-    Memory, Terminal, GovRules, Analysis,
-    GPU, Video, Audio, LLM,
-}
-
-impl Scope {
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "Search" => Some(Scope::Search),
-            "File" => Some(Scope::File),
-            "Image" => Some(Scope::Image),
-            "Convert" => Some(Scope::Convert),
-            "Deliver" => Some(Scope::Deliver),
-            "Memory" => Some(Scope::Memory),
-            "Terminal" => Some(Scope::Terminal),
-            "GovRules" => Some(Scope::GovRules),
-            "Analysis" => Some(Scope::Analysis),
-            "GPU" => Some(Scope::GPU),
-            "Video" => Some(Scope::Video),
-            "Audio" => Some(Scope::Audio),
-            "LLM" => Some(Scope::LLM),
-            _ => None,
-        }
-    }
-}
-
-impl std::fmt::Display for Scope {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
+// ── §1 Tag (replaces Level + Scope) ──
+// Tags are free-form strings. By convention:
+//   #network, #file, #gpu, #llm, #search, #terminal, #memory, #deliver ...
+// Pipeline effects = union of all impl tags (auto-computed, not declared).
 
 // ── §9 Cost ──
 #[derive(Debug, Clone, PartialEq)]
@@ -119,15 +64,15 @@ impl Weights {
 #[derive(Debug, Clone)]
 pub struct Impl {
     pub name: String,
-    pub level: Level,
+    pub tags: BTreeSet<String>,       // v0.4: replaces level + scope
     pub cost: Cost,
     pub enabled: bool,
-    pub when: Option<String>,      // raw when-condition text
-    pub refs: Vec<String>,         // body中引用的其他proc名
-    pub body_text: String,         // 原始body文本（供executor解析和执行）
+    pub when: Option<String>,         // raw when-condition text
+    pub refs: Vec<String>,            // body中引用的其他proc名
+    pub body_text: String,            // 原始body文本（供executor解析和执行）
     pub stub: bool,
-    pub retry: usize,              // v3.0: retry count
-    pub ensure: Vec<Check>,        // v3.0: inline checks
+    pub retry: usize,                 // retry count
+    pub ensure: Vec<Check>,           // inline checks
 }
 
 #[derive(Debug, Clone)]
@@ -139,23 +84,34 @@ pub struct Check {
 #[derive(Debug, Clone)]
 pub struct Proc {
     pub name: String,
-    pub level: Level,
-    pub scope: Option<Scope>,
     pub plan: Vec<Impl>,
     pub checks: Vec<Check>,
     pub deliver: bool,
-    pub foreach: Option<String>,   // source proc name
+    pub foreach: Option<String>,      // source proc name
     pub foreach_var: String,
-    pub pick_by: String,           // pick strategy
+    pub pick_by: String,              // pick strategy
 }
 
 #[derive(Debug, Clone)]
 pub struct Pipeline {
     pub name: String,
-    pub effects: Vec<Scope>,
-    pub min_level: Level,
     pub procs: Vec<Proc>,
     pub weights: Weights,
+}
+
+impl Pipeline {
+    /// Auto-compute effects/tags as the union of all leaf impl tags.
+    pub fn computed_tags(&self) -> BTreeSet<String> {
+        let mut tags = BTreeSet::new();
+        for proc in &self.procs {
+            for impl_ in &proc.plan {
+                for t in &impl_.tags {
+                    tags.insert(t.clone());
+                }
+            }
+        }
+        tags
+    }
 }
 
 // ── §11 Status / Record ──
@@ -217,45 +173,8 @@ pub const WINDOW_SIZE: usize = 20;
 mod tests {
     use super::*;
 
-    // ── Level ──
-    #[test]
-    fn level_from_str_valid() {
-        assert_eq!(Level::from_str("L0"), Some(Level::L0));
-        assert_eq!(Level::from_str("L3"), Some(Level::L3));
-        assert_eq!(Level::from_str("L5"), Some(Level::L5));
-    }
-
-    #[test]
-    fn level_from_str_invalid() {
-        assert_eq!(Level::from_str("L6"), None);
-        assert_eq!(Level::from_str("X"), None);
-        assert_eq!(Level::from_str(""), None);
-    }
-
-    #[test]
-    fn level_ordering() {
-        assert!(Level::L0 < Level::L3);
-        assert!(Level::L3 < Level::L5);
-    }
-
-    #[test]
-    fn level_display() {
-        assert_eq!(Level::L2.to_string(), "L2");
-    }
-
-    // ── Scope ──
-    #[test]
-    fn scope_from_str_valid() {
-        assert_eq!(Scope::from_str("Search"), Some(Scope::Search));
-        assert_eq!(Scope::from_str("File"), Some(Scope::File));
-        assert_eq!(Scope::from_str("LLM"), Some(Scope::LLM));
-        assert_eq!(Scope::from_str("GPU"), Some(Scope::GPU));
-    }
-
-    #[test]
-    fn scope_from_str_invalid() {
-        assert_eq!(Scope::from_str("search"), None); // case-sensitive
-        assert_eq!(Scope::from_str("Network"), None);
+    fn mk_tags(items: &[&str]) -> BTreeSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
     }
 
     // ── Cost ──
@@ -327,5 +246,78 @@ mod tests {
         assert_eq!(rr.window, 0);
         assert_eq!(rr.fails, 0);
         assert_eq!(rr.consec_fail, 0);
+    }
+
+    // ── computed_tags ──
+    #[test]
+    fn computed_tags_union_of_impl_tags() {
+        let pl = Pipeline {
+            name: "test".into(),
+            procs: vec![
+                Proc {
+                    name: "a".into(),
+                    plan: vec![
+                        Impl { name: "x".into(), tags: mk_tags(&["search", "network"]), ..default_impl() },
+                    ],
+                    checks: vec![],
+                    deliver: false,
+                    foreach: None,
+                    foreach_var: String::new(),
+                    pick_by: "cost".into(),
+                },
+                Proc {
+                    name: "b".into(),
+                    plan: vec![
+                        Impl { name: "y".into(), tags: mk_tags(&["file", "network"]), ..default_impl() },
+                    ],
+                    checks: vec![],
+                    deliver: false,
+                    foreach: None,
+                    foreach_var: String::new(),
+                    pick_by: "cost".into(),
+                },
+            ],
+            weights: Weights::default(),
+        };
+        let tags = pl.computed_tags();
+        assert_eq!(tags.len(), 3);
+        assert!(tags.contains("search"));
+        assert!(tags.contains("file"));
+        assert!(tags.contains("network"));
+    }
+
+    #[test]
+    fn computed_tags_empty_when_no_tags() {
+        let pl = Pipeline {
+            name: "bare".into(),
+            procs: vec![
+                Proc {
+                    name: "a".into(),
+                    plan: vec![Impl { name: "x".into(), ..default_impl() }],
+                    checks: vec![],
+                    deliver: false,
+                    foreach: None,
+                    foreach_var: String::new(),
+                    pick_by: "cost".into(),
+                },
+            ],
+            weights: Weights::default(),
+        };
+        assert!(pl.computed_tags().is_empty());
+    }
+
+    fn default_impl() -> Impl {
+        Impl {
+            name: String::new(),
+            tags: BTreeSet::new(),
+            cost: Cost::default(),
+            enabled: true,
+            when: None,
+            refs: vec![],
+            body_text: String::new(),
+            stub: false,
+            retry: 0,
+            ensure: vec![],
+        }
     }
 }

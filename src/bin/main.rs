@@ -136,16 +136,22 @@ fn cmd_parse(path: &str) {
     };
 
     println!("Pipeline: {}", pl.name);
-    println!("Effects: {:?}", pl.effects);
-    println!("Min level: {}", pl.min_level);
+    let tags = pl.computed_tags();
+    if !tags.is_empty() {
+        let tag_str: Vec<String> = tags.iter().map(|t| format!("#{}", t)).collect();
+        println!("Tags: {}", tag_str.join(", "));
+    }
     println!();
     for proc in &pl.procs {
-        println!("  Proc: {} {} ({} impls){}",
-                 proc.name, proc.level, proc.plan.len(),
+        println!("  Proc: {} ({} impls){}",
+                 proc.name, proc.plan.len(),
                  if proc.deliver { " [deliver]" } else { "" });
         for imp in &proc.plan {
-            println!("    Impl: {} cost(latency={}, risk={}, tokens={}, money={}){}",
-                     imp.name, imp.cost.latency, imp.cost.risk, imp.cost.tokens, imp.cost.money,
+            let tag_str: Vec<String> = imp.tags.iter().map(|t| format!("#{}", t)).collect();
+            println!("    Impl: {}{} cost(latency={}, risk={}, tokens={}, money={}){}",
+                     imp.name,
+                     if !tag_str.is_empty() { format!(" [{}]", tag_str.join(", ")) } else { String::new() },
+                     imp.cost.latency, imp.cost.risk, imp.cost.tokens, imp.cost.money,
                      if !imp.refs.is_empty() { format!(" refs={:?}", imp.refs) } else { String::new() });
         }
         for chk in &proc.checks {

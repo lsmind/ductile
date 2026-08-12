@@ -1074,7 +1074,7 @@ mod tests {
     fn default_impl() -> Impl {
         Impl {
             name: String::new(),
-            level: Level::L0,
+            tags: std::collections::BTreeSet::new(),
             cost: Cost::default(),
             enabled: true,
             when: None,
@@ -1177,16 +1177,12 @@ mod tests {
     fn exec_pipeline_stub_proc() {
         let pl = Pipeline {
             name: "stub_test".into(),
-            effects: vec![Scope::File],
-            min_level: Level::L0,
             weights: Weights::default(),
             procs: vec![Proc {
                 name: "p".into(),
-                level: Level::L0,
-                scope: Some(Scope::File),
                 plan: vec![Impl {
                     name: "stub_impl".into(),
-                    level: Level::L0,
+                    tags: std::collections::BTreeSet::new(),
                     cost: Cost::default(),
                     enabled: true,
                     when: None,

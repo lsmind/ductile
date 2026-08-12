@@ -1,10 +1,10 @@
 //! Ductile Parser — recursive-descent parser for .pipeline files.
 //!
-//! Grammar mirrors the Haskell Megaparsec parser.
-//! Pipeline = header .proc+ (.check | .plan | .pick | .foreach | .deliver | .when | .retry | .ensure)
+//! v0.4: No level/scope in header or proc. Tags (#tag) only on leaf impls.
+//! Pipeline header: Pipeline("name") — no effects, no min_level.
 
 use crate::ast::*;
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone)]
 pub struct ParseError {
@@ -16,7 +16,7 @@ pub struct ParseError {
 
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Parse error:\n{}:{}:\n  |\n{:>2} | {}\n  | {:>width$}^\n{}\n",
+        write!(f, "Parse error:\n{}:{}:\n  |  \n{:>2} | {}\n  | {:>width$}^\n{}\n",
                self.line, self.col, self.line, self.line_text, "",
                self.msg, width = self.col.saturating_sub(1))
     }
@@ -27,7 +27,6 @@ struct Tokenizer<'a> {
     lines: Vec<&'a str>,
     line: usize,
     col: usize,
-    // We don't track per-char; we work line-by-line, char-by-char within each line.
 }
 
 struct LineCursor<'a> {
@@ -114,9 +113,9 @@ pub fn parse_pipeline(input: &str) -> Result<Pipeline, ParseError> {
         return Err(ParseError { line: 1, col: 1, msg: "empty input".into(), line_text: String::new() });
     }
 
-    // Parse header: Pipeline("name", effects=[...], min_level=L3)
+    // Parse header: Pipeline("name")
     let header_line = lines[idx];
-    let (pipeline, header_consumed) = parse_header(header_line, idx + 1)?;
+    let name = parse_header(header_line, idx + 1)?;
 
     idx += 1;
 
@@ -144,31 +143,16 @@ pub fn parse_pipeline(input: &str) -> Result<Pipeline, ParseError> {
     }
 
     Ok(Pipeline {
-        name: pipeline.name,
-        effects: pipeline.effects,
-        min_level: pipeline.min_level,
+        name,
         procs,
         weights: Weights::default(),
     })
 }
 
-struct HeaderResult {
-    name: String,
-    effects: Vec<Scope>,
-    min_level: Level,
-}
-
-fn parse_header(line: &str, line_num: usize) -> Result<(HeaderResult, usize), ParseError> {
-    let mut cur = LineCursor::new(line, line_num);
-
-    // Accept both Pipeline( and pipeline(
+fn parse_header(line: &str, line_num: usize) -> Result<String, ParseError> {
     let lower: String = line.to_lowercase();
     if lower.trim_start().starts_with("pipeline(") || lower.trim_start().starts_with("pipeline (") {
-        cur.skip_ws();
-        cur.consume("Pipeline");
-        if !cur.consume("(") {
-            cur.consume(" (");
-        }
+        // OK
     } else {
         return Err(ParseError {
             line: line_num, col: 1, msg: format!("unexpected {:?} — expecting \"Pipeline\"", &line[..line.len().min(20)]),
@@ -176,48 +160,9 @@ fn parse_header(line: &str, line_num: usize) -> Result<(HeaderResult, usize), Pa
         });
     }
 
-    // Parse: "name", effects=[...], min_level=L3)
-    // We extract the whole content between the first ( and matching )
-    // Simpler: find name in quotes, effects list, min_level
-    let rest = cur.remaining();
-    let full_rest = if let Some(end) = find_matching_paren(&rest) {
-        &rest[..end]
-    } else {
-        &rest[..]
-    };
-
-    let name = extract_quoted(full_rest).unwrap_or_default();
-
-    // Parse effects
-    let mut effects = Vec::new();
-    if let Some(effects_start) = full_rest.find("effects=[") {
-        let after_bracket = &full_rest[effects_start + 9..]; // after "effects=["
-        if let Some(close) = after_bracket.find(']') {
-            let inner = &after_bracket[..close];
-            for part in inner.split(',') {
-                let p = part.trim();
-                if let Some(s) = Scope::from_str(p) {
-                    effects.push(s);
-                }
-            }
-        }
-    }
-
-    // Parse min_level
-    let min_level = if let Some(ml_pos) = full_rest.find("min_level=") {
-        let after = &full_rest[ml_pos + 10..];
-        let level_str: String = after.chars().take_while(|c| c.is_alphanumeric()).collect();
-        Level::from_str(&level_str).unwrap_or(Level::L0)
-    } else {
-        Level::L0
-    };
-
-    // If no effects declared, infer from procs later; for now default
-    if effects.is_empty() {
-        // Some pipelines omit effects — allow all
-    }
-
-    Ok((HeaderResult { name, effects, min_level }, 1))
+    // Extract name from quoted string
+    let name = extract_quoted(line).unwrap_or_default();
+    Ok(name)
 }
 
 fn find_matching_paren(s: &str) -> Option<usize> {
@@ -260,8 +205,8 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
     let line = lines[idx];
     let line_num = idx + 1;
 
-    // .proc("name", level=L1, scope=Search)  or  .proc("name", level=L1)
-    let (name, level, scope) = parse_proc_header(line, line_num)?;
+    // .proc("name") — just the name, no level/scope
+    let name = extract_quoted(line).unwrap_or_default();
 
     idx += 1;
 
@@ -293,10 +238,8 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
 
         // .pick or .pick(by=...)
         if trimmed.starts_with(".pick") {
-            // Extract by=... if present
             if let Some(by_start) = trimmed.find("by=") {
                 let after = &trimmed[by_start + 3..];
-                // Strip quotes and trailing )
                 let by_val: String = after.chars()
                     .skip_while(|c| *c == '"' || *c == ' ')
                     .take_while(|c| *c != '"' && *c != ')' && *c != ',')
@@ -344,8 +287,6 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
 
     Ok((Proc {
         name,
-        level,
-        scope,
         plan,
         checks,
         deliver: is_deliver,
@@ -355,37 +296,10 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
     }, idx))
 }
 
-fn parse_proc_header(line: &str, line_num: usize) -> Result<(String, Level, Option<Scope>), ParseError> {
-    // .proc("name", level=L1, scope=Search)
-    let name = extract_quoted(line).unwrap_or_default();
-
-    let level = if let Some(pos) = line.find("level=") {
-        let after = &line[pos + 6..];
-        let level_str: String = after.chars().take_while(|c| c.is_alphanumeric()).collect();
-        Level::from_str(&level_str).unwrap_or(Level::L0)
-    } else {
-        Level::L0
-    };
-
-    let scope = if let Some(pos) = line.find("scope=") {
-        let after = &line[pos + 6..];
-        let scope_str: String = after.chars()
-            .skip_while(|c| *c == ' ')
-            .take_while(|c| c.is_alphanumeric())
-            .collect();
-        Scope::from_str(&scope_str)
-    } else {
-        None
-    };
-
-    Ok((name, level, scope))
-}
-
 // ── Parse .plan(...) block — extract impl entries ──
 fn parse_plan_block(lines: &[&str], start_idx: usize, proc_name: &str)
     -> Result<(Vec<Impl>, usize), ParseError>
 {
-    // Collect all text from .plan( to matching )
     let mut depth = 0i32;
     let mut buf = String::new();
     let mut idx = start_idx;
@@ -398,9 +312,7 @@ fn parse_plan_block(lines: &[&str], start_idx: usize, proc_name: &str)
             if c == ')' {
                 depth -= 1;
                 if started && depth == 0 {
-                    // End of .plan()
                     buf.push(c);
-                    // Remainder of this line after ) is outside .plan
                     break;
                 }
             }
@@ -411,17 +323,11 @@ fn parse_plan_block(lines: &[&str], start_idx: usize, proc_name: &str)
         if started && depth <= 0 { break; }
     }
 
-    // Now parse impl entries from buf
-    // Format: name -> body.cost(...) , name -> body.cost(...)
-    // Split by commas at depth 0 (not inside parens)
     let impls = parse_impl_entries(&buf, proc_name)?;
-
     Ok((impls, idx))
 }
 
 fn parse_impl_entries(text: &str, proc_name: &str) -> Result<Vec<Impl>, ParseError> {
-    // Split by " -> " to find impl name + body pairs
-    // Then split body by commas at depth 0 to separate entries
     let text = text.trim();
 
     // Remove leading ".plan(" prefix
@@ -435,8 +341,6 @@ fn parse_impl_entries(text: &str, proc_name: &str) -> Result<Vec<Impl>, ParseErr
     let inner = after_plan.trim_end();
     let inner = inner.strip_suffix(')').unwrap_or(inner).trim();
 
-    // Split into entries: each entry is "name -> body_with_cost"
-    // We split by commas that are at paren-depth 0 AND follow a complete "name -> body.cost(...)" unit
     let entries = split_impl_entries(inner);
 
     let mut impls = Vec::new();
@@ -444,21 +348,18 @@ fn parse_impl_entries(text: &str, proc_name: &str) -> Result<Vec<Impl>, ParseErr
         let entry = entry.trim();
         if entry.is_empty() { continue; }
 
-        // Find " -> " separator
         if let Some(arrow_pos) = find_arrow(entry) {
             let name = entry[..arrow_pos].trim().to_string();
-            let body_with_cost = entry[arrow_pos + 4..].trim(); // skip " -> "
+            let body_with_cost = entry[arrow_pos + 4..].trim();
 
-            // Parse .cost(...) from body
-            let (body_text, cost, retry, ensure, when, enabled, stub) =
+            let (body_text, cost, retry, ensure, when, enabled, stub, tags) =
                 extract_cost_and_modifiers(body_with_cost, &name);
 
-            // Extract @refs from body
             let refs = extract_refs(&body_text);
 
             impls.push(Impl {
                 name,
-                level: Level::L0, // will be set by proc level
+                tags,
                 cost,
                 enabled,
                 when,
@@ -469,14 +370,13 @@ fn parse_impl_entries(text: &str, proc_name: &str) -> Result<Vec<Impl>, ParseErr
                 ensure,
             });
         } else {
-            // No arrow — single body (unnamed). Use body as both name and content.
-            let (body_text, cost, retry, ensure, when, enabled, stub) =
+            let (body_text, cost, retry, ensure, when, enabled, stub, tags) =
                 extract_cost_and_modifiers(entry, "unnamed");
 
             let refs = extract_refs(&body_text);
             impls.push(Impl {
                 name: format!("path_{}", impls.len() + 1),
-                level: Level::L0,
+                tags,
                 cost,
                 enabled,
                 when,
@@ -489,10 +389,7 @@ fn parse_impl_entries(text: &str, proc_name: &str) -> Result<Vec<Impl>, ParseErr
         }
     }
 
-    // Set impl levels from proc level — we don't have it here, set to L0
-    // (typecheck will handle level validation)
     let _ = proc_name;
-
     Ok(impls)
 }
 
@@ -501,7 +398,6 @@ fn find_arrow(s: &str) -> Option<usize> {
 }
 
 fn split_impl_entries(text: &str) -> Vec<String> {
-    // Split by commas at paren depth 0, but only after a complete impl unit
     let mut entries = Vec::new();
     let mut depth = 0i32;
     let mut current = String::new();
@@ -514,7 +410,7 @@ fn split_impl_entries(text: &str) -> Vec<String> {
                 entries.push(current.clone());
                 current.clear();
             }
-            '\n' => { current.push(' '); } // flatten newlines
+            '\n' => { current.push(' '); }
             _ => { current.push(c); }
         }
     }
@@ -524,11 +420,12 @@ fn split_impl_entries(text: &str) -> Vec<String> {
     entries
 }
 
+/// Extract .cost(), .retry(), .ensure(), .when(), .disabled, .stub, and .tags(#a, #b)
+/// Returns (body_text, cost, retry, ensure, when, enabled, stub, tags)
 fn extract_cost_and_modifiers(
     text: &str,
     _impl_name: &str,
-) -> (String, Cost, usize, Vec<Check>, Option<String>, bool, bool) {
-    // Returns (body_text, cost, retry, ensure, when, enabled, stub)
+) -> (String, Cost, usize, Vec<Check>, Option<String>, bool, bool, BTreeSet<String>) {
     let mut cost = Cost::default();
     let mut body = text.trim().to_string();
     let mut retry = 0;
@@ -536,12 +433,28 @@ fn extract_cost_and_modifiers(
     let mut when = None;
     let mut enabled = true;
     let mut stub = false;
+    let mut tags = BTreeSet::new();
+
+    // Extract .tags(#a, #b, ...) or .tags(a, b)
+    if let Some(tags_pos) = body.find(".tags(") {
+        let after = &body[tags_pos..];
+        if let Some(close) = find_matching_paren(after) {
+            let tags_inner = &after[6..close]; // skip ".tags("
+            for part in tags_inner.split(',') {
+                let tag = part.trim().trim_start_matches('#').trim().to_string();
+                if !tag.is_empty() {
+                    tags.insert(tag);
+                }
+            }
+            body = format!("{}{}", &body[..tags_pos], &after[close + 1..]);
+        }
+    }
 
     // Extract .cost(latency=N, risk=N, tokens=N, money=N)
     if let Some(cost_pos) = body.find(".cost(") {
         let after = &body[cost_pos..];
         if let Some(close) = find_matching_paren(after) {
-            let cost_inner = &after[6..close]; // skip ".cost("
+            let cost_inner = &after[6..close];
             for field in cost_inner.split(',') {
                 let field = field.trim();
                 if let Some(eq) = field.find('=') {
@@ -556,7 +469,6 @@ fn extract_cost_and_modifiers(
                     }
                 }
             }
-            // Remove .cost(...) from body
             body = format!("{}{}", &body[..cost_pos], &after[close + 1..]);
         }
     }
@@ -580,7 +492,6 @@ fn extract_cost_and_modifiers(
             let prefix = ".ensure(";
             let after = &body[e_pos..];
             if let Some(close) = find_matching_paren(after) {
-                // Use char_indices to find the true close position (avoid mid-multibyte panics)
                 let char_close = after.char_indices().nth(close).map(|(b, _)| b).unwrap_or(after.len());
                 let inner_start = prefix.len();
                 if char_close >= inner_start {
@@ -609,19 +520,17 @@ fn extract_cost_and_modifiers(
         }
     }
 
-    // Disabled?
     if body.contains(".disabled") {
         enabled = false;
         body = body.replace(".disabled", "");
     }
 
-    // Stub?
     if body.contains(".stub") {
         stub = true;
         body = body.replace(".stub", "");
     }
 
-    (body.trim().to_string(), cost, retry, ensure, when, enabled, stub)
+    (body.trim().to_string(), cost, retry, ensure, when, enabled, stub, tags)
 }
 
 fn extract_refs(body: &str) -> Vec<String> {
@@ -655,11 +564,9 @@ fn extract_refs(body: &str) -> Vec<String> {
 }
 
 fn parse_check_line(line: &str) -> Result<Check, ParseError> {
-    // .check(result => has_results, "message")
     let after = &line[line.find('(').unwrap_or(6) + 1..];
     let inner = after.trim_end_matches(')').trim();
 
-    // Split: condition part, message part (last quoted string)
     let msg = extract_last_quoted(inner).unwrap_or_default();
     let cond = if let Some(pos) = inner.rfind(',') {
         inner[..pos].trim().to_string()
@@ -671,7 +578,6 @@ fn parse_check_line(line: &str) -> Result<Check, ParseError> {
 }
 
 fn parse_foreach_line(line: &str) -> Result<(String, String), ParseError> {
-    // .foreach(source=@decompose, var=subtask)
     let after = &line[line.find('(').unwrap_or(9) + 1..];
     let inner = after.trim_end_matches(')').trim();
 
@@ -682,7 +588,6 @@ fn parse_foreach_line(line: &str) -> Result<(String, String), ParseError> {
         let part = part.trim();
         if part.starts_with("source=") {
             let val = &part[7..];
-            // Strip @ and quotes
             src = val.trim_matches(|c| c == '@' || c == '"' || c == ' ').to_string();
         } else if part.starts_with("var=") {
             let val = &part[4..];
@@ -730,25 +635,14 @@ mod tests {
     // ── Header parsing ──
     #[test]
     fn parse_simple_header() {
-        let input = r#"Pipeline("test", effects=[Search, File], min_level=L3)"#;
+        let input = r#"Pipeline("test")"#;
         let pl = parse_pipeline(input).unwrap();
         assert_eq!(pl.name, "test");
-        assert_eq!(pl.min_level, Level::L3);
-        assert!(pl.effects.contains(&Scope::Search));
-        assert!(pl.effects.contains(&Scope::File));
-    }
-
-    #[test]
-    fn parse_header_no_effects() {
-        let input = r#"Pipeline("bare", min_level=L1)"#;
-        let pl = parse_pipeline(input).unwrap();
-        assert_eq!(pl.name, "bare");
-        assert!(pl.effects.is_empty());
     }
 
     #[test]
     fn parse_header_lowercase() {
-        let input = r#"pipeline("lower", effects=[Search], min_level=L0)"#;
+        let input = r#"pipeline("lower")"#;
         let pl = parse_pipeline(input).unwrap();
         assert_eq!(pl.name, "lower");
     }
@@ -760,15 +654,15 @@ mod tests {
         assert!(parse_pipeline("\n\n// comment only").is_err());
     }
 
-    // ── Single proc ──
+    // ── Single proc with tags ──
     #[test]
-    fn parse_single_proc() {
-        let input = r#"Pipeline("t", effects=[File], min_level=L4)
+    fn parse_single_proc_with_tags() {
+        let input = r#"Pipeline("t")
 
-.proc("fetch", level=L0, scope=File)
+.proc("fetch")
   .plan(
-    cheap  -> read("input.txt").cost(latency=10, risk=0, tokens=0, money=0),
-    pricey -> read("input.txt").cost(latency=500, risk=0, tokens=0, money=0)
+    cheap  -> read("input.txt").tags(#file).cost(latency=10, risk=0, tokens=0, money=0),
+    pricey -> read("input.txt").tags(#file).cost(latency=500, risk=0, tokens=0, money=0)
   )
   .pick(by=cost + history)
 "#;
@@ -776,29 +670,75 @@ mod tests {
         assert_eq!(pl.procs.len(), 1);
         let p = &pl.procs[0];
         assert_eq!(p.name, "fetch");
-        assert_eq!(p.level, Level::L0);
-        assert_eq!(p.scope, Some(Scope::File));
         assert_eq!(p.plan.len(), 2);
         assert_eq!(p.plan[0].name, "cheap");
         assert_eq!(p.plan[0].cost.latency, 10);
+        assert!(p.plan[0].tags.contains("file"));
         assert_eq!(p.plan[1].name, "pricey");
         assert_eq!(p.plan[1].cost.latency, 500);
+        assert!(p.plan[1].tags.contains("file"));
         assert_eq!(p.pick_by, "cost + history");
+    }
+
+    // ── Multiple tags on one impl ──
+    #[test]
+    fn parse_multiple_tags() {
+        let input = r#"Pipeline("t")
+
+.proc("search")
+  .plan(
+    web -> web_search(query="AI").tags(#search, #network).cost(latency=200, risk=0.1, tokens=0, money=0)
+  )
+"#;
+        let pl = parse_pipeline(input).unwrap();
+        let tags = &pl.procs[0].plan[0].tags;
+        assert_eq!(tags.len(), 2);
+        assert!(tags.contains("search"));
+        assert!(tags.contains("network"));
+    }
+
+    // ── No tags is OK ──
+    #[test]
+    fn parse_no_tags() {
+        let input = r#"Pipeline("t")
+
+.proc("p")
+  .plan(
+    r -> read("x").cost(latency=1, risk=0, tokens=0, money=0)
+  )
+"#;
+        let pl = parse_pipeline(input).unwrap();
+        assert!(pl.procs[0].plan[0].tags.is_empty());
+    }
+
+    // ── Tags without # prefix ──
+    #[test]
+    fn parse_tags_without_hash() {
+        let input = r#"Pipeline("t")
+
+.proc("p")
+  .plan(
+    r -> read("x").tags(file, network).cost(latency=1, risk=0, tokens=0, money=0)
+  )
+"#;
+        let pl = parse_pipeline(input).unwrap();
+        assert!(pl.procs[0].plan[0].tags.contains("file"));
+        assert!(pl.procs[0].plan[0].tags.contains("network"));
     }
 
     // ── Multiple procs ──
     #[test]
     fn parse_two_procs() {
-        let input = r#"Pipeline("t", effects=[Search, File], min_level=L3)
+        let input = r#"Pipeline("t")
 
-.proc("search", level=L0, scope=Search)
+.proc("search")
   .plan(
-    web -> web_search(query="{topic}").cost(latency=200, risk=0.1, tokens=0, money=0)
+    web -> web_search(query="{topic}").tags(#search).cost(latency=200, risk=0.1, tokens=0, money=0)
   )
 
-.proc("save", level=L1, scope=File)
+.proc("save")
   .plan(
-    write -> write(to="out.txt", content=@search).cost(latency=5, risk=0, tokens=0, money=0)
+    write -> write(to="out.txt", content=@search).tags(#file).cost(latency=5, risk=0, tokens=0, money=0)
   )
 "#;
         let pl = parse_pipeline(input).unwrap();
@@ -810,9 +750,9 @@ mod tests {
     // ── Deliver ──
     #[test]
     fn parse_deliver() {
-        let input = r#"Pipeline("t", effects=[Deliver], min_level=L0)
+        let input = r#"Pipeline("t")
 
-.proc("output", level=L0)
+.proc("output")
   .deliver(media=[@search])
 "#;
         let pl = parse_pipeline(input).unwrap();
@@ -822,17 +762,17 @@ mod tests {
     // ── Foreach ──
     #[test]
     fn parse_foreach() {
-        let input = r#"Pipeline("t", effects=[File], min_level=L0)
+        let input = r#"Pipeline("t")
 
-.proc("items", level=L0, scope=File)
+.proc("items")
   .plan(
-    read -> read("list.txt").cost(latency=1, risk=0, tokens=0, money=0)
+    read -> read("list.txt").tags(#file).cost(latency=1, risk=0, tokens=0, money=0)
   )
 
-.proc("process", level=L0)
+.proc("process")
   .foreach(source=@items, var=subtask)
   .plan(
-    handle -> write(to="{subtask}.txt", content="done").cost(latency=1, risk=0, tokens=0, money=0)
+    handle -> write(to="{subtask}.txt", content="done").tags(#file).cost(latency=1, risk=0, tokens=0, money=0)
   )
 "#;
         let pl = parse_pipeline(input).unwrap();
@@ -843,11 +783,11 @@ mod tests {
     // ── Check ──
     #[test]
     fn parse_check() {
-        let input = r#"Pipeline("t", effects=[Search], min_level=L0)
+        let input = r#"Pipeline("t")
 
-.proc("s", level=L0, scope=Search)
+.proc("s")
   .plan(
-    web -> web_search(query="AI").cost(latency=100, risk=0.1, tokens=0, money=0)
+    web -> web_search(query="AI").tags(#search).cost(latency=100, risk=0.1, tokens=0, money=0)
   )
   .check(result => has_results, "no search results")
 "#;
@@ -859,16 +799,16 @@ mod tests {
     // ── Refs extraction ──
     #[test]
     fn parse_refs_from_body() {
-        let input = r#"Pipeline("t", effects=[File], min_level=L0)
+        let input = r#"Pipeline("t")
 
-.proc("a", level=L0, scope=File)
+.proc("a")
   .plan(
-    r -> read("x.txt").cost(latency=1, risk=0, tokens=0, money=0)
+    r -> read("x.txt").tags(#file).cost(latency=1, risk=0, tokens=0, money=0)
   )
 
-.proc("b", level=L0)
+.proc("b")
   .plan(
-    merge -> merge(@a, @a).cost(latency=1, risk=0, tokens=0, money=0)
+    merge -> merge(@a, @a).tags(#file).cost(latency=1, risk=0, tokens=0, money=0)
   )
 "#;
         let pl = parse_pipeline(input).unwrap();
@@ -878,12 +818,12 @@ mod tests {
     // ── Modifiers: disabled, stub, retry, when ──
     #[test]
     fn parse_disabled_impl() {
-        let input = r#"Pipeline("t", effects=[File], min_level=L0)
+        let input = r#"Pipeline("t")
 
-.proc("p", level=L0, scope=File)
+.proc("p")
   .plan(
-    on  -> read("a.txt").cost(latency=1, risk=0, tokens=0, money=0),
-    off -> read("b.txt").cost(latency=1, risk=0, tokens=0, money=0).disabled
+    on  -> read("a.txt").tags(#file).cost(latency=1, risk=0, tokens=0, money=0),
+    off -> read("b.txt").tags(#file).cost(latency=1, risk=0, tokens=0, money=0).disabled
   )
 "#;
         let pl = parse_pipeline(input).unwrap();
@@ -893,11 +833,11 @@ mod tests {
 
     #[test]
     fn parse_stub_impl() {
-        let input = r#"Pipeline("t", effects=[File], min_level=L0)
+        let input = r#"Pipeline("t")
 
-.proc("p", level=L0, scope=File)
+.proc("p")
   .plan(
-    fake -> read("x").cost(latency=0, risk=0, tokens=0, money=0).stub
+    fake -> read("x").tags(#file).cost(latency=0, risk=0, tokens=0, money=0).stub
   )
 "#;
         let pl = parse_pipeline(input).unwrap();
@@ -906,11 +846,11 @@ mod tests {
 
     #[test]
     fn parse_retry_impl() {
-        let input = r#"Pipeline("t", effects=[File], min_level=L0)
+        let input = r#"Pipeline("t")
 
-.proc("p", level=L0, scope=File)
+.proc("p")
   .plan(
-    r -> read("x").cost(latency=1, risk=0, tokens=0, money=0).retry(n=3)
+    r -> read("x").tags(#file).cost(latency=1, risk=0, tokens=0, money=0).retry(n=3)
   )
 "#;
         let pl = parse_pipeline(input).unwrap();
@@ -919,12 +859,12 @@ mod tests {
 
     #[test]
     fn parse_when_impl() {
-        let input = r#"Pipeline("t", effects=[File], min_level=L0)
+        let input = r#"Pipeline("t")
 
-.proc("p", level=L0, scope=File)
+.proc("p")
   .plan(
-    a -> read("a").cost(latency=1, risk=0, tokens=0, money=0),
-    b -> read("b").cost(latency=1, risk=0, tokens=0, money=0).when(mode == "deep")
+    a -> read("a").tags(#file).cost(latency=1, risk=0, tokens=0, money=0),
+    b -> read("b").tags(#file).cost(latency=1, risk=0, tokens=0, money=0).when(mode == "deep")
   )
 "#;
         let pl = parse_pipeline(input).unwrap();
@@ -935,13 +875,13 @@ mod tests {
     #[test]
     fn parse_with_comments() {
         let input = r#"// This is a comment
-Pipeline("t", effects=[File], min_level=L0)
+Pipeline("t")
 
 // Another comment
-.proc("p", level=L0, scope=File)
+.proc("p")
   .plan(
     // inline comment
-    r -> read("x").cost(latency=1, risk=0, tokens=0, money=0)
+    r -> read("x").tags(#file).cost(latency=1, risk=0, tokens=0, money=0)
   )
 "#;
         let pl = parse_pipeline(input).unwrap();
@@ -952,11 +892,11 @@ Pipeline("t", effects=[File], min_level=L0)
     // ── ensure modifier ──
     #[test]
     fn parse_ensure_modifier() {
-        let input = r#"Pipeline("t", effects=[Search], min_level=L0)
+        let input = r#"Pipeline("t")
 
-.proc("p", level=L0, scope=Search)
+.proc("p")
   .plan(
-    s -> web_search(query="AI").cost(latency=100, risk=0.1, tokens=0, money=0)
+    s -> web_search(query="AI").tags(#search).cost(latency=100, risk=0.1, tokens=0, money=0)
       .ensure(result => not_empty, "empty result")
   )
 "#;
@@ -968,15 +908,38 @@ Pipeline("t", effects=[File], min_level=L0)
     // ── pick default ──
     #[test]
     fn parse_pick_default() {
-        let input = r#"Pipeline("t", effects=[File], min_level=L0)
+        let input = r#"Pipeline("t")
 
-.proc("p", level=L0, scope=File)
+.proc("p")
   .plan(
-    r -> read("x").cost(latency=1, risk=0, tokens=0, money=0)
+    r -> read("x").tags(#file).cost(latency=1, risk=0, tokens=0, money=0)
   )
   .pick
 "#;
         let pl = parse_pipeline(input).unwrap();
         assert_eq!(pl.procs[0].pick_by, "cost + history");
+    }
+
+    // ── computed_tags from parsed pipeline ──
+    #[test]
+    fn computed_tags_from_parsed() {
+        let input = r#"Pipeline("t")
+
+.proc("search")
+  .plan(
+    web -> web_search(query="AI").tags(#search, #network).cost(latency=200, risk=0.1, tokens=0, money=0)
+  )
+
+.proc("save")
+  .plan(
+    out -> write(to="out.txt", content=@search).tags(#file).cost(latency=5, risk=0, tokens=0, money=0)
+  )
+"#;
+        let pl = parse_pipeline(input).unwrap();
+        let tags = pl.computed_tags();
+        assert_eq!(tags.len(), 3);
+        assert!(tags.contains("search"));
+        assert!(tags.contains("network"));
+        assert!(tags.contains("file"));
     }
 }

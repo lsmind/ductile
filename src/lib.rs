@@ -79,20 +79,25 @@ fn run(path: &str, topic: &str, params: Option<BTreeMap<String, String>>) -> PyR
 fn parse(path: &str) -> PyResult<String> {
     let pl = parse_pipeline_file(path)
         .map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
+    let tags = pl.computed_tags();
+    let tag_str: Vec<String> = tags.iter().map(|t| format!("#{}", t)).collect();
     let mut out = format!(
-        "Pipeline: {}\nEffects: {:?}\nMin level: {}\n\n",
-        pl.name, pl.effects, pl.min_level
+        "Pipeline: {}\nTags: {}\n\n",
+        pl.name, tag_str.join(", ")
     );
     for proc in &pl.procs {
         out.push_str(&format!(
-            "  Proc: {} {} ({} impls){}\n",
-            proc.name, proc.level, proc.plan.len(),
+            "  Proc: {} ({} impls){}\n",
+            proc.name, proc.plan.len(),
             if proc.deliver { " [deliver]" } else { "" }
         ));
         for imp in &proc.plan {
+            let imp_tags: Vec<String> = imp.tags.iter().map(|t| format!("#{}", t)).collect();
             out.push_str(&format!(
-                "    Impl: {} cost(latency={}, risk={}, tokens={}, money={})\n",
-                imp.name, imp.cost.latency, imp.cost.risk, imp.cost.tokens, imp.cost.money
+                "    Impl: {}{} cost(latency={}, risk={}, tokens={}, money={})\n",
+                imp.name,
+                if !imp_tags.is_empty() { format!(" [{}]", imp_tags.join(", ")) } else { String::new() },
+                imp.cost.latency, imp.cost.risk, imp.cost.tokens, imp.cost.money
             ));
         }
     }
