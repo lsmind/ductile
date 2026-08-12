@@ -1,0 +1,25 @@
+[package]
+name = "ductile"
+version = "0.3.0"
+edition = "2021"
+authors = ["Ductile Contributors"]
+description = "A declarative pipeline DSL with e-graph multi-path selection"
+license = "MIT"
+repository = "https://github.com/ductile-pipeline/ductile"
+keywords = ["pipeline", "dsl", "egraph", "workflow"]
+categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+name = "ductile"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "ductile"
+path = "src/bin/main.rs"
+
+[dependencies]
+pyo3 = { version = "0.29", features = ["extension-module"] }
+
+[profile.release]
+opt-level = 3
+lto = true

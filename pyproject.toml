@@ -1,0 +1,22 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "ductile"
+version = "0.3.0"
+description = "A declarative pipeline DSL with e-graph multi-path selection"
+license = "MIT"
+requires-python = ">=3.8"
+keywords = ["pipeline", "dsl", "egraph", "workflow"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Software Development :: Build Tools",
+]
+
+[project.scripts]
+ductile = "ductile:cli_main"
+
+[tool.maturin]
+module-name = "ductile"
