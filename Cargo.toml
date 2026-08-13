@@ -1,11 +1,11 @@
 [package]
 name = "ductile"
-version = "0.3.0"
+version = "0.4.1"
 edition = "2021"
-authors = ["Ductile Contributors"]
+authors = ["lsmind"]
 description = "A declarative pipeline DSL with e-graph multi-path selection"
 license = "MIT"
-repository = "https://github.com/ductile-pipeline/ductile"
+repository = "https://github.com/lsmind/ductile"
 keywords = ["pipeline", "dsl", "egraph", "workflow"]
 categories = ["command-line-utilities", "development-tools"]
 

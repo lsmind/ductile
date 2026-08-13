@@ -113,9 +113,9 @@ pub fn parse_pipeline(input: &str) -> Result<Pipeline, ParseError> {
         return Err(ParseError { line: 1, col: 1, msg: "empty input".into(), line_text: String::new() });
     }
 
-    // Parse header: Pipeline("name")
+    // Parse header: Pipeline("name") or Pipeline("name", "desc")
     let header_line = lines[idx];
-    let name = parse_header(header_line, idx + 1)?;
+    let (name, description) = parse_header(header_line, idx + 1)?;
 
     idx += 1;
 
@@ -144,12 +144,13 @@ pub fn parse_pipeline(input: &str) -> Result<Pipeline, ParseError> {
 
     Ok(Pipeline {
         name,
+        description,
         procs,
         weights: Weights::default(),
     })
 }
 
-fn parse_header(line: &str, line_num: usize) -> Result<String, ParseError> {
+fn parse_header(line: &str, line_num: usize) -> Result<(String, String), ParseError> {
     let lower: String = line.to_lowercase();
     if lower.trim_start().starts_with("pipeline(") || lower.trim_start().starts_with("pipeline (") {
         // OK
@@ -160,9 +161,33 @@ fn parse_header(line: &str, line_num: usize) -> Result<String, ParseError> {
         });
     }
 
-    // Extract name from quoted string
-    let name = extract_quoted(line).unwrap_or_default();
-    Ok(name)
+    // Extract quoted strings: first is name, optional second is description
+    let quoted = extract_all_quoted(line);
+    let name = quoted.first().cloned().unwrap_or_default();
+    let description = quoted.get(1).cloned().unwrap_or_default();
+    Ok((name, description))
+}
+
+fn extract_all_quoted(s: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let bytes: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == '\"' {
+            let start = i + 1;
+            let mut end = start;
+            while end < bytes.len() && bytes[end] != '\"' {
+                end += 1;
+            }
+            if end <= bytes.len() {
+                result.push(bytes[start..end].iter().collect());
+            }
+            i = end + 1;
+        } else {
+            i += 1;
+        }
+    }
+    result
 }
 
 fn find_matching_paren(s: &str) -> Option<usize> {
@@ -203,7 +228,7 @@ fn extract_quoted(s: &str) -> Option<String> {
 fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseError> {
     let mut idx = start_idx;
     let line = lines[idx];
-    let line_num = idx + 1;
+    let _line_num = idx + 1;
 
     // .proc("name") — just the name, no level/scope
     let name = extract_quoted(line).unwrap_or_default();
@@ -216,14 +241,22 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
     let mut foreach_src: Option<String> = None;
     let mut foreach_var = String::new();
     let mut pick_by = "cost + history".to_string();
+    let mut description = String::new();
 
-    // Parse proc body: .plan(...) .pick .check(...) .foreach(...) .deliver(...)
+    // Parse proc body: .plan(...) .pick .check(...) .foreach(...) .deliver(...) .desc(...)
     while idx < lines.len() {
         let raw = lines[idx];
         let trimmed = raw.trim();
 
         // Skip blank lines and comments inside proc
         if trimmed.is_empty() || trimmed.starts_with("//") {
+            idx += 1;
+            continue;
+        }
+
+        // .desc("text") — proc description
+        if trimmed.starts_with(".desc(") || trimmed.starts_with(".desc (") {
+            description = extract_quoted(trimmed).unwrap_or_default();
             idx += 1;
             continue;
         }
@@ -287,6 +320,7 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
 
     Ok((Proc {
         name,
+        description: description.clone(),
         plan,
         checks,
         deliver: is_deliver,
@@ -368,6 +402,7 @@ fn parse_impl_entries(text: &str, proc_name: &str) -> Result<Vec<Impl>, ParseErr
                 stub,
                 retry,
                 ensure,
+                description: String::new(),
             });
         } else {
             let (body_text, cost, retry, ensure, when, enabled, stub, tags) =
@@ -385,6 +420,7 @@ fn parse_impl_entries(text: &str, proc_name: &str) -> Result<Vec<Impl>, ParseErr
                 stub,
                 retry,
                 ensure,
+                description: String::new(),
             });
         }
     }

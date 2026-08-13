@@ -112,7 +112,7 @@ fn exec_foreach_proc(
     proc: &Proc,
     src_proc: &str,
     topic: &str,
-    params: &BTreeMap<String, String>,
+    _params: &BTreeMap<String, String>,
     results: &BTreeMap<String, Value>,
     pl: &Pipeline,
 ) -> Result<Value, String> {
@@ -339,7 +339,7 @@ fn extract_first_string(body: &str) -> String {
 
 // ── Built-in executors ──
 
-fn exec_search(impl_: &Impl, topic: &str, body: &str, results: &BTreeMap<String, Value>, is_mcp: bool) -> Result<Value, String> {
+fn exec_search(_impl_: &Impl, topic: &str, body: &str, results: &BTreeMap<String, Value>, is_mcp: bool) -> Result<Value, String> {
     let query = extract_string_arg("query", body);
     let resolved = resolve_vars(&query, topic, results);
     let func_name = if is_mcp { "mcp_search" } else { "web_search" };
@@ -364,7 +364,7 @@ fn exec_search(impl_: &Impl, topic: &str, body: &str, results: &BTreeMap<String,
     }
 }
 
-fn exec_llm(impl_: &Impl, topic: &str, body: &str, results: &BTreeMap<String, Value>) -> Result<Value, String> {
+fn exec_llm(_impl_: &Impl, topic: &str, body: &str, results: &BTreeMap<String, Value>) -> Result<Value, String> {
     let prompt = extract_string_arg("input", body);
     let template = extract_string_arg("template", body);
     let count = extract_string_arg("count", body);
@@ -411,7 +411,7 @@ fn exec_merge(impl_: &Impl, body: &str, results: &BTreeMap<String, Value>) -> Re
     Ok(Value::Text(merged))
 }
 
-fn exec_write(impl_: &Impl, topic: &str, body: &str, results: &BTreeMap<String, Value>) -> Result<Value, String> {
+fn exec_write(_impl_: &Impl, topic: &str, body: &str, results: &BTreeMap<String, Value>) -> Result<Value, String> {
     let to_path = extract_string_arg("to", body);
     let content = extract_string_arg("content", body);
     let resolved_path = resolve_vars(&to_path, topic, results);
@@ -428,7 +428,7 @@ fn exec_write(impl_: &Impl, topic: &str, body: &str, results: &BTreeMap<String, 
     Ok(Value::File(expanded))
 }
 
-fn exec_read(impl_: &Impl, body: &str) -> Result<Value, String> {
+fn exec_read(_impl_: &Impl, body: &str) -> Result<Value, String> {
     let path = extract_string_arg("from", body);
     let path = if path.is_empty() { extract_first_string(body) } else { path };
 
@@ -445,7 +445,7 @@ fn exec_read(impl_: &Impl, body: &str) -> Result<Value, String> {
     Ok(Value::Text(content))
 }
 
-fn exec_run(impl_: &Impl, topic: &str, body: &str, results: &BTreeMap<String, Value>) -> Result<Value, String> {
+fn exec_run(_impl_: &Impl, topic: &str, body: &str, results: &BTreeMap<String, Value>) -> Result<Value, String> {
     let cmd_raw = extract_first_string(body);
     let cmd = resolve_vars(&cmd_raw, topic, results);
     eprintln!("    -> run: {}", cmd);
@@ -1083,6 +1083,7 @@ mod tests {
             stub: false,
             retry: 0,
             ensure: vec![],
+            description: String::new(),
         }
     }
 
@@ -1177,7 +1178,7 @@ mod tests {
     fn exec_pipeline_stub_proc() {
         let pl = Pipeline {
             name: "stub_test".into(),
-            weights: Weights::default(),
+            weights: Weights::default(), description: String::new(),
             procs: vec![Proc {
                 name: "p".into(),
                 plan: vec![Impl {
@@ -1191,12 +1192,14 @@ mod tests {
                     stub: true,
                     retry: 0,
                     ensure: vec![],
+                    description: String::new(),
                 }],
                 checks: vec![],
                 deliver: false,
                 foreach: None,
                 foreach_var: String::new(),
                 pick_by: "cost".into(),
+                description: String::new(),
             }],
         };
         let params = BTreeMap::new();

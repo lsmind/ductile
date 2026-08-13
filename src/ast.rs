@@ -64,6 +64,7 @@ impl Weights {
 #[derive(Debug, Clone)]
 pub struct Impl {
     pub name: String,
+    pub description: String,          // v0.4.1: human-readable description (.desc("..."))
     pub tags: BTreeSet<String>,       // v0.4: replaces level + scope
     pub cost: Cost,
     pub enabled: bool,
@@ -84,6 +85,7 @@ pub struct Check {
 #[derive(Debug, Clone)]
 pub struct Proc {
     pub name: String,
+    pub description: String,          // v0.4.1: human-readable description (.desc("..."))
     pub plan: Vec<Impl>,
     pub checks: Vec<Check>,
     pub deliver: bool,
@@ -95,6 +97,7 @@ pub struct Proc {
 #[derive(Debug, Clone)]
 pub struct Pipeline {
     pub name: String,
+    pub description: String,          // v0.4.1: optional Pipeline("name", "desc")
     pub procs: Vec<Proc>,
     pub weights: Weights,
 }
@@ -112,6 +115,17 @@ impl Pipeline {
         }
         tags
     }
+}
+
+/// Compute tags for a single proc: union of all its impl tags.
+pub fn proc_tags(proc: &Proc) -> BTreeSet<String> {
+    let mut tags = BTreeSet::new();
+    for impl_ in &proc.plan {
+        for t in &impl_.tags {
+            tags.insert(t.clone());
+        }
+    }
+    tags
 }
 
 // ── §11 Status / Record ──
@@ -253,9 +267,11 @@ mod tests {
     fn computed_tags_union_of_impl_tags() {
         let pl = Pipeline {
             name: "test".into(),
+            description: String::new(),
             procs: vec![
                 Proc {
                     name: "a".into(),
+                    description: String::new(),
                     plan: vec![
                         Impl { name: "x".into(), tags: mk_tags(&["search", "network"]), ..default_impl() },
                     ],
@@ -267,6 +283,7 @@ mod tests {
                 },
                 Proc {
                     name: "b".into(),
+                    description: String::new(),
                     plan: vec![
                         Impl { name: "y".into(), tags: mk_tags(&["file", "network"]), ..default_impl() },
                     ],
@@ -290,9 +307,11 @@ mod tests {
     fn computed_tags_empty_when_no_tags() {
         let pl = Pipeline {
             name: "bare".into(),
+            description: String::new(),
             procs: vec![
                 Proc {
                     name: "a".into(),
+                    description: String::new(),
                     plan: vec![Impl { name: "x".into(), ..default_impl() }],
                     checks: vec![],
                     deliver: false,
@@ -309,6 +328,7 @@ mod tests {
     fn default_impl() -> Impl {
         Impl {
             name: String::new(),
+            description: String::new(),
             tags: BTreeSet::new(),
             cost: Cost::default(),
             enabled: true,

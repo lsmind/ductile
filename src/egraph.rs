@@ -138,19 +138,20 @@ mod tests {
                     stub: false,
                     retry: 0,
                     ensure: vec![],
+                    description: String::new(),
                 })
                 .collect::<Vec<_>>(),
             checks: vec![],
             deliver: false,
             foreach: None,
             foreach_var: String::new(),
-            pick_by: "cost".into(),
+            pick_by: "cost".into(), description: String::new(),
         }).collect();
 
         Pipeline {
             name: "test".into(),
             procs,
-            weights: Weights::default(),
+            weights: Weights::default(), description: String::new(),
         }
     }
 
@@ -233,7 +234,7 @@ mod tests {
         let pl = Pipeline {
             name: "empty".into(),
             procs: vec![],
-            weights: Weights::default(),
+            weights: Weights::default(), description: String::new(),
         };
         let eg = build_egraph(&pl);
         assert!(eg.nodes.is_empty());

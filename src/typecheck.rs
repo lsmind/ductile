@@ -66,7 +66,7 @@ mod tests {
         Pipeline {
             name: "test".into(),
             procs,
-            weights: Weights::default(),
+            weights: Weights::default(), description: String::new(),
         }
     }
 
@@ -78,7 +78,7 @@ mod tests {
             deliver: false,
             foreach: None,
             foreach_var: String::new(),
-            pick_by: "cost".into(),
+            pick_by: "cost".into(), description: String::new(),
         }
     }
 
@@ -94,6 +94,7 @@ mod tests {
             stub: false,
             retry: 0,
             ensure: vec![],
+            description: String::new(),
         }
     }
 
