@@ -30,10 +30,7 @@ fn read_current_version(pipeline_name: &str) -> usize {
         return 0;
     }
     let content = fs::read_to_string(&meta).unwrap_or_default();
-    content
-        .lines()
-        .filter(|l| l.starts_with('v'))
-        .count()
+    content.lines().filter(|l| l.starts_with('v')).count()
 }
 
 pub fn save_version(pipeline_name: &str, content: &str, change: &str) -> usize {
@@ -119,6 +116,11 @@ mod tests {
         let dir = version_dir("__test_version");
         assert!(dir.exists());
         // Cleanup
-        let _ = fs::remove_dir_all(version_dir("__test_version").parent().unwrap().join("__test_version"));
+        let _ = fs::remove_dir_all(
+            version_dir("__test_version")
+                .parent()
+                .unwrap()
+                .join("__test_version"),
+        );
     }
 }

@@ -1,0 +1,53 @@
+// 展示 .desc() / .tags() / .retry() / .when() / .ensure() / .foreach() / .stub() 全套语法
+Pipeline("feature_demo", "全语法演示")
+
+  .proc("acquire")
+    .desc("数据采集")
+    .plan(
+      api -> run("echo '{topic} data'")
+        .tags(#search, #api)
+        .desc("API 采集")
+        .retry(n=2)
+        .ensure(result => not_empty, "API 返回空"),
+      cache -> read(from="/tmp/ductile_cache.txt")
+        .tags(#search, #file)
+        .desc("本地缓存兜底")
+        .when(fallback == "true")
+    )
+    .check(result => has_items, "采集结果太少")
+
+  .proc("process_each")
+    .desc("逐条处理")
+    .foreach(source=@acquire, var=item)
+    .plan(
+      p1 -> run("echo 'processing: {item}'")
+        .tags(#llm, #parse)
+        .desc("逐条处理")
+    )
+
+  .proc("skip_me")
+    .desc("被禁用的节点")
+    .plan(
+      s1 -> run("echo 'should not run'")
+        .tags(#skip, #test)
+        .disabled
+    )
+
+  .proc("stub_me")
+    .desc("桩节点")
+    .plan(
+      st1 -> run("echo 'real call'")
+        .tags(#external, #expensive)
+        .stub
+    )
+
+  .proc("merge_results")
+    .desc("合并结果")
+    .plan(
+      m1 -> merge(@process_each, @stub_me)
+        .tags(#merge, #combine)
+        .desc("合并")
+    )
+
+  .proc("deliver")
+    .deliver(@merge_results)

@@ -123,35 +123,41 @@ mod tests {
     use super::*;
 
     fn mk_pipeline_with_procs(proc_names: &[&str], refs: &[(&str, &str)]) -> Pipeline {
-        let procs: Vec<Proc> = proc_names.iter().map(|name| Proc {
-            name: (*name).into(),
-            plan: refs.iter()
-                .filter(|(from, to)| *to == *name)
-                .map(|(from, _)| Impl {
-                    name: format!("{}_impl", from),
-                    tags: std::collections::BTreeSet::new(),
-                    cost: Cost::default(),
-                    enabled: true,
-                    when: None,
-                    refs: vec![(*from).into()],
-                    body_text: format!("merge(@{})", from),
-                    stub: false,
-                    retry: 0,
-                    ensure: vec![],
-                    description: String::new(),
-                })
-                .collect::<Vec<_>>(),
-            checks: vec![],
-            deliver: false,
-            foreach: None,
-            foreach_var: String::new(),
-            pick_by: "cost".into(), description: String::new(),
-        }).collect();
+        let procs: Vec<Proc> = proc_names
+            .iter()
+            .map(|name| Proc {
+                name: (*name).into(),
+                plan: refs
+                    .iter()
+                    .filter(|(from, to)| *to == *name)
+                    .map(|(from, _)| Impl {
+                        name: format!("{}_impl", from),
+                        tags: std::collections::BTreeSet::new(),
+                        cost: Cost::default(),
+                        enabled: true,
+                        when: None,
+                        refs: vec![(*from).into()],
+                        body_text: format!("merge(@{})", from),
+                        stub: false,
+                        retry: 0,
+                        ensure: vec![],
+                        description: String::new(),
+                    })
+                    .collect::<Vec<_>>(),
+                checks: vec![],
+                deliver: false,
+                foreach: None,
+                foreach_var: String::new(),
+                pick_by: "cost".into(),
+                description: String::new(),
+            })
+            .collect();
 
         Pipeline {
             name: "test".into(),
             procs,
-            weights: Weights::default(), description: String::new(),
+            weights: Weights::default(),
+            description: String::new(),
         }
     }
 
@@ -234,7 +240,8 @@ mod tests {
         let pl = Pipeline {
             name: "empty".into(),
             procs: vec![],
-            weights: Weights::default(), description: String::new(),
+            weights: Weights::default(),
+            description: String::new(),
         };
         let eg = build_egraph(&pl);
         assert!(eg.nodes.is_empty());

@@ -1,0 +1,33 @@
+// 最小可运行示例 —— 不依赖 bridge 脚本，用 run() + stub 演示
+Pipeline("demo", "最小演示：run() + check + 多路径降级")
+
+  .proc("fetch")
+    .desc("获取数据")
+    .plan(
+      fast -> run("echo 'hello world from fast path'")
+        .tags(#run, #shell)
+        .desc("快速路径"),
+      slow -> run("echo 'hello world from fallback path'")
+        .tags(#run, #shell)
+        .desc("备用路径")
+    )
+    .check(result => not_empty, "结果为空")
+
+  .proc("transform")
+    .desc("转换数据")
+    .plan(
+      t1 -> run("echo @fetch | tr 'a-z' 'A-Z'")
+        .tags(#transform, #shell)
+        .desc("大写转换")
+    )
+
+  .proc("output")
+    .desc("写结果")
+    .plan(
+      w1 -> write(to="/tmp/ductile_demo.txt", content=@transform)
+        .tags(#write, #file)
+        .desc("写文件")
+    )
+
+  .proc("deliver")
+    .deliver(@output)

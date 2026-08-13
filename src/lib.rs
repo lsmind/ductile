@@ -4,43 +4,46 @@
 //! Python bindings via pyo3.
 
 pub mod ast;
-pub mod parser;
-pub mod typecheck;
+pub mod db;
 pub mod egraph;
 pub mod executor;
-pub mod db;
-pub mod registry;
 pub mod learn;
+pub mod parser;
+pub mod registry;
+pub mod typecheck;
 pub mod version;
 
 pub mod cli;
 
 pub use ast::*;
+pub use egraph::{build_egraph, critical_path, parallel_groups, EGraph};
+pub use executor::exec_pipeline;
 pub use parser::{parse_pipeline, parse_pipeline_file, ParseError};
 pub use typecheck::{check_pipeline, TypeError};
-pub use egraph::{build_egraph, parallel_groups, critical_path, EGraph};
-pub use executor::exec_pipeline;
 
 // ── pyo3 Python bindings ──
 
-use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
+use pyo3::prelude::*;
 use std::collections::BTreeMap;
 
 /// Check a pipeline file: parse + typecheck.
 #[pyfunction]
 fn check(path: &str) -> PyResult<String> {
-    let pl = parse_pipeline_file(path)
-        .map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
+    let pl = parse_pipeline_file(path).map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
     let errs = check_pipeline(&pl);
     if errs.is_empty() {
         Ok("Type check passed".to_string())
     } else {
-        let msg = errs.iter()
+        let msg = errs
+            .iter()
             .map(|e| format!("  {}", e))
             .collect::<Vec<_>>()
             .join("\n");
-        Err(PyRuntimeError::new_err(format!("Type check errors:\n{}", msg)))
+        Err(PyRuntimeError::new_err(format!(
+            "Type check errors:\n{}",
+            msg
+        )))
     }
 }
 
@@ -48,15 +51,18 @@ fn check(path: &str) -> PyResult<String> {
 #[pyfunction]
 #[pyo3(signature = (path, topic="", params=None))]
 fn run(path: &str, topic: &str, params: Option<BTreeMap<String, String>>) -> PyResult<String> {
-    let pl = parse_pipeline_file(path)
-        .map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
+    let pl = parse_pipeline_file(path).map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
     let errs = check_pipeline(&pl);
     if !errs.is_empty() {
-        let msg = errs.iter()
+        let msg = errs
+            .iter()
             .map(|e| format!("  {}", e))
             .collect::<Vec<_>>()
             .join("\n");
-        return Err(PyRuntimeError::new_err(format!("Type check errors:\n{}", msg)));
+        return Err(PyRuntimeError::new_err(format!(
+            "Type check errors:\n{}",
+            msg
+        )));
     }
     let params = params.unwrap_or_default();
     match exec_pipeline(topic, &params, &pl) {
@@ -65,7 +71,11 @@ fn run(path: &str, topic: &str, params: Option<BTreeMap<String, String>>) -> PyR
             for (k, v) in &results {
                 let shown = match v {
                     Value::Text(t) => {
-                        if t.len() > 200 { format!("{}...", &t[..200]) } else { t.clone() }
+                        if t.len() > 200 {
+                            format!("{}...", &t[..200])
+                        } else {
+                            t.clone()
+                        }
                     }
                     Value::File(f) => format!("<file: {}>", f),
                     Value::Null => "<null>".into(),
@@ -74,25 +84,24 @@ fn run(path: &str, topic: &str, params: Option<BTreeMap<String, String>>) -> PyR
             }
             Ok(out)
         }
-        ExecResult::Failed(err) => Err(PyRuntimeError::new_err(format!("Pipeline failed: {}", err))),
+        ExecResult::Failed(err) => {
+            Err(PyRuntimeError::new_err(format!("Pipeline failed: {}", err)))
+        }
     }
 }
 
 /// Parse a pipeline file and return structure info.
 #[pyfunction]
 fn parse(path: &str) -> PyResult<String> {
-    let pl = parse_pipeline_file(path)
-        .map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
+    let pl = parse_pipeline_file(path).map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
     let tags = pl.computed_tags();
     let tag_str: Vec<String> = tags.iter().map(|t| format!("#{}", t)).collect();
-    let mut out = format!(
-        "Pipeline: {}\nTags: {}\n\n",
-        pl.name, tag_str.join(", ")
-    );
+    let mut out = format!("Pipeline: {}\nTags: {}\n\n", pl.name, tag_str.join(", "));
     for proc in &pl.procs {
         out.push_str(&format!(
             "  Proc: {} ({} impls){}\n",
-            proc.name, proc.plan.len(),
+            proc.name,
+            proc.plan.len(),
             if proc.deliver { " [deliver]" } else { "" }
         ));
         for imp in &proc.plan {
@@ -100,8 +109,15 @@ fn parse(path: &str) -> PyResult<String> {
             out.push_str(&format!(
                 "    Impl: {}{} cost(latency={}, risk={}, tokens={}, money={})\n",
                 imp.name,
-                if !imp_tags.is_empty() { format!(" [{}]", imp_tags.join(", ")) } else { String::new() },
-                imp.cost.latency, imp.cost.risk, imp.cost.tokens, imp.cost.money
+                if !imp_tags.is_empty() {
+                    format!(" [{}]", imp_tags.join(", "))
+                } else {
+                    String::new()
+                },
+                imp.cost.latency,
+                imp.cost.risk,
+                imp.cost.tokens,
+                imp.cost.money
             ));
         }
     }
@@ -111,14 +127,14 @@ fn parse(path: &str) -> PyResult<String> {
 /// Show e-graph structure: parallel groups and critical path.
 #[pyfunction]
 fn graph(path: &str) -> PyResult<String> {
-    let pl = parse_pipeline_file(path)
-        .map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
+    let pl = parse_pipeline_file(path).map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
     let eg = build_egraph(&pl);
     let groups = parallel_groups(&eg);
     let cp = critical_path(&eg);
     let mut out = format!(
         "E-Graph:\n  Nodes: {}\n  Edges: {}\n\nParallel groups:\n",
-        pl.procs.len(), eg.edges.len()
+        pl.procs.len(),
+        eg.edges.len()
     );
     for g in &groups {
         out.push_str(&format!("  {:?}\n", g));

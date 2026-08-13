@@ -1,0 +1,34 @@
+Pipeline("research", "搜索主题并撰写报告")
+
+  .proc("search")
+    .desc("多路搜索")
+    .plan(
+      web -> web_search(query="{topic}")
+        .tags(#search, #web)
+        .desc("网页搜索")
+        .retry(n=3),
+      mcp -> mcp_search(query="{topic}")
+        .tags(#search, #mcp)
+        .desc("MCP搜索")
+    )
+    .check(result => has_results, "搜索无结果")
+
+  .proc("summarize")
+    .desc("LLM 总结")
+    .plan(
+      s1 -> llm(input=@search, template="summary")
+        .tags(#llm, #parse)
+        .desc("LLM综合")
+    )
+    .check(result => has_content, "总结为空")
+
+  .proc("report")
+    .desc("写入报告文件")
+    .plan(
+      w1 -> write(to="~/output/{topic}.md", content=@summarize)
+        .tags(#write, #file)
+        .desc("写文件")
+    )
+
+  .proc("deliver")
+    .deliver(@report)

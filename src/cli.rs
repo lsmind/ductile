@@ -1,9 +1,9 @@
 //! CLI dispatch module — shared between binary and Python binding.
 
 use crate::*;
+use rusqlite::params;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use rusqlite::params;
 
 pub fn run(args: &[String]) -> Result<i32, String> {
     if args.len() < 2 {
@@ -14,19 +14,30 @@ pub fn run(args: &[String]) -> Result<i32, String> {
     match args[1].as_str() {
         // Core
         "check" if args.len() >= 3 => match parse_pipeline_file(&args[2]) {
-            Err(e) => { eprintln!("{}", e); Ok(1) }
+            Err(e) => {
+                eprintln!("{}", e);
+                Ok(1)
+            }
             Ok(pl) => {
                 let errs = check_pipeline(&pl);
-                if errs.is_empty() { println!("Type check passed"); Ok(0) }
-                else {
+                if errs.is_empty() {
+                    println!("Type check passed");
+                    Ok(0)
+                } else {
                     eprintln!("Type check errors:");
-                    for e in &errs { eprintln!("  {}", e); }
+                    for e in &errs {
+                        eprintln!("  {}", e);
+                    }
                     Ok(1)
                 }
             }
         },
         "run" if args.len() >= 3 => {
-            let topic = if args.len() > 3 { args[3..].join(" ") } else { String::new() };
+            let topic = if args.len() > 3 {
+                args[3..].join(" ")
+            } else {
+                String::new()
+            };
             cmd_run(&args[2], &topic)
         }
         "graph" if args.len() >= 3 => cmd_graph(&args[2]),
@@ -47,7 +58,9 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         // Version
         "version" if args.len() >= 5 && args[2] == "save" => cmd_version_save(&args[3], &args[4]),
         "version" if args.len() >= 4 && args[2] == "log" => cmd_version_log(&args[3]),
-        "version" if args.len() >= 6 && args[2] == "diff" => cmd_version_diff(&args[3], &args[4], &args[5]),
+        "version" if args.len() >= 6 && args[2] == "diff" => {
+            cmd_version_diff(&args[3], &args[4], &args[5])
+        }
 
         // Hot patch: patch <pipeline> <proc> <impl> <field> <value>
         "patch" if args.len() >= 3 && args[2] == "list" => cmd_patch_list(),
@@ -56,12 +69,18 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             cmd_patch_set(&args[2], &args[3], &args[4], &args[5], &args[6])
         }
 
-        _ => { print_usage(); Ok(1) }
+        _ => {
+            print_usage();
+            Ok(1)
+        }
     }
 }
 
 fn print_usage() {
-    eprintln!("Ductile v{} — declarative pipeline DSL", env!("CARGO_PKG_VERSION"));
+    eprintln!(
+        "Ductile v{} — declarative pipeline DSL",
+        env!("CARGO_PKG_VERSION")
+    );
     eprintln!();
     eprintln!("Usage: ductile <command> <file.pipeline> [args]");
     eprintln!();
@@ -96,13 +115,18 @@ fn print_usage() {
 
 fn cmd_run(path: &str, topic_str: &str) -> Result<i32, String> {
     let pl = match parse_pipeline_file(path) {
-        Err(e) => { eprintln!("{}", e); return Ok(1); }
+        Err(e) => {
+            eprintln!("{}", e);
+            return Ok(1);
+        }
         Ok(pl) => pl,
     };
     let errs = check_pipeline(&pl);
     if !errs.is_empty() {
         eprintln!("Type check errors:");
-        for e in &errs { eprintln!("  {}", e); }
+        for e in &errs {
+            eprintln!("  {}", e);
+        }
         return Ok(1);
     }
     let (topic, params) = parse_topic_params(topic_str);
@@ -118,8 +142,10 @@ fn cmd_run(path: &str, topic_str: &str) -> Result<i32, String> {
     if !matches.is_empty() {
         println!("Isomorphism hints:");
         for m in &matches {
-            println!("  {} ≅ {} [{}] — {}",
-                m.local_proc, m.remote.name, m.remote.pipeline, m.remote.description);
+            println!(
+                "  {} ≅ {} [{}] — {}",
+                m.local_proc, m.remote.name, m.remote.pipeline, m.remote.description
+            );
         }
         println!();
     }
@@ -131,7 +157,13 @@ fn cmd_run(path: &str, topic_str: &str) -> Result<i32, String> {
             println!("  Procs completed: {}", results.len());
             for (k, v) in &results {
                 let shown = match v {
-                    Value::Text(t) => if t.len() > 200 { format!("{}...", &t[..200]) } else { t.clone() },
+                    Value::Text(t) => {
+                        if t.len() > 200 {
+                            format!("{}...", &t[..200])
+                        } else {
+                            t.clone()
+                        }
+                    }
                     Value::File(f) => format!("<file: {}>", f),
                     Value::Null => "<null>".to_string(),
                 };
@@ -139,20 +171,35 @@ fn cmd_run(path: &str, topic_str: &str) -> Result<i32, String> {
             }
             Ok(0)
         }
-        ExecResult::Failed(err) => { eprintln!("Pipeline failed: {}", err); Ok(1) }
+        ExecResult::Failed(err) => {
+            eprintln!("Pipeline failed: {}", err);
+            Ok(1)
+        }
     }
 }
 
 // ── graph ──
 
 fn cmd_graph(path: &str) -> Result<i32, String> {
-    let pl = match parse_pipeline_file(path) { Err(e) => { eprintln!("{}", e); return Ok(1); } Ok(pl) => pl };
+    let pl = match parse_pipeline_file(path) {
+        Err(e) => {
+            eprintln!("{}", e);
+            return Ok(1);
+        }
+        Ok(pl) => pl,
+    };
     let eg = build_egraph(&pl);
     let groups = parallel_groups(&eg);
     let cp = critical_path(&eg);
-    println!("E-Graph:\n  Nodes: {}\n  Edges: {}\n", pl.procs.len(), eg.edges.len());
+    println!(
+        "E-Graph:\n  Nodes: {}\n  Edges: {}\n",
+        pl.procs.len(),
+        eg.edges.len()
+    );
     println!("Parallel groups:");
-    for g in &groups { println!("  {:?}", g); }
+    for g in &groups {
+        println!("  {:?}", g);
+    }
     println!("\nCritical path: {:?}", cp);
     Ok(0)
 }
@@ -160,9 +207,17 @@ fn cmd_graph(path: &str) -> Result<i32, String> {
 // ── parse ──
 
 fn cmd_parse(path: &str) -> Result<i32, String> {
-    let pl = match parse_pipeline_file(path) { Err(e) => { eprintln!("{}", e); return Ok(1); } Ok(pl) => pl };
+    let pl = match parse_pipeline_file(path) {
+        Err(e) => {
+            eprintln!("{}", e);
+            return Ok(1);
+        }
+        Ok(pl) => pl,
+    };
     println!("Pipeline: {}", pl.name);
-    if !pl.description.is_empty() { println!("Description: {}", pl.description); }
+    if !pl.description.is_empty() {
+        println!("Description: {}", pl.description);
+    }
     let tags = pl.computed_tags();
     if !tags.is_empty() {
         let tag_str: Vec<String> = tags.iter().map(|t| format!("#{}", t)).collect();
@@ -170,17 +225,29 @@ fn cmd_parse(path: &str) -> Result<i32, String> {
     }
     println!();
     for proc in &pl.procs {
-        println!("  Proc: {} ({} impls){}", proc.name, proc.plan.len(),
-            if proc.deliver { " [deliver]" } else { "" });
-        if !proc.description.is_empty() { println!("    Desc: {}", proc.description); }
+        println!(
+            "  Proc: {} ({} impls){}",
+            proc.name,
+            proc.plan.len(),
+            if proc.deliver { " [deliver]" } else { "" }
+        );
+        if !proc.description.is_empty() {
+            println!("    Desc: {}", proc.description);
+        }
         for imp in &proc.plan {
             let tag_str: Vec<String> = imp.tags.iter().map(|t| format!("#{}", t)).collect();
             print!("    Impl: {}", imp.name);
-            if !tag_str.is_empty() { print!(" [{}]", tag_str.join(", ")); }
+            if !tag_str.is_empty() {
+                print!(" [{}]", tag_str.join(", "));
+            }
             println!();
-            if !imp.description.is_empty() { println!("      Desc: {}", imp.description); }
+            if !imp.description.is_empty() {
+                println!("      Desc: {}", imp.description);
+            }
         }
-        for chk in &proc.checks { println!("    Check: \"{}\"", chk.msg); }
+        for chk in &proc.checks {
+            println!("    Check: \"{}\"", chk.msg);
+        }
     }
 
     // Isomorphism hints
@@ -189,8 +256,10 @@ fn cmd_parse(path: &str) -> Result<i32, String> {
     if !matches.is_empty() {
         println!("\nIsomorphism hints:");
         for m in &matches {
-            println!("  {} ≅ {} [{}] — {}",
-                m.local_proc, m.remote.name, m.remote.pipeline, m.remote.description);
+            println!(
+                "  {} ≅ {} [{}] — {}",
+                m.local_proc, m.remote.name, m.remote.pipeline, m.remote.description
+            );
         }
     }
     Ok(0)
@@ -216,13 +285,22 @@ fn cmd_import(paths: &[String]) -> Result<i32, String> {
             all_files.push(p.clone());
         }
     }
-    if all_files.is_empty() { println!("No .pipeline files found."); return Ok(0); }
+    if all_files.is_empty() {
+        println!("No .pipeline files found.");
+        return Ok(0);
+    }
     let mut ok = 0;
     let mut errs = 0;
     for f in &all_files {
         match db::import_pipeline_file(f) {
-            Ok(name) => { println!("  ✓ {} ({})", name, f); ok += 1; }
-            Err(e) => { println!("  ✗ {} ({})", e, f); errs += 1; }
+            Ok(name) => {
+                println!("  ✓ {} ({})", name, f);
+                ok += 1;
+            }
+            Err(e) => {
+                println!("  ✗ {} ({})", e, f);
+                errs += 1;
+            }
         }
     }
     println!("\nImported {} pipelines ({} errors)", ok, errs);
@@ -234,14 +312,21 @@ fn cmd_import(paths: &[String]) -> Result<i32, String> {
 fn cmd_search(query: &str) -> Result<i32, String> {
     db::init_db();
     let results = db::search_procs(query);
-    if results.is_empty() { println!("No matching procs found."); return Ok(0); }
+    if results.is_empty() {
+        println!("No matching procs found.");
+        return Ok(0);
+    }
     println!("Search \"{}\" — {} results:\n", query, results.len());
     for p in &results {
         let tag_str: Vec<String> = p.tags.iter().map(|t| format!("#{}", t)).collect();
         print!("  {}", p.name);
-        if !tag_str.is_empty() { print!(" {{{{{}}}}}", tag_str.join(", ")); }
+        if !tag_str.is_empty() {
+            print!(" {{{{{}}}}}", tag_str.join(", "));
+        }
         println!();
-        if !p.description.is_empty() { println!("    {}", p.description); }
+        if !p.description.is_empty() {
+            println!("    {}", p.description);
+        }
         println!("    [{}, {} impls]", p.pipeline, p.impl_count);
     }
     Ok(0)
@@ -264,10 +349,18 @@ fn cmd_compose(name: &str, desc: &str, tag_args: &[String]) -> Result<i32, Strin
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
             .collect();
-        let candidates: Vec<&db::ProcRow> = all_procs.iter()
+        let candidates: Vec<&db::ProcRow> = all_procs
+            .iter()
             .filter(|p| tags.is_subset(&p.tags))
             .collect();
-        println!("Step {} {{{}}}:", i + 1, tags.iter().map(|t| format!("#{}", t)).collect::<Vec<_>>().join(", "));
+        println!(
+            "Step {} {{{}}}:",
+            i + 1,
+            tags.iter()
+                .map(|t| format!("#{}", t))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         if candidates.is_empty() {
             println!("  ✗ No matching procs");
         } else {
@@ -306,7 +399,10 @@ fn cmd_discover(file: Option<&str>) -> Result<i32, String> {
     if let Some(path) = file {
         // Import then discover
         match parse_pipeline_file(path) {
-            Err(e) => { eprintln!("{}", e); return Ok(1); }
+            Err(e) => {
+                eprintln!("{}", e);
+                return Ok(1);
+            }
             Ok(pl) => db::import_pipeline(&pl, path),
         }
     }
@@ -332,7 +428,13 @@ fn cmd_discover(file: Option<&str>) -> Result<i32, String> {
     println!("---------------------------");
     for p in &with_tags {
         let tag_str: Vec<String> = p.tags.iter().map(|t| format!("#{}", t)).collect();
-        println!("  {{{}}} {} — {} [{}]", tag_str.join(", "), p.name, p.description, p.pipeline);
+        println!(
+            "  {{{}}} {} — {} [{}]",
+            tag_str.join(", "),
+            p.name,
+            p.description,
+            p.pipeline
+        );
     }
     Ok(0)
 }
@@ -363,10 +465,12 @@ fn cmd_learn(arg: &str) -> Result<i32, String> {
         println!("Discovered patterns:");
         println!("---------------------");
         for r in &result.repeats {
-            println!("  [×{}] {} → found in: {}",
+            println!(
+                "  [×{}] {} → found in: {}",
                 r.count,
                 r.tags.join(" → "),
-                r.pipelines.join(", "));
+                r.pipelines.join(", ")
+            );
         }
     }
     println!("\nCompression summary:");
@@ -389,8 +493,14 @@ fn cmd_version_save(path: &str, desc: &str) -> Result<i32, String> {
 fn cmd_version_log(path: &str) -> Result<i32, String> {
     let pl = parse_pipeline_file(path).map_err(|e| format!("{}", e))?;
     match version::read_log(&pl.name) {
-        Some(log) => { println!("{}", log); Ok(0) }
-        None => { println!("No versions recorded."); Ok(0) }
+        Some(log) => {
+            println!("{}", log);
+            Ok(0)
+        }
+        None => {
+            println!("No versions recorded.");
+            Ok(0)
+        }
     }
 }
 
@@ -399,16 +509,31 @@ fn cmd_version_diff(path: &str, v1: &str, v2: &str) -> Result<i32, String> {
     let v1n: usize = v1.parse().map_err(|_| "invalid version number")?;
     let v2n: usize = v2.parse().map_err(|_| "invalid version number")?;
     match version::diff_versions(&pl.name, v1n, v2n) {
-        Some(diff) => { println!("{}", diff); Ok(0) }
-        None => { println!("Version(s) not found."); Ok(0) }
+        Some(diff) => {
+            println!("{}", diff);
+            Ok(0)
+        }
+        None => {
+            println!("Version(s) not found.");
+            Ok(0)
+        }
     }
 }
 
 // ── patch ──
 
-fn cmd_patch_set(pipeline: &str, proc_name: &str, impl_name: &str, field: &str, value: &str) -> Result<i32, String> {
+fn cmd_patch_set(
+    pipeline: &str,
+    proc_name: &str,
+    impl_name: &str,
+    field: &str,
+    value: &str,
+) -> Result<i32, String> {
     db::set_patch(pipeline, proc_name, impl_name, field, value);
-    println!("✓ Patched: {}.{}.{} = {}", pipeline, proc_name, impl_name, field);
+    println!(
+        "✓ Patched: {}.{}.{} = {}",
+        pipeline, proc_name, impl_name, field
+    );
     println!("  {} = {}", field, value);
     println!("\nNext `ductile run` will use this override. Source file not modified.");
     Ok(0)
@@ -422,7 +547,10 @@ fn cmd_patch_list() -> Result<i32, String> {
     }
     println!("Active patches ({}):\n", patches.len());
     for p in &patches {
-        println!("  {}.{}.{} = {}", p.pipeline, p.proc_name, p.impl_name, p.field);
+        println!(
+            "  {}.{}.{} = {}",
+            p.pipeline, p.proc_name, p.impl_name, p.field
+        );
         println!("    → {}", p.value);
     }
     Ok(0)
@@ -432,7 +560,8 @@ fn cmd_patch_clear(pipeline: &str) -> Result<i32, String> {
     // Delete all patches for a pipeline
     db::init_db();
     let conn = db::open();
-    conn.execute("DELETE FROM patches WHERE pipeline = ?1", params![pipeline]).ok();
+    conn.execute("DELETE FROM patches WHERE pipeline = ?1", params![pipeline])
+        .ok();
     println!("✓ Cleared all patches for pipeline: {}", pipeline);
     Ok(0)
 }
@@ -448,7 +577,9 @@ fn parse_topic_params(input: &str) -> (String, BTreeMap<String, String>) {
         if let Some(eq) = p.find('=') {
             let k = p[..eq].trim().to_string();
             let v = p[eq + 1..].trim().to_string();
-            if !k.is_empty() { params.insert(k, v); }
+            if !k.is_empty() {
+                params.insert(k, v);
+            }
         }
     }
     (topic, params)

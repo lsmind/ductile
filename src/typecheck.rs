@@ -49,7 +49,10 @@ fn check_proc(proc: &Proc) -> Vec<TypeError> {
         }
         for impl_ in &proc.plan {
             if impl_.cost.is_negative() {
-                errs.push(TypeError::CostNegative(proc.name.clone(), impl_.name.clone()));
+                errs.push(TypeError::CostNegative(
+                    proc.name.clone(),
+                    impl_.name.clone(),
+                ));
             }
         }
     }
@@ -66,7 +69,8 @@ mod tests {
         Pipeline {
             name: "test".into(),
             procs,
-            weights: Weights::default(), description: String::new(),
+            weights: Weights::default(),
+            description: String::new(),
         }
     }
 
@@ -78,7 +82,8 @@ mod tests {
             deliver: false,
             foreach: None,
             foreach_var: String::new(),
-            pick_by: "cost".into(), description: String::new(),
+            pick_by: "cost".into(),
+            description: String::new(),
         }
     }
 
@@ -110,10 +115,18 @@ mod tests {
     fn negative_cost_detected() {
         let pl = mk_pipeline(vec![mk_proc(
             "p",
-            vec![mk_impl("bad", Cost { latency: -1, ..Default::default() })],
+            vec![mk_impl(
+                "bad",
+                Cost {
+                    latency: -1,
+                    ..Default::default()
+                },
+            )],
         )]);
         let errs = check_pipeline(&pl);
-        assert!(errs.iter().any(|e| matches!(e, TypeError::CostNegative(_, _))));
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, TypeError::CostNegative(_, _))));
     }
 
     // ── Empty plan ──
@@ -141,7 +154,9 @@ mod tests {
         i.enabled = false;
         let pl = mk_pipeline(vec![mk_proc("p", vec![i])]);
         let errs = check_pipeline(&pl);
-        assert!(errs.iter().any(|e| matches!(e, TypeError::NoEnabledImpl(_))));
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, TypeError::NoEnabledImpl(_))));
     }
 
     // ── TypeError display ──

@@ -21,8 +21,7 @@ pub fn db_path() -> PathBuf {
 
 pub fn open() -> Connection {
     let path = db_path();
-    let conn = Connection::open(&path)
-        .unwrap_or_else(|e| panic!("Cannot open ductile.db: {}", e));
+    let conn = Connection::open(&path).unwrap_or_else(|e| panic!("Cannot open ductile.db: {}", e));
     conn.execute_batch("PRAGMA journal_mode=WAL;").ok();
     conn
 }
@@ -325,11 +324,9 @@ pub fn db_stats() -> (i64, i64, i64, i64) {
     init_db();
     let conn = open();
     let count = |table: &str| -> i64 {
-        conn.query_row(
-            &format!("SELECT COUNT(*) FROM {}", table),
-            [],
-            |row| row.get(0),
-        )
+        conn.query_row(&format!("SELECT COUNT(*) FROM {}", table), [], |row| {
+            row.get(0)
+        })
         .unwrap_or(0)
     };
     (

@@ -21,7 +21,12 @@ pub struct Cost {
 
 impl Default for Cost {
     fn default() -> Self {
-        Cost { latency: 0, risk: 0.0, tokens: 0, money: 0.0 }
+        Cost {
+            latency: 0,
+            risk: 0.0,
+            tokens: 0,
+            money: 0.0,
+        }
     }
 }
 
@@ -64,40 +69,40 @@ impl Weights {
 #[derive(Debug, Clone)]
 pub struct Impl {
     pub name: String,
-    pub description: String,          // v0.4.1: human-readable description (.desc("..."))
-    pub tags: BTreeSet<String>,       // v0.4: replaces level + scope
+    pub description: String, // v0.4.1: human-readable description (.desc("..."))
+    pub tags: BTreeSet<String>, // v0.4: replaces level + scope
     pub cost: Cost,
     pub enabled: bool,
-    pub when: Option<String>,         // raw when-condition text
-    pub refs: Vec<String>,            // body中引用的其他proc名
-    pub body_text: String,            // 原始body文本（供executor解析和执行）
+    pub when: Option<String>, // raw when-condition text
+    pub refs: Vec<String>,    // body中引用的其他proc名
+    pub body_text: String,    // 原始body文本（供executor解析和执行）
     pub stub: bool,
-    pub retry: usize,                 // retry count
-    pub ensure: Vec<Check>,           // inline checks
+    pub retry: usize,       // retry count
+    pub ensure: Vec<Check>, // inline checks
 }
 
 #[derive(Debug, Clone)]
 pub struct Check {
-    pub cond: String,   // raw condition text (e.g. "result => has_results")
+    pub cond: String, // raw condition text (e.g. "result => has_results")
     pub msg: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct Proc {
     pub name: String,
-    pub description: String,          // v0.4.1: human-readable description (.desc("..."))
+    pub description: String, // v0.4.1: human-readable description (.desc("..."))
     pub plan: Vec<Impl>,
     pub checks: Vec<Check>,
     pub deliver: bool,
-    pub foreach: Option<String>,      // source proc name
+    pub foreach: Option<String>, // source proc name
     pub foreach_var: String,
-    pub pick_by: String,              // pick strategy
+    pub pick_by: String, // pick strategy
 }
 
 #[derive(Debug, Clone)]
 pub struct Pipeline {
     pub name: String,
-    pub description: String,          // v0.4.1: optional Pipeline("name", "desc")
+    pub description: String, // v0.4.1: optional Pipeline("name", "desc")
     pub procs: Vec<Proc>,
     pub weights: Weights,
 }
@@ -203,23 +208,50 @@ mod tests {
 
     #[test]
     fn cost_is_negative_true() {
-        assert!(Cost { latency: -1, ..Default::default() }.is_negative());
-        assert!(Cost { risk: -0.1, ..Default::default() }.is_negative());
-        assert!(Cost { tokens: -1, ..Default::default() }.is_negative());
-        assert!(Cost { money: -0.01, ..Default::default() }.is_negative());
+        assert!(Cost {
+            latency: -1,
+            ..Default::default()
+        }
+        .is_negative());
+        assert!(Cost {
+            risk: -0.1,
+            ..Default::default()
+        }
+        .is_negative());
+        assert!(Cost {
+            tokens: -1,
+            ..Default::default()
+        }
+        .is_negative());
+        assert!(Cost {
+            money: -0.01,
+            ..Default::default()
+        }
+        .is_negative());
     }
 
     #[test]
     fn cost_is_negative_false() {
         assert!(!Cost::default().is_negative());
-        assert!(!Cost { latency: 100, risk: 0.5, tokens: 200, money: 1.0 }.is_negative());
+        assert!(!Cost {
+            latency: 100,
+            risk: 0.5,
+            tokens: 200,
+            money: 1.0
+        }
+        .is_negative());
     }
 
     // ── Weights ──
     #[test]
     fn weights_cost_total_basic() {
         let w = Weights::default();
-        let c = Cost { latency: 1000, risk: 0.5, tokens: 10000, money: 2.0 };
+        let c = Cost {
+            latency: 1000,
+            risk: 0.5,
+            tokens: 10000,
+            money: 2.0,
+        };
         // 0.001*1000 + 10.0*0.5 + 0.0001*10000 + 1.0*2.0 = 1 + 5 + 1 + 2 = 9
         let total = w.cost_total(&c);
         assert!((total - 9.0).abs() < 0.001);
@@ -272,9 +304,11 @@ mod tests {
                 Proc {
                     name: "a".into(),
                     description: String::new(),
-                    plan: vec![
-                        Impl { name: "x".into(), tags: mk_tags(&["search", "network"]), ..default_impl() },
-                    ],
+                    plan: vec![Impl {
+                        name: "x".into(),
+                        tags: mk_tags(&["search", "network"]),
+                        ..default_impl()
+                    }],
                     checks: vec![],
                     deliver: false,
                     foreach: None,
@@ -284,9 +318,11 @@ mod tests {
                 Proc {
                     name: "b".into(),
                     description: String::new(),
-                    plan: vec![
-                        Impl { name: "y".into(), tags: mk_tags(&["file", "network"]), ..default_impl() },
-                    ],
+                    plan: vec![Impl {
+                        name: "y".into(),
+                        tags: mk_tags(&["file", "network"]),
+                        ..default_impl()
+                    }],
                     checks: vec![],
                     deliver: false,
                     foreach: None,
@@ -308,18 +344,19 @@ mod tests {
         let pl = Pipeline {
             name: "bare".into(),
             description: String::new(),
-            procs: vec![
-                Proc {
-                    name: "a".into(),
-                    description: String::new(),
-                    plan: vec![Impl { name: "x".into(), ..default_impl() }],
-                    checks: vec![],
-                    deliver: false,
-                    foreach: None,
-                    foreach_var: String::new(),
-                    pick_by: "cost".into(),
-                },
-            ],
+            procs: vec![Proc {
+                name: "a".into(),
+                description: String::new(),
+                plan: vec![Impl {
+                    name: "x".into(),
+                    ..default_impl()
+                }],
+                checks: vec![],
+                deliver: false,
+                foreach: None,
+                foreach_var: String::new(),
+                pick_by: "cost".into(),
+            }],
             weights: Weights::default(),
         };
         assert!(pl.computed_tags().is_empty());

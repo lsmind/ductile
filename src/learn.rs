@@ -47,9 +47,7 @@ pub fn find_repeats(corpus: &[(Vec<String>, String)]) -> Vec<RepeatPattern> {
             continue;
         }
         let key = seq.join(" → ");
-        let entry = freq
-            .entry(key)
-            .or_insert_with(|| (seq.clone(), 0, vec![]));
+        let entry = freq.entry(key).or_insert_with(|| (seq.clone(), 0, vec![]));
         entry.1 += 1;
         if !entry.2.contains(pipeline_name) {
             entry.2.push(pipeline_name.clone());
@@ -122,10 +120,7 @@ pub fn learn(dirs: &[&str]) -> LearnResult {
     let repeats = find_repeats(&corpus);
 
     // Compute compressed size
-    let tokens_saved: usize = repeats
-        .iter()
-        .map(|r| (r.count - 1) * r.tags.len())
-        .sum();
+    let tokens_saved: usize = repeats.iter().map(|r| (r.count - 1) * r.tags.len()).sum();
     let compressed_size = total_tokens.saturating_sub(tokens_saved);
     let ratio = if total_tokens == 0 {
         1.0

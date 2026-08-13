@@ -5,8 +5,8 @@
 //! ##DSL_RESULT protocol, record (GCF) logging.
 
 use crate::ast::*;
-use crate::egraph;
 use crate::db;
+use crate::egraph;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
@@ -35,34 +35,58 @@ fn apply_patches(pl: &Pipeline) -> Pipeline {
                 match patch.field.as_str() {
                     "enabled" => {
                         impl_.enabled = patch.value == "true" || patch.value == "1";
-                        eprintln!("  [patch] {}.{}: enabled={}", proc.name, impl_.name, impl_.enabled);
+                        eprintln!(
+                            "  [patch] {}.{}: enabled={}",
+                            proc.name, impl_.name, impl_.enabled
+                        );
                     }
                     "cost.latency" => {
                         impl_.cost.latency = patch.value.parse().unwrap_or(impl_.cost.latency);
-                        eprintln!("  [patch] {}.{}: cost.latency={}", proc.name, impl_.name, impl_.cost.latency);
+                        eprintln!(
+                            "  [patch] {}.{}: cost.latency={}",
+                            proc.name, impl_.name, impl_.cost.latency
+                        );
                     }
                     "cost.risk" => {
                         impl_.cost.risk = patch.value.parse().unwrap_or(impl_.cost.risk);
-                        eprintln!("  [patch] {}.{}: cost.risk={}", proc.name, impl_.name, impl_.cost.risk);
+                        eprintln!(
+                            "  [patch] {}.{}: cost.risk={}",
+                            proc.name, impl_.name, impl_.cost.risk
+                        );
                     }
                     "cost.tokens" => {
                         impl_.cost.tokens = patch.value.parse().unwrap_or(impl_.cost.tokens);
-                        eprintln!("  [patch] {}.{}: cost.tokens={}", proc.name, impl_.name, impl_.cost.tokens);
+                        eprintln!(
+                            "  [patch] {}.{}: cost.tokens={}",
+                            proc.name, impl_.name, impl_.cost.tokens
+                        );
                     }
                     "cost.money" => {
                         impl_.cost.money = patch.value.parse().unwrap_or(impl_.cost.money);
-                        eprintln!("  [patch] {}.{}: cost.money={}", proc.name, impl_.name, impl_.cost.money);
+                        eprintln!(
+                            "  [patch] {}.{}: cost.money={}",
+                            proc.name, impl_.name, impl_.cost.money
+                        );
                     }
                     "retry" => {
                         impl_.retry = patch.value.parse().unwrap_or(impl_.retry);
-                        eprintln!("  [patch] {}.{}: retry={}", proc.name, impl_.name, impl_.retry);
+                        eprintln!(
+                            "  [patch] {}.{}: retry={}",
+                            proc.name, impl_.name, impl_.retry
+                        );
                     }
                     "stub" => {
                         impl_.stub = patch.value == "true" || patch.value == "1";
-                        eprintln!("  [patch] {}.{}: stub={}", proc.name, impl_.name, impl_.stub);
+                        eprintln!(
+                            "  [patch] {}.{}: stub={}",
+                            proc.name, impl_.name, impl_.stub
+                        );
                     }
                     _ => {
-                        eprintln!("  [patch] {}.{}: unknown field '{}'", proc.name, impl_.name, patch.field);
+                        eprintln!(
+                            "  [patch] {}.{}: unknown field '{}'",
+                            proc.name, impl_.name, patch.field
+                        );
                     }
                 }
             }
@@ -82,16 +106,24 @@ pub fn exec_pipeline(topic: &str, params: &BTreeMap<String, String>, pl: &Pipeli
     let mut error_msg = String::new();
 
     for layer in &layers {
-        if failed { break; }
+        if failed {
+            break;
+        }
         // Execute procs in this layer (serially for now — parallel via threads later)
         for proc_name in layer {
-            if failed { break; }
+            if failed {
+                break;
+            }
             let proc = pl.procs.iter().find(|p| &p.name == proc_name);
             if let Some(proc) = proc {
-                if proc.deliver { continue; }
+                if proc.deliver {
+                    continue;
+                }
 
                 match exec_proc(proc, topic, params, &results, &pl) {
-                    Ok(val) => { results.insert(proc.name.clone(), val); }
+                    Ok(val) => {
+                        results.insert(proc.name.clone(), val);
+                    }
                     Err(e) => {
                         failed = true;
                         error_msg = e;
@@ -122,7 +154,9 @@ fn exec_proc(
 
     // Normal proc: rank impls, try in order
     let recent_map = load_recent_runs(&proc.name);
-    let eligible: Vec<&Impl> = proc.plan.iter()
+    let eligible: Vec<&Impl> = proc
+        .plan
+        .iter()
         .filter(|i| is_eligible(params, results, i))
         .collect();
 
@@ -134,13 +168,16 @@ fn exec_proc(
             eprintln!("  [{}] STUB: {}", proc.name, impl_.name);
             return Ok(Value::Text(format!("[STUB:{}]", impl_.name)));
         }
-        if !impl_.enabled { continue; }
+        if !impl_.enabled {
+            continue;
+        }
 
         eprintln!("  [{}] trying: {}", proc.name, impl_.name);
         match run_impl_with_retry(impl_, topic, results) {
             Ok(val) => {
                 // Run checks
-                let all_checks: Vec<&Check> = proc.checks.iter().chain(impl_.ensure.iter()).collect();
+                let all_checks: Vec<&Check> =
+                    proc.checks.iter().chain(impl_.ensure.iter()).collect();
                 match run_checks(&all_checks, &val) {
                     Ok(val) => {
                         append_run(&proc.name, &impl_.name, pid, Status::Ok, None, None);
@@ -148,18 +185,28 @@ fn exec_proc(
                     }
                     Err(chk_err) => {
                         eprintln!("  [{}] check failed: {}", proc.name, chk_err);
-                        append_run(&proc.name, &impl_.name, pid, Status::Fail,
-                                   Some(&short_hash(&chk_err)),
-                                   Some(&format!("{}.{}.check", proc.name, impl_.name)));
+                        append_run(
+                            &proc.name,
+                            &impl_.name,
+                            pid,
+                            Status::Fail,
+                            Some(&short_hash(&chk_err)),
+                            Some(&format!("{}.{}.check", proc.name, impl_.name)),
+                        );
                         continue;
                     }
                 }
             }
             Err(err) => {
                 eprintln!("  [{}] failed: {}", proc.name, err);
-                append_run(&proc.name, &impl_.name, pid, Status::Fail,
-                           Some(&short_hash(&err)),
-                           Some(&format!("{}.{}.step", proc.name, impl_.name)));
+                append_run(
+                    &proc.name,
+                    &impl_.name,
+                    pid,
+                    Status::Fail,
+                    Some(&short_hash(&err)),
+                    Some(&format!("{}.{}.step", proc.name, impl_.name)),
+                );
                 continue;
             }
         }
@@ -177,15 +224,26 @@ fn exec_foreach_proc(
     pl: &Pipeline,
 ) -> Result<Value, String> {
     let var_name = &proc.foreach_var;
-    let src_val = results.get(src_proc)
+    let src_val = results
+        .get(src_proc)
         .ok_or_else(|| format!("foreach source not found: @{}", src_proc))?;
 
     let items: Vec<String> = match src_val {
-        Value::Text(t) => t.lines().filter(|l| !l.trim().is_empty()).map(|s| s.to_string()).collect(),
+        Value::Text(t) => t
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|s| s.to_string())
+            .collect(),
         _ => vec![format!("{:?}", src_val)],
     };
 
-    eprintln!("  [{}] foreach over {} ({} items, var={})", proc.name, src_proc, items.len(), var_name);
+    eprintln!(
+        "  [{}] foreach over {} ({} items, var={})",
+        proc.name,
+        src_proc,
+        items.len(),
+        var_name
+    );
 
     let mut sub_results: Vec<Result<Value, String>> = Vec::new();
     let recent_map = load_recent_runs(&proc.name);
@@ -204,14 +262,22 @@ fn exec_foreach_proc(
         for (rank, impl_) in ranked.iter().enumerate() {
             let pid = (b'A' + rank as u8) as char;
             if impl_.stub {
-                sub_results.push(Ok(Value::Text(format!("[STUB:{}:{}]", impl_.name, &clean_item.chars().take(40).collect::<String>()))));
+                sub_results.push(Ok(Value::Text(format!(
+                    "[STUB:{}:{}]",
+                    impl_.name,
+                    &clean_item.chars().take(40).collect::<String>()
+                ))));
                 found = true;
                 break;
             }
-            if !impl_.enabled { continue; }
+            if !impl_.enabled {
+                continue;
+            }
 
             let expanded = Impl {
-                body_text: impl_.body_text.replace(&format!("{{{}}}", var_name), &clean_item),
+                body_text: impl_
+                    .body_text
+                    .replace(&format!("{{{}}}", var_name), &clean_item),
                 ..impl_.clone().clone()
             };
 
@@ -223,27 +289,43 @@ fn exec_foreach_proc(
                     break;
                 }
                 Err(err) => {
-                    append_run(&proc.name, &impl_.name, pid, Status::Fail,
-                               Some(&short_hash(&err)),
-                               Some(&format!("{}.{}.foreach", proc.name, impl_.name)));
+                    append_run(
+                        &proc.name,
+                        &impl_.name,
+                        pid,
+                        Status::Fail,
+                        Some(&short_hash(&err)),
+                        Some(&format!("{}.{}.foreach", proc.name, impl_.name)),
+                    );
                 }
             }
         }
         if !found {
-            return Err(format!("All paths failed for foreach item in: {}", proc.name));
+            return Err(format!(
+                "All paths failed for foreach item in: {}",
+                proc.name
+            ));
         }
     }
 
     // Aggregate
-    let parts: Vec<String> = sub_results.iter().filter_map(|r| {
-        match r { Ok(Value::Text(t)) => Some(t.clone()), _ => None }
-    }).collect();
+    let parts: Vec<String> = sub_results
+        .iter()
+        .filter_map(|r| match r {
+            Ok(Value::Text(t)) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
     Ok(Value::Text(parts.join("\n---\n---\n")))
 }
 
 // ── Impl execution ──
 
-fn run_impl_with_retry(impl_: &Impl, topic: &str, results: &BTreeMap<String, Value>) -> Result<Value, String> {
+fn run_impl_with_retry(
+    impl_: &Impl,
+    topic: &str,
+    results: &BTreeMap<String, Value>,
+) -> Result<Value, String> {
     if impl_.retry == 0 {
         return run_impl_steps(impl_, topic, results);
     }
@@ -255,7 +337,13 @@ fn run_impl_with_retry(impl_: &Impl, topic: &str, results: &BTreeMap<String, Val
             Err(err) => {
                 if attempt < impl_.retry {
                     let delay = 1u64 << (attempt + 1); // 2s, 4s, 8s...
-                    eprintln!("    -> retry {}/{} after {}s ({})", attempt + 1, impl_.retry, delay, &err[..err.len().min(80)]);
+                    eprintln!(
+                        "    -> retry {}/{} after {}s ({})",
+                        attempt + 1,
+                        impl_.retry,
+                        delay,
+                        &err[..err.len().min(80)]
+                    );
                     std::thread::sleep(std::time::Duration::from_secs(delay));
                     attempt += 1;
                 } else {
@@ -266,7 +354,11 @@ fn run_impl_with_retry(impl_: &Impl, topic: &str, results: &BTreeMap<String, Val
     }
 }
 
-fn run_impl_steps(impl_: &Impl, topic: &str, results: &BTreeMap<String, Value>) -> Result<Value, String> {
+fn run_impl_steps(
+    impl_: &Impl,
+    topic: &str,
+    results: &BTreeMap<String, Value>,
+) -> Result<Value, String> {
     let body = &impl_.body_text;
     let func = detect_func(body);
 
@@ -290,7 +382,10 @@ fn detect_func(body: &str) -> String {
 
     for &c in &chars {
         if c == '(' {
-            if !acc.is_empty() { found_paren = true; break; }
+            if !acc.is_empty() {
+                found_paren = true;
+                break;
+            }
             return String::new();
         }
         if c.is_alphanumeric() || c == '_' {
@@ -300,7 +395,11 @@ fn detect_func(body: &str) -> String {
             return String::new();
         }
     }
-    if found_paren { acc } else { String::new() }
+    if found_paren {
+        acc
+    } else {
+        String::new()
+    }
 }
 
 // ── Variable resolution ──
@@ -317,7 +416,9 @@ fn resolve_vars(text: &str, topic: &str, results: &BTreeMap<String, Value>) -> S
         if chars[i] == '@' {
             let start = i + 1;
             let mut end = start;
-            while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_' || chars[end] == '-') {
+            while end < chars.len()
+                && (chars[end].is_alphanumeric() || chars[end] == '_' || chars[end] == '-')
+            {
                 end += 1;
             }
             if end > start {
@@ -329,7 +430,9 @@ fn resolve_vars(text: &str, topic: &str, results: &BTreeMap<String, Value>) -> S
                 if after < chars.len() && chars[after] == '.' {
                     let f_start = after + 1;
                     let mut f_end = f_start;
-                    while f_end < chars.len() && (chars[f_end].is_alphanumeric() || chars[f_end] == '_') {
+                    while f_end < chars.len()
+                        && (chars[f_end].is_alphanumeric() || chars[f_end] == '_')
+                    {
                         f_end += 1;
                     }
                     field = Some(chars[f_start..f_end].iter().collect::<String>());
@@ -379,10 +482,15 @@ fn extract_string_arg(key: &str, body: &str) -> String {
         let before = if pos > 0 { &body[..pos] } else { "" };
         let last_char = before.chars().last();
         if let Some(c) = last_char {
-            if c.is_alphanumeric() || c == '_' { return String::new(); }
+            if c.is_alphanumeric() || c == '_' {
+                return String::new();
+            }
         }
         let after = &body[pos + pattern_r.len()..];
-        return after.chars().take_while(|c| *c != ',' && *c != ')' && *c != ' ').collect();
+        return after
+            .chars()
+            .take_while(|c| *c != ',' && *c != ')' && *c != ' ')
+            .collect();
     }
     String::new()
 }
@@ -399,7 +507,13 @@ fn extract_first_string(body: &str) -> String {
 
 // ── Built-in executors ──
 
-fn exec_search(_impl_: &Impl, topic: &str, body: &str, results: &BTreeMap<String, Value>, is_mcp: bool) -> Result<Value, String> {
+fn exec_search(
+    _impl_: &Impl,
+    topic: &str,
+    body: &str,
+    results: &BTreeMap<String, Value>,
+    is_mcp: bool,
+) -> Result<Value, String> {
     let query = extract_string_arg("query", body);
     let resolved = resolve_vars(&query, topic, results);
     let func_name = if is_mcp { "mcp_search" } else { "web_search" };
@@ -413,23 +527,44 @@ fn exec_search(_impl_: &Impl, topic: &str, body: &str, results: &BTreeMap<String
         .arg(&bridge)
         .arg(mode)
         .arg(&resolved)
-        .args(if engine.is_empty() { vec![] } else { vec![&engine] })
+        .args(if engine.is_empty() {
+            vec![]
+        } else {
+            vec![&engine]
+        })
         .output()
         .map_err(|e| format!("search bridge launch failed: {}", e))?;
 
     if output.status.success() {
-        Ok(Value::Text(String::from_utf8_lossy(&output.stdout).to_string()))
+        Ok(Value::Text(
+            String::from_utf8_lossy(&output.stdout).to_string(),
+        ))
     } else {
-        Err(format!("search failed: {}", String::from_utf8_lossy(&output.stderr).chars().take(200).collect::<String>()))
+        Err(format!(
+            "search failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+                .chars()
+                .take(200)
+                .collect::<String>()
+        ))
     }
 }
 
-fn exec_llm(_impl_: &Impl, topic: &str, body: &str, results: &BTreeMap<String, Value>) -> Result<Value, String> {
+fn exec_llm(
+    _impl_: &Impl,
+    topic: &str,
+    body: &str,
+    results: &BTreeMap<String, Value>,
+) -> Result<Value, String> {
     let prompt = extract_string_arg("input", body);
     let template = extract_string_arg("template", body);
     let count = extract_string_arg("count", body);
     let resolved_prompt = resolve_vars(&prompt, topic, results);
-    eprintln!("    -> llm: template={}, input.len={}", template, resolved_prompt.len());
+    eprintln!(
+        "    -> llm: template={}, input.len={}",
+        template,
+        resolved_prompt.len()
+    );
 
     let bridge = find_bridge("llm_bridge.py");
     let count_arg = if count.is_empty() { "5" } else { &count };
@@ -443,15 +578,28 @@ fn exec_llm(_impl_: &Impl, topic: &str, body: &str, results: &BTreeMap<String, V
         .map_err(|e| format!("llm bridge launch failed: {}", e))?;
 
     if output.status.success() {
-        Ok(Value::Text(String::from_utf8_lossy(&output.stdout).to_string()))
+        Ok(Value::Text(
+            String::from_utf8_lossy(&output.stdout).to_string(),
+        ))
     } else {
-        Err(format!("llm failed: {}", String::from_utf8_lossy(&output.stderr).chars().take(200).collect::<String>()))
+        Err(format!(
+            "llm failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+                .chars()
+                .take(200)
+                .collect::<String>()
+        ))
     }
 }
 
-fn exec_merge(impl_: &Impl, body: &str, results: &BTreeMap<String, Value>) -> Result<Value, String> {
+fn exec_merge(
+    impl_: &Impl,
+    body: &str,
+    results: &BTreeMap<String, Value>,
+) -> Result<Value, String> {
     let refs = &impl_.refs;
-    let parts: Vec<String> = refs.iter()
+    let parts: Vec<String> = refs
+        .iter()
         .filter(|r| *r != "merge")
         .filter_map(|r| results.get(r))
         .map(|v| v.as_text().to_string())
@@ -461,17 +609,28 @@ fn exec_merge(impl_: &Impl, body: &str, results: &BTreeMap<String, Value>) -> Re
         let mut seen = std::collections::BTreeSet::new();
         let mut out = Vec::new();
         for p in &parts {
-            if seen.insert(p.clone()) { out.push(p.clone()); }
+            if seen.insert(p.clone()) {
+                out.push(p.clone());
+            }
         }
         out.join("\n")
     } else {
         parts.join("\n---\n")
     };
-    eprintln!("    -> merge: {} sources, {} chars", parts.len(), merged.len());
+    eprintln!(
+        "    -> merge: {} sources, {} chars",
+        parts.len(),
+        merged.len()
+    );
     Ok(Value::Text(merged))
 }
 
-fn exec_write(_impl_: &Impl, topic: &str, body: &str, results: &BTreeMap<String, Value>) -> Result<Value, String> {
+fn exec_write(
+    _impl_: &Impl,
+    topic: &str,
+    body: &str,
+    results: &BTreeMap<String, Value>,
+) -> Result<Value, String> {
     let to_path = extract_string_arg("to", body);
     let content = extract_string_arg("content", body);
     let resolved_path = resolve_vars(&to_path, topic, results);
@@ -483,14 +642,17 @@ fn exec_write(_impl_: &Impl, topic: &str, body: &str, results: &BTreeMap<String,
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    fs::write(path, &resolved_content)
-        .map_err(|e| format!("write failed: {}", e))?;
+    fs::write(path, &resolved_content).map_err(|e| format!("write failed: {}", e))?;
     Ok(Value::File(expanded))
 }
 
 fn exec_read(_impl_: &Impl, body: &str) -> Result<Value, String> {
     let path = extract_string_arg("from", body);
-    let path = if path.is_empty() { extract_first_string(body) } else { path };
+    let path = if path.is_empty() {
+        extract_first_string(body)
+    } else {
+        path
+    };
 
     if path.starts_with("cache:") {
         return Err("cache miss".into());
@@ -500,12 +662,16 @@ fn exec_read(_impl_: &Impl, body: &str) -> Result<Value, String> {
     if !Path::new(&expanded).exists() {
         return Err(format!("file not found: {}", expanded));
     }
-    let content = fs::read_to_string(&expanded)
-        .map_err(|e| format!("read failed: {}", e))?;
+    let content = fs::read_to_string(&expanded).map_err(|e| format!("read failed: {}", e))?;
     Ok(Value::Text(content))
 }
 
-fn exec_run(_impl_: &Impl, topic: &str, body: &str, results: &BTreeMap<String, Value>) -> Result<Value, String> {
+fn exec_run(
+    _impl_: &Impl,
+    topic: &str,
+    body: &str,
+    results: &BTreeMap<String, Value>,
+) -> Result<Value, String> {
     let cmd_raw = extract_first_string(body);
     let cmd = resolve_vars(&cmd_raw, topic, results);
     eprintln!("    -> run: {}", cmd);
@@ -518,7 +684,11 @@ fn exec_run(_impl_: &Impl, topic: &str, body: &str, results: &BTreeMap<String, V
 
     if !output.status.success() {
         let stderr_text = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("run failed (exit {:?}): {}", output.status.code(), &stderr_text.chars().take(300).collect::<String>()));
+        return Err(format!(
+            "run failed (exit {:?}): {}",
+            output.status.code(),
+            &stderr_text.chars().take(300).collect::<String>()
+        ));
     }
 
     let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
@@ -546,8 +716,14 @@ fn parse_dsl_result_block(stdout: &str) -> Option<Vec<(String, String)>> {
     let mut in_block = false;
     let mut kvs = Vec::new();
     for line in stdout.lines() {
-        if line.starts_with("##DSL_RESULT") { in_block = true; continue; }
-        if line.starts_with("##DSL_END") { in_block = false; continue; }
+        if line.starts_with("##DSL_RESULT") {
+            in_block = true;
+            continue;
+        }
+        if line.starts_with("##DSL_END") {
+            in_block = false;
+            continue;
+        }
         if in_block {
             if let Some(eq) = line.find('=') {
                 let k = line[..eq].trim().to_string();
@@ -558,7 +734,11 @@ fn parse_dsl_result_block(stdout: &str) -> Option<Vec<(String, String)>> {
             }
         }
     }
-    if kvs.is_empty() { None } else { Some(kvs) }
+    if kvs.is_empty() {
+        None
+    } else {
+        Some(kvs)
+    }
 }
 
 fn encode_structured_result(kvs: &[(String, String)], raw: &str) -> String {
@@ -567,14 +747,20 @@ fn encode_structured_result(kvs: &[(String, String)], raw: &str) -> String {
 }
 
 fn extract_field(field: &str, text: &str) -> Option<String> {
-    if !text.starts_with("§§FIELDS§§") { return None; }
+    if !text.starts_with("§§FIELDS§§") {
+        return None;
+    }
     let rest = &text["§§FIELDS§§".len()..];
     for part in rest.split("§§") {
-        if part.starts_with("RAW§§") { break; }
+        if part.starts_with("RAW§§") {
+            break;
+        }
         if let Some(eq) = part.find('=') {
             let k = &part[..eq];
             let v = &part[eq + 1..];
-            if k == field { return Some(v.to_string()); }
+            if k == field {
+                return Some(v.to_string());
+            }
         }
     }
     None
@@ -604,7 +790,10 @@ fn eval_cond(cond: &str, val: &Value) -> bool {
 
     // Split predicate name and args
     let (name, _args_str): (&str, &str) = if let Some(open) = pred_name.find('(') {
-        (&pred_name[..open], pred_name[open + 1..].trim_end_matches(')'))
+        (
+            &pred_name[..open],
+            pred_name[open + 1..].trim_end_matches(')'),
+        )
     } else {
         (pred_name, "")
     };
@@ -652,11 +841,14 @@ fn rank_impls<'a>(
     impls: &[&'a Impl],
     _pick_by: &str,
 ) -> Vec<&'a Impl> {
-    let mut ranked: Vec<(f64, &'a Impl)> = impls.iter().map(|i| {
-        let base = weights.cost_total(&i.cost);
-        let penalty = impl_penalty(recent, &i.name);
-        (base * (1.0 + penalty), *i)
-    }).collect();
+    let mut ranked: Vec<(f64, &'a Impl)> = impls
+        .iter()
+        .map(|i| {
+            let base = weights.cost_total(&i.cost);
+            let penalty = impl_penalty(recent, &i.name);
+            (base * (1.0 + penalty), *i)
+        })
+        .collect();
     ranked.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     ranked.into_iter().map(|(_, imp)| imp).collect()
 }
@@ -665,28 +857,47 @@ fn impl_penalty(recent: &BTreeMap<String, RecentRuns>, name: &str) -> f64 {
     match recent.get(name) {
         None => 0.0,
         Some(rr) => {
-            if rr.window == 0 { return 0.0; }
-            if rr.consec_fail >= 3 { return f64::INFINITY; }
-            if rr.window < 3 { return 0.0; }
+            if rr.window == 0 {
+                return 0.0;
+            }
+            if rr.consec_fail >= 3 {
+                return f64::INFINITY;
+            }
+            if rr.window < 3 {
+                return 0.0;
+            }
             let failure_rate = rr.fails as f64 / rr.window as f64;
-            if failure_rate <= 0.1 { 0.0 }
-            else { (7.0 * failure_rate).exp() - 1.0 }
+            if failure_rate <= 0.1 {
+                0.0
+            } else {
+                (7.0 * failure_rate).exp() - 1.0
+            }
         }
     }
 }
 
 // ── When condition ──
 
-fn is_eligible(params: &BTreeMap<String, String>, results: &BTreeMap<String, Value>, impl_: &Impl) -> bool {
+fn is_eligible(
+    params: &BTreeMap<String, String>,
+    results: &BTreeMap<String, Value>,
+    impl_: &Impl,
+) -> bool {
     match &impl_.when {
         None => true,
         Some(cond) => eval_when(params, results, cond),
     }
 }
 
-fn eval_when(params: &BTreeMap<String, String>, _results: &BTreeMap<String, Value>, cond: &str) -> bool {
+fn eval_when(
+    params: &BTreeMap<String, String>,
+    _results: &BTreeMap<String, Value>,
+    cond: &str,
+) -> bool {
     let cond = cond.trim().trim_matches('"');
-    if cond.is_empty() { return true; }
+    if cond.is_empty() {
+        return true;
+    }
 
     // var == "value"
     if let Some(pos) = cond.find("==") {
@@ -706,7 +917,14 @@ fn eval_when(params: &BTreeMap<String, String>, _results: &BTreeMap<String, Valu
 
 // ── Record I/O (SQLite) ──
 
-fn append_run(proc_name: &str, impl_name: &str, pid: char, status: Status, _err_hash: Option<&str>, _err_at: Option<&str>) {
+fn append_run(
+    proc_name: &str,
+    impl_name: &str,
+    pid: char,
+    status: Status,
+    _err_hash: Option<&str>,
+    _err_at: Option<&str>,
+) {
     let status_str = match status {
         Status::Ok => "Ok",
         Status::Fail => "Fail",
@@ -738,11 +956,14 @@ fn load_recent_runs(proc_name: &str) -> BTreeMap<String, RecentRuns> {
         };
         let fails = recent.iter().filter(|&&ok| !ok).count();
         let consec = recent.iter().rev().take_while(|&&ok| !ok).count();
-        result.insert(name.clone(), RecentRuns {
-            window: recent.len(),
-            fails,
-            consec_fail: consec,
-        });
+        result.insert(
+            name.clone(),
+            RecentRuns {
+                window: recent.len(),
+                fails,
+                consec_fail: consec,
+            },
+        );
     }
     result
 }
@@ -767,18 +988,21 @@ fn short_hash(s: &str) -> String {
 }
 
 fn find_bridge(script: &str) -> String {
-    // Try project-local first, then ~/.local/share/ductile/bridge/
+    // Search order: current dir, ~/.local/share/ductile/bridge/, project-local
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let candidates = [
-        format!("/home/beef/projects/pipeline-dsl/bridge/{}", script),
-        format!("{}/.local/share/ductile/bridge/{}",
-                std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()), script),
+        format!("./{}", script),
+        format!("./bridge/{}", script),
+        format!("{}/.local/share/ductile/bridge/{}", home, script),
+        format!("/usr/local/share/ductile/bridge/{}", script),
     ];
     for c in &candidates {
         if Path::new(c).exists() {
             return c.clone();
         }
     }
-    candidates.last().unwrap().clone()
+    // Fallback: return the home path (will fail with a clear error)
+    format!("{}/.local/share/ductile/bridge/{}", home, script)
 }
 
 #[cfg(test)]
@@ -840,7 +1064,10 @@ mod tests {
     #[test]
     fn extract_string_arg_quoted() {
         assert_eq!(extract_string_arg("query", r#"query="AI news""#), "AI news");
-        assert_eq!(extract_string_arg("to", r#"to="/tmp/out.txt""#), "/tmp/out.txt");
+        assert_eq!(
+            extract_string_arg("to", r#"to="/tmp/out.txt""#),
+            "/tmp/out.txt"
+        );
     }
 
     #[test]
@@ -925,13 +1152,22 @@ mod tests {
 
     #[test]
     fn eval_cond_no_error() {
-        assert!(eval_cond("result => no_error", &Value::Text("all good".into())));
-        assert!(!eval_cond("result => no_error", &Value::Text("ERROR occurred".into())));
+        assert!(eval_cond(
+            "result => no_error",
+            &Value::Text("all good".into())
+        ));
+        assert!(!eval_cond(
+            "result => no_error",
+            &Value::Text("ERROR occurred".into())
+        ));
     }
 
     #[test]
     fn eval_cond_unknown_predicate_passes() {
-        assert!(eval_cond("result => unknown_pred", &Value::Text("x".into())));
+        assert!(eval_cond(
+            "result => unknown_pred",
+            &Value::Text("x".into())
+        ));
     }
 
     // ── eval_when ──
@@ -997,7 +1233,10 @@ mod tests {
     // ── encode/extract structured result ──
     #[test]
     fn structured_result_roundtrip() {
-        let kvs = vec![("status".into(), "ok".into()), ("count".into(), "42".into())];
+        let kvs = vec![
+            ("status".into(), "ok".into()),
+            ("count".into(), "42".into()),
+        ];
         let encoded = encode_structured_result(&kvs, "raw output here");
         assert!(encoded.starts_with("§§FIELDS§§"));
         assert!(encoded.contains("status=ok"));
@@ -1034,21 +1273,42 @@ mod tests {
     #[test]
     fn impl_penalty_low_failure_rate() {
         let mut recent = BTreeMap::new();
-        recent.insert("a".into(), RecentRuns { window: 10, fails: 1, consec_fail: 0 });
+        recent.insert(
+            "a".into(),
+            RecentRuns {
+                window: 10,
+                fails: 1,
+                consec_fail: 0,
+            },
+        );
         assert_eq!(impl_penalty(&recent, "a"), 0.0); // 0.1 rate = no penalty
     }
 
     #[test]
     fn impl_penalty_consec_3_failures() {
         let mut recent = BTreeMap::new();
-        recent.insert("a".into(), RecentRuns { window: 5, fails: 3, consec_fail: 3 });
+        recent.insert(
+            "a".into(),
+            RecentRuns {
+                window: 5,
+                fails: 3,
+                consec_fail: 3,
+            },
+        );
         assert!(impl_penalty(&recent, "a").is_infinite());
     }
 
     #[test]
     fn impl_penalty_high_failure() {
         let mut recent = BTreeMap::new();
-        recent.insert("a".into(), RecentRuns { window: 10, fails: 8, consec_fail: 0 });
+        recent.insert(
+            "a".into(),
+            RecentRuns {
+                window: 10,
+                fails: 8,
+                consec_fail: 0,
+            },
+        );
         let p = impl_penalty(&recent, "a");
         assert!(p > 0.0);
     }
@@ -1060,12 +1320,22 @@ mod tests {
         let recent = BTreeMap::new();
         let a = Impl {
             name: "expensive".into(),
-            cost: Cost { latency: 1000, risk: 0.5, tokens: 0, money: 0.0 },
+            cost: Cost {
+                latency: 1000,
+                risk: 0.5,
+                tokens: 0,
+                money: 0.0,
+            },
             ..default_impl()
         };
         let b = Impl {
             name: "cheap".into(),
-            cost: Cost { latency: 10, risk: 0.0, tokens: 0, money: 0.0 },
+            cost: Cost {
+                latency: 10,
+                risk: 0.0,
+                tokens: 0,
+                money: 0.0,
+            },
             ..default_impl()
         };
         let impls = vec![&a, &b];
@@ -1079,15 +1349,32 @@ mod tests {
         let weights = Weights::default();
         let mut recent = BTreeMap::new();
         // Penalize "cheap" heavily
-        recent.insert("cheap".into(), RecentRuns { window: 10, fails: 8, consec_fail: 0 });
+        recent.insert(
+            "cheap".into(),
+            RecentRuns {
+                window: 10,
+                fails: 8,
+                consec_fail: 0,
+            },
+        );
         let a = Impl {
             name: "cheap".into(),
-            cost: Cost { latency: 10, risk: 0.0, tokens: 0, money: 0.0 },
+            cost: Cost {
+                latency: 10,
+                risk: 0.0,
+                tokens: 0,
+                money: 0.0,
+            },
             ..default_impl()
         };
         let b = Impl {
             name: "expensive".into(),
-            cost: Cost { latency: 100, risk: 0.0, tokens: 0, money: 0.0 },
+            cost: Cost {
+                latency: 100,
+                risk: 0.0,
+                tokens: 0,
+                money: 0.0,
+            },
             ..default_impl()
         };
         let impls = vec![&a, &b];
@@ -1203,7 +1490,8 @@ mod tests {
     fn exec_pipeline_stub_proc() {
         let pl = Pipeline {
             name: "stub_test".into(),
-            weights: Weights::default(), description: String::new(),
+            weights: Weights::default(),
+            description: String::new(),
             procs: vec![Proc {
                 name: "p".into(),
                 plan: vec![Impl {

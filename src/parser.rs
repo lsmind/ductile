@@ -16,9 +16,17 @@ pub struct ParseError {
 
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Parse error:\n{}:{}:\n  |  \n{:>2} | {}\n  | {:>width$}^\n{}\n",
-               self.line, self.col, self.line, self.line_text, "",
-               self.msg, width = self.col.saturating_sub(1))
+        write!(
+            f,
+            "Parse error:\n{}:{}:\n  |  \n{:>2} | {}\n  | {:>width$}^\n{}\n",
+            self.line,
+            self.col,
+            self.line,
+            self.line_text,
+            "",
+            self.msg,
+            width = self.col.saturating_sub(1)
+        )
     }
 }
 
@@ -38,7 +46,12 @@ struct LineCursor<'a> {
 
 impl<'a> LineCursor<'a> {
     fn new(line: &'a str, line_num: usize) -> Self {
-        LineCursor { chars: line.chars().collect(), pos: 0, line_num, raw: line }
+        LineCursor {
+            chars: line.chars().collect(),
+            pos: 0,
+            line_num,
+            raw: line,
+        }
     }
 
     fn peek(&self) -> Option<char> {
@@ -51,14 +64,19 @@ impl<'a> LineCursor<'a> {
 
     fn advance(&mut self) -> Option<char> {
         let c = self.chars.get(self.pos).copied();
-        if c.is_some() { self.pos += 1; }
+        if c.is_some() {
+            self.pos += 1;
+        }
         c
     }
 
     fn skip_ws(&mut self) {
         while let Some(c) = self.peek() {
-            if c.is_whitespace() { self.advance(); }
-            else { break; }
+            if c.is_whitespace() {
+                self.advance();
+            } else {
+                break;
+            }
         }
     }
 
@@ -110,7 +128,12 @@ pub fn parse_pipeline(input: &str) -> Result<Pipeline, ParseError> {
         idx += 1;
     }
     if idx >= lines.len() {
-        return Err(ParseError { line: 1, col: 1, msg: "empty input".into(), line_text: String::new() });
+        return Err(ParseError {
+            line: 1,
+            col: 1,
+            msg: "empty input".into(),
+            line_text: String::new(),
+        });
     }
 
     // Parse header: Pipeline("name") or Pipeline("name", "desc")
@@ -125,7 +148,9 @@ pub fn parse_pipeline(input: &str) -> Result<Pipeline, ParseError> {
         while idx < lines.len() && is_skippable(lines[idx]) {
             idx += 1;
         }
-        if idx >= lines.len() { break; }
+        if idx >= lines.len() {
+            break;
+        }
 
         let line = lines[idx];
         let trimmed = line.trim();
@@ -156,7 +181,12 @@ fn parse_header(line: &str, line_num: usize) -> Result<(String, String), ParseEr
         // OK
     } else {
         return Err(ParseError {
-            line: line_num, col: 1, msg: format!("unexpected {:?} — expecting \"Pipeline\"", &line[..line.len().min(20)]),
+            line: line_num,
+            col: 1,
+            msg: format!(
+                "unexpected {:?} — expecting \"Pipeline\"",
+                &line[..line.len().min(20)]
+            ),
             line_text: line.into(),
         });
     }
@@ -197,7 +227,9 @@ fn find_matching_paren(s: &str) -> Option<usize> {
             '(' => depth += 1,
             ')' => {
                 depth -= 1;
-                if depth == 0 { return Some(i); }
+                if depth == 0 {
+                    return Some(i);
+                }
             }
             _ => {}
         }
@@ -273,10 +305,13 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
         if trimmed.starts_with(".pick") {
             if let Some(by_start) = trimmed.find("by=") {
                 let after = &trimmed[by_start + 3..];
-                let by_val: String = after.chars()
+                let by_val: String = after
+                    .chars()
                     .skip_while(|c| *c == '"' || *c == ' ')
                     .take_while(|c| *c != '"' && *c != ')' && *c != ',')
-                    .collect::<String>().trim().to_string();
+                    .collect::<String>()
+                    .trim()
+                    .to_string();
                 if !by_val.is_empty() {
                     pick_by = by_val;
                 }
@@ -318,22 +353,27 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
         idx += 1;
     }
 
-    Ok((Proc {
-        name,
-        description: description.clone(),
-        plan,
-        checks,
-        deliver: is_deliver,
-        foreach: foreach_src,
-        foreach_var,
-        pick_by,
-    }, idx))
+    Ok((
+        Proc {
+            name,
+            description: description.clone(),
+            plan,
+            checks,
+            deliver: is_deliver,
+            foreach: foreach_src,
+            foreach_var,
+            pick_by,
+        },
+        idx,
+    ))
 }
 
 // ── Parse .plan(...) block — extract impl entries ──
-fn parse_plan_block(lines: &[&str], start_idx: usize, proc_name: &str)
-    -> Result<(Vec<Impl>, usize), ParseError>
-{
+fn parse_plan_block(
+    lines: &[&str],
+    start_idx: usize,
+    proc_name: &str,
+) -> Result<(Vec<Impl>, usize), ParseError> {
     let mut depth = 0i32;
     let mut buf = String::new();
     let mut idx = start_idx;
@@ -342,7 +382,10 @@ fn parse_plan_block(lines: &[&str], start_idx: usize, proc_name: &str)
     while idx < lines.len() {
         let line = lines[idx];
         for c in line.chars() {
-            if c == '(' { depth += 1; started = true; }
+            if c == '(' {
+                depth += 1;
+                started = true;
+            }
             if c == ')' {
                 depth -= 1;
                 if started && depth == 0 {
@@ -354,7 +397,9 @@ fn parse_plan_block(lines: &[&str], start_idx: usize, proc_name: &str)
         }
         buf.push('\n');
         idx += 1;
-        if started && depth <= 0 { break; }
+        if started && depth <= 0 {
+            break;
+        }
     }
 
     let impls = parse_impl_entries(&buf, proc_name)?;
@@ -380,7 +425,9 @@ fn parse_impl_entries(text: &str, proc_name: &str) -> Result<Vec<Impl>, ParseErr
     let mut impls = Vec::new();
     for entry in &entries {
         let entry = entry.trim();
-        if entry.is_empty() { continue; }
+        if entry.is_empty() {
+            continue;
+        }
 
         if let Some(arrow_pos) = find_arrow(entry) {
             let name = entry[..arrow_pos].trim().to_string();
@@ -440,14 +487,24 @@ fn split_impl_entries(text: &str) -> Vec<String> {
 
     for c in text.chars() {
         match c {
-            '(' => { depth += 1; current.push(c); }
-            ')' => { depth -= 1; current.push(c); }
+            '(' => {
+                depth += 1;
+                current.push(c);
+            }
+            ')' => {
+                depth -= 1;
+                current.push(c);
+            }
             ',' if depth == 0 => {
                 entries.push(current.clone());
                 current.clear();
             }
-            '\n' => { current.push(' '); }
-            _ => { current.push(c); }
+            '\n' => {
+                current.push(' ');
+            }
+            _ => {
+                current.push(c);
+            }
         }
     }
     if !current.trim().is_empty() {
@@ -461,7 +518,16 @@ fn split_impl_entries(text: &str) -> Vec<String> {
 fn extract_cost_and_modifiers(
     text: &str,
     _impl_name: &str,
-) -> (String, Cost, usize, Vec<Check>, Option<String>, bool, bool, BTreeSet<String>) {
+) -> (
+    String,
+    Cost,
+    usize,
+    Vec<Check>,
+    Option<String>,
+    bool,
+    bool,
+    BTreeSet<String>,
+) {
     let mut cost = Cost::default();
     let mut body = text.trim().to_string();
     let mut retry = 0;
@@ -497,10 +563,18 @@ fn extract_cost_and_modifiers(
                     let key = field[..eq].trim();
                     let val = field[eq + 1..].trim();
                     match key {
-                        "latency" => { cost.latency = val.parse().unwrap_or(0); }
-                        "risk" => { cost.risk = val.parse().unwrap_or(0.0); }
-                        "tokens" => { cost.tokens = val.parse().unwrap_or(0); }
-                        "money" => { cost.money = val.parse().unwrap_or(0.0); }
+                        "latency" => {
+                            cost.latency = val.parse().unwrap_or(0);
+                        }
+                        "risk" => {
+                            cost.risk = val.parse().unwrap_or(0.0);
+                        }
+                        "tokens" => {
+                            cost.tokens = val.parse().unwrap_or(0);
+                        }
+                        "money" => {
+                            cost.money = val.parse().unwrap_or(0.0);
+                        }
                         _ => {}
                     }
                 }
@@ -528,7 +602,11 @@ fn extract_cost_and_modifiers(
             let prefix = ".ensure(";
             let after = &body[e_pos..];
             if let Some(close) = find_matching_paren(after) {
-                let char_close = after.char_indices().nth(close).map(|(b, _)| b).unwrap_or(after.len());
+                let char_close = after
+                    .char_indices()
+                    .nth(close)
+                    .map(|(b, _)| b)
+                    .unwrap_or(after.len());
                 let inner_start = prefix.len();
                 if char_close >= inner_start {
                     let inner = &after[inner_start..char_close];
@@ -566,7 +644,16 @@ fn extract_cost_and_modifiers(
         body = body.replace(".stub", "");
     }
 
-    (body.trim().to_string(), cost, retry, ensure, when, enabled, stub, tags)
+    (
+        body.trim().to_string(),
+        cost,
+        retry,
+        ensure,
+        when,
+        enabled,
+        stub,
+        tags,
+    )
 }
 
 fn extract_refs(body: &str) -> Vec<String> {
@@ -624,7 +711,9 @@ fn parse_foreach_line(line: &str) -> Result<(String, String), ParseError> {
         let part = part.trim();
         if part.starts_with("source=") {
             let val = &part[7..];
-            src = val.trim_matches(|c| c == '@' || c == '"' || c == ' ').to_string();
+            src = val
+                .trim_matches(|c| c == '@' || c == '"' || c == ' ')
+                .to_string();
         } else if part.starts_with("var=") {
             let val = &part[4..];
             var = val.trim_matches(|c| c == '"' || c == ' ').to_string();
@@ -657,10 +746,12 @@ fn extract_last_quoted(s: &str) -> Option<String> {
 }
 
 pub fn parse_pipeline_file(path: &str) -> Result<Pipeline, ParseError> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| ParseError {
-            line: 0, col: 0, msg: format!("cannot read file: {}", e), line_text: String::new()
-        })?;
+    let content = std::fs::read_to_string(path).map_err(|e| ParseError {
+        line: 0,
+        col: 0,
+        msg: format!("cannot read file: {}", e),
+        line_text: String::new(),
+    })?;
     parse_pipeline(&content)
 }
 
