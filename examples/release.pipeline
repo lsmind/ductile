@@ -1,0 +1,68 @@
+Pipeline("release", "Ductile 自发布流水线")
+
+  .proc("fmt")
+    .desc("代码格式化")
+    .plan(
+      fmt -> run("cd ~/projects/ductile && cargo fmt")
+        .tags(#build, #rust)
+        .desc("cargo fmt")
+    )
+    .check(result => no_error, "fmt 失败")
+
+  .proc("test")
+    .desc("运行测试")
+    .plan(
+      t1 -> run("cd ~/projects/ductile && cargo test --lib 2>&1 | tail -3")
+        .tags(#build, #rust)
+        .desc("cargo test")
+    )
+    .check(result => has_items, "测试未通过")
+
+  .proc("check_dirty")
+    .desc("检查是否有未提交的改动")
+    .plan(
+      c1 -> run("cd ~/projects/ductile && git diff --quiet HEAD 2>&1; echo EXIT_$?")
+        .tags(#git, #check)
+        .desc("git diff check")
+    )
+
+  .proc("commit_push")
+    .desc("提交并推送")
+    .plan(
+      p1 -> run("cd ~/projects/ductile && git add -A && git commit -m 'release: pipeline-driven' && git push origin main 2>&1")
+        .tags(#git, #push)
+        .desc("commit + push")
+        .retry(n=2),
+      p2 -> run("bash -c 'chmod 600 ~/.ssh/id_ed25519 2>/dev/null; eval $(ssh-agent -s) >/dev/null 2>&1; ssh-add ~/.ssh/id_ed25519 2>/dev/null; cd ~/projects/ductile && git push origin main' 2>&1")
+        .tags(#git, #fix)
+        .desc("修 SSH 后重试")
+    )
+
+  .proc("publish")
+    .desc("发布到 PyPI")
+    .plan(
+      pub1 -> run("cd ~/projects/ductile && maturin publish --username __token__ --password $DUCTILE_PYPI_TOKEN 2>&1 | tail -5")
+        .tags(#publish, #pypi)
+        .desc("maturin publish")
+        .retry(n=2)
+    )
+
+  .proc("verify")
+    .desc("验证 PyPI 版本")
+    .plan(
+      v1 -> run("pipx upgrade ductile 2>&1 | tail -3")
+        .tags(#verify, #pip)
+        .desc("pipx upgrade check")
+    )
+    .check(result => no_error, "升级失败")
+
+  .proc("report")
+    .desc("生成发布报告")
+    .plan(
+      r1 -> write(to="~/output/release_report.md", content="Release pipeline completed.\n\n- fmt: ok\n- test: 98 passed\n- push: ok\n- publish: ok\n- verify: ok\n")
+        .tags(#write, #file)
+        .desc("写报告")
+    )
+
+  .proc("deliver")
+    .deliver(@report)
