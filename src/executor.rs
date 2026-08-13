@@ -13,8 +13,68 @@ use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
+// ── Hot patches ──
+
+/// Load patches from SQLite and apply them to a cloned pipeline.
+/// Supports overriding: enabled, cost.latency, cost.risk, cost.tokens, cost.money, retry, stub.
+fn apply_patches(pl: &Pipeline) -> Pipeline {
+    let patches = db::load_patches(&pl.name);
+    if patches.is_empty() {
+        return pl.clone();
+    }
+    let mut cloned = pl.clone();
+    for patch in &patches {
+        for proc in &mut cloned.procs {
+            if proc.name != patch.proc_name {
+                continue;
+            }
+            for impl_ in &mut proc.plan {
+                if impl_.name != patch.impl_name {
+                    continue;
+                }
+                match patch.field.as_str() {
+                    "enabled" => {
+                        impl_.enabled = patch.value == "true" || patch.value == "1";
+                        eprintln!("  [patch] {}.{}: enabled={}", proc.name, impl_.name, impl_.enabled);
+                    }
+                    "cost.latency" => {
+                        impl_.cost.latency = patch.value.parse().unwrap_or(impl_.cost.latency);
+                        eprintln!("  [patch] {}.{}: cost.latency={}", proc.name, impl_.name, impl_.cost.latency);
+                    }
+                    "cost.risk" => {
+                        impl_.cost.risk = patch.value.parse().unwrap_or(impl_.cost.risk);
+                        eprintln!("  [patch] {}.{}: cost.risk={}", proc.name, impl_.name, impl_.cost.risk);
+                    }
+                    "cost.tokens" => {
+                        impl_.cost.tokens = patch.value.parse().unwrap_or(impl_.cost.tokens);
+                        eprintln!("  [patch] {}.{}: cost.tokens={}", proc.name, impl_.name, impl_.cost.tokens);
+                    }
+                    "cost.money" => {
+                        impl_.cost.money = patch.value.parse().unwrap_or(impl_.cost.money);
+                        eprintln!("  [patch] {}.{}: cost.money={}", proc.name, impl_.name, impl_.cost.money);
+                    }
+                    "retry" => {
+                        impl_.retry = patch.value.parse().unwrap_or(impl_.retry);
+                        eprintln!("  [patch] {}.{}: retry={}", proc.name, impl_.name, impl_.retry);
+                    }
+                    "stub" => {
+                        impl_.stub = patch.value == "true" || patch.value == "1";
+                        eprintln!("  [patch] {}.{}: stub={}", proc.name, impl_.name, impl_.stub);
+                    }
+                    _ => {
+                        eprintln!("  [patch] {}.{}: unknown field '{}'", proc.name, impl_.name, patch.field);
+                    }
+                }
+            }
+        }
+    }
+    cloned
+}
+
 pub fn exec_pipeline(topic: &str, params: &BTreeMap<String, String>, pl: &Pipeline) -> ExecResult {
-    let eg = egraph::build_egraph(pl);
+    // Apply hot patches: clone pipeline, override fields from SQLite
+    let pl = apply_patches(pl);
+    let eg = egraph::build_egraph(&pl);
     let layers = egraph::parallel_groups(&eg);
 
     let mut results: BTreeMap<String, Value> = BTreeMap::new();
@@ -30,7 +90,7 @@ pub fn exec_pipeline(topic: &str, params: &BTreeMap<String, String>, pl: &Pipeli
             if let Some(proc) = proc {
                 if proc.deliver { continue; }
 
-                match exec_proc(proc, topic, params, &results, pl) {
+                match exec_proc(proc, topic, params, &results, &pl) {
                     Ok(val) => { results.insert(proc.name.clone(), val); }
                     Err(e) => {
                         failed = true;

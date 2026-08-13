@@ -3,6 +3,7 @@
 use crate::*;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use rusqlite::params;
 
 pub fn run(args: &[String]) -> Result<i32, String> {
     if args.len() < 2 {
@@ -48,6 +49,14 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         "version" if args.len() >= 4 && args[2] == "log" => cmd_version_log(&args[3]),
         "version" if args.len() >= 6 && args[2] == "diff" => cmd_version_diff(&args[3], &args[4], &args[5]),
 
+        // Hot patch
+        "patch" if args.len() >= 3 && args[2] == "list" => cmd_patch_list(),
+        "patch" if args.len() >= 3 && args[2] == "clear" && args.len() >= 4 => cmd_patch_clear(&args[3]),
+        "patch" if args.len() >= 7 && args[2] == "set" => {
+            // patch set <pipeline> <proc> <impl> <field> <value>
+            cmd_patch_set(&args[3], &args[4], &args[5], &args[6], &args[7])
+        }
+
         _ => { print_usage(); Ok(1) }
     }
 }
@@ -77,6 +86,11 @@ fn print_usage() {
     eprintln!("  version save <file> \"desc\"   Save version snapshot");
     eprintln!("  version log  <file>          Show version history");
     eprintln!("  version diff <file> v1 v2    Diff two versions");
+    eprintln!();
+    eprintln!("Patch (hot override, no file edit):");
+    eprintln!("  patch set <pipeline> <proc> <impl> <field> <value>");
+    eprintln!("  patch list");
+    eprintln!("  patch clear <pipeline>");
 }
 
 // ── run ──
@@ -389,6 +403,39 @@ fn cmd_version_diff(path: &str, v1: &str, v2: &str) -> Result<i32, String> {
         Some(diff) => { println!("{}", diff); Ok(0) }
         None => { println!("Version(s) not found."); Ok(0) }
     }
+}
+
+// ── patch ──
+
+fn cmd_patch_set(pipeline: &str, proc_name: &str, impl_name: &str, field: &str, value: &str) -> Result<i32, String> {
+    db::set_patch(pipeline, proc_name, impl_name, field, value);
+    println!("✓ Patched: {}.{}.{} = {}", pipeline, proc_name, impl_name, field);
+    println!("  {} = {}", field, value);
+    println!("\nNext `ductile run` will use this override. Source file not modified.");
+    Ok(0)
+}
+
+fn cmd_patch_list() -> Result<i32, String> {
+    let patches = db::all_patches();
+    if patches.is_empty() {
+        println!("No patches set.");
+        return Ok(0);
+    }
+    println!("Active patches ({}):\n", patches.len());
+    for p in &patches {
+        println!("  {}.{}.{} = {}", p.pipeline, p.proc_name, p.impl_name, p.field);
+        println!("    → {}", p.value);
+    }
+    Ok(0)
+}
+
+fn cmd_patch_clear(pipeline: &str) -> Result<i32, String> {
+    // Delete all patches for a pipeline
+    db::init_db();
+    let conn = db::open();
+    conn.execute("DELETE FROM patches WHERE pipeline = ?1", params![pipeline]).ok();
+    println!("✓ Cleared all patches for pipeline: {}", pipeline);
+    Ok(0)
 }
 
 // ── helpers ──

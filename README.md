@@ -231,7 +231,30 @@ Compression summary:
   Ratio:      52.9%
 ```
 
-### 8. 版本快照
+### 8. 热补丁（不改源文件）
+
+运行时覆盖节点属性，不需要编辑 `.pipeline` 文件：
+
+```bash
+# 禁用某个 impl
+ductile patch set research search web enabled false
+
+# 调整 cost
+ductile patch set research search web cost.latency 5000
+
+# 改 retry 次数
+ductile patch set research summarize s1 retry 5
+
+# 查看所有 patch
+ductile patch list
+
+# 清除某 pipeline 的所有 patch
+ductile patch clear research
+```
+
+下次 `ductile run` 自动加载 patch，stderr 会打印 `[patch]` 日志。**源文件不动，随时可清除。**
+
+### 9. 版本快照
 
 不需要 git 就能追踪 pipeline 变更：
 
@@ -241,7 +264,7 @@ ductile version log  research.pipeline
 ductile version diff research.pipeline 1 3
 ```
 
-### 9. DSL_RESULT 协议：零改接入
+### 10. DSL_RESULT 协议：零改接入
 
 任何脚本只需在 stdout 末尾打几行，就能返回结构化数据：
 
@@ -257,7 +280,7 @@ echo "##DSL_END"
 
 下游通过 `@proc.field` 引用具体字段。**新工具接入零改代码。**
 
-### 10. 标签系统
+### 11. 标签系统
 
 自由格式 tag 做结构识别，不需要预定义枚举：
 
@@ -304,6 +327,9 @@ echo "##DSL_END"
 | `version save <file> "desc"` | 保存版本快照 |
 | `version log <file>` | 版本历史 |
 | `version diff <file> v1 v2` | 版本对比 |
+| `patch set <pipeline> <proc> <impl> <field> <value>` | 热补丁（不改源文件） |
+| `patch list` | 查看所有热补丁 |
+| `patch clear <pipeline>` | 清除热补丁 |
 
 ## 测试
 

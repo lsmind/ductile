@@ -67,6 +67,16 @@ pub fn init_db() {
             description TEXT DEFAULT '',
             proc_names  TEXT DEFAULT '',
             created_at  TEXT DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS patches (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            pipeline    TEXT NOT NULL,
+            proc_name   TEXT NOT NULL,
+            impl_name   TEXT NOT NULL,
+            field       TEXT NOT NULL,
+            value       TEXT NOT NULL,
+            created_at  TEXT DEFAULT '',
+            UNIQUE(pipeline, proc_name, impl_name, field)
         );",
     )
     .expect("init_db failed");
@@ -363,6 +373,92 @@ pub fn isomorphic_groups() -> Vec<IsoGroup> {
             members,
         })
         .collect()
+}
+
+// ── Patches (hot overrides without editing source files) ──
+
+#[derive(Debug, Clone)]
+pub struct PatchRow {
+    pub pipeline: String,
+    pub proc_name: String,
+    pub impl_name: String,
+    pub field: String,
+    pub value: String,
+}
+
+/// Upsert a patch: if (pipeline, proc, impl, field) already exists, update value.
+pub fn set_patch(pipeline: &str, proc_name: &str, impl_name: &str, field: &str, value: &str) {
+    init_db();
+    let conn = open();
+    let ts = now_ts();
+    conn.execute(
+        "INSERT INTO patches (pipeline, proc_name, impl_name, field, value, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(pipeline, proc_name, impl_name, field)
+         DO UPDATE SET value=excluded.value, created_at=excluded.created_at",
+        params![pipeline, proc_name, impl_name, field, value, ts],
+    )
+    .ok();
+}
+
+/// Remove a specific patch.
+pub fn remove_patch(pipeline: &str, proc_name: &str, impl_name: &str, field: &str) {
+    init_db();
+    let conn = open();
+    conn.execute(
+        "DELETE FROM patches WHERE pipeline=?1 AND proc_name=?2 AND impl_name=?3 AND field=?4",
+        params![pipeline, proc_name, impl_name, field],
+    )
+    .ok();
+}
+
+/// Load all patches for a given pipeline.
+pub fn load_patches(pipeline: &str) -> Vec<PatchRow> {
+    init_db();
+    let conn = open();
+    let mut stmt = conn
+        .prepare(
+            "SELECT pipeline, proc_name, impl_name, field, value
+             FROM patches WHERE pipeline = ?1
+             ORDER BY proc_name, impl_name, field",
+        )
+        .unwrap();
+    stmt.query_map(params![pipeline], |row| {
+        Ok(PatchRow {
+            pipeline: row.get(0)?,
+            proc_name: row.get(1)?,
+            impl_name: row.get(2)?,
+            field: row.get(3)?,
+            value: row.get(4)?,
+        })
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
+}
+
+/// List all patches across all pipelines.
+pub fn all_patches() -> Vec<PatchRow> {
+    init_db();
+    let conn = open();
+    let mut stmt = conn
+        .prepare(
+            "SELECT pipeline, proc_name, impl_name, field, value
+             FROM patches ORDER BY pipeline, proc_name, impl_name",
+        )
+        .unwrap();
+    stmt.query_map([], |row| {
+        Ok(PatchRow {
+            pipeline: row.get(0)?,
+            proc_name: row.get(1)?,
+            impl_name: row.get(2)?,
+            field: row.get(3)?,
+            value: row.get(4)?,
+        })
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
 }
 
 // ── Tests ──
