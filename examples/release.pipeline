@@ -12,11 +12,11 @@ Pipeline("release", "Ductile 自发布流水线")
   .proc("test")
     .desc("运行测试")
     .plan(
-      t1 -> run("cd ~/projects/ductile && cargo test --lib 2>&1 | tail -3")
+      t1 -> run("cd ~/projects/ductile && cargo test --lib 2>&1 | grep 'test result'")
         .tags(#build, #rust)
         .desc("cargo test")
     )
-    .check(result => has_items, "测试未通过")
+    .check(result => not_empty, "测试未通过")
 
   .proc("check_dirty")
     .desc("检查是否有未提交的改动")
