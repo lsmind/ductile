@@ -7,78 +7,60 @@
 [![Tests](https://img.shields.io/badge/Tests-98%20passed-brightgreen.svg)](#测试)
 [![PyPI](https://img.shields.io/badge/PyPI-0.5.0-blue.svg)](https://pypi.org/project/ductile/)
 
-## 这是什么
+---
 
-Ductile 是一个**声明式流水线引擎**。你写一个 `.pipeline` 文本文件，声明"做什么"和"有哪些备选路径"，引擎负责"怎么选、怎么降级、怎么淘汰"。
+## Ductile 是什么
 
-它解决的核心问题是：**把不确定性管理从人工判断变成引擎的自适应数值优化。**
+你写一个 `.pipeline` 文本文件，声明"做什么"和"有哪些备选路径"。引擎负责剩下的全部：选哪条路、怎么降级、什么时候淘汰废路径。
 
-### 与同类工具的区别
+一句话：**把不确定性管理从人工判断变成引擎的自适应数值优化。**
+
+### 和现有工具的区别
 
 | 能力 | Ductile | LangGraph / AutoGen | Airflow / Prefect | 传统路由层 |
 |------|---------|---------------------|--------------------|-----------|
-| 声明式流程定义 | ✅ 纯文本 DSL | ⚠️ 代码+图 | ✅ DAG | ❌ 仅模型级 |
-| 编译时类型检查 | ✅ check 命令 | ❌ 运行时 | ⚠️ 部分 | ❌ 无 |
-| 多路径自动降级 | ✅ 内核能力 | ❌ 需手写条件边 | ❌ 需重试逻辑 | ⚠️ 静态路由 |
-| 运行时自适应惩罚 | ✅ 滑动窗口闭环 | ❌ 无 | ❌ 无 | ❌ 无 |
-| 同构发现 + 打散重组 | ✅ tag 匹配 + compose | ❌ 无 | ❌ 无 | ❌ 无 |
-| 关键路径静态分析 | ✅ graph 命令 | ❌ 仅运行时 trace | ⚠️ 运行时 | ❌ 无 |
-| 零改接入外部工具 | ✅ DSL_RESULT 协议（5 行 echo） | ❌ 需写 Tool 类 | ❌ 需写 Operator | ⚠️ 需适配器 |
-| SQLite 统一存储 | ✅ 单文件 ductile.db | ❌ | ✅ 需外部 DB | ❌ |
-| 版本快照 | ✅ 内置 version 命令 | ❌ | ❌ | ❌ |
-| 外部依赖 | 0（纯 Rust std + SQLite） | Python 生态 | Python + DB | 各异 |
+| 声明式流程定义 | ✅ 纯文本 | ⚠️ 代码+图 | ✅ DAG | ❌ |
+| 多路径自动降级 | ✅ 内核 | ❌ 手写 | ❌ 手写 | ⚠️ 静态 |
+| 运行时自适应惩罚 | ✅ 独家 | ❌ | ❌ | ❌ |
+| 同构发现 + 打散重组 | ✅ | ❌ | ❌ | ❌ |
+| 热补丁（不改源文件） | ✅ | ❌ | ❌ | ❌ |
+| SQLite 统一存储 | ✅ 单文件 | ❌ | ✅ 外部 DB | ❌ |
+| 版本快照 | ✅ 内置 | ❌ | ❌ | ❌ |
+| 零改接入外部工具 | ✅ 5 行 echo | ❌ Tool 类 | ❌ Operator | ⚠️ 适配器 |
+| 外部依赖 | 0 | Python | Python + DB | 各异 |
 
-**一句话**：路由层只解决"选哪个模型"，编排框架只解决"怎么连起来"，Ductile 把"怎么选 + 怎么降级 + 怎么越跑越聪明 + 怎么从零件库组装新流水线"塞进一个引擎。
+**路由层只解决"选哪个模型"，编排框架只解决"怎么连起来"。Ductile 把选择 + 降级 + 自学习 + 热补丁 + 零改接入塞进一个引擎。**
 
 ## 安装
 
 ```bash
-# pip（推荐，已发布到 PyPI）
 pip install ductile
-
-# 从源码编译
-git clone https://github.com/lsmind/ductile.git
-cd ductile && cargo build --release
-# 二进制在 target/release/ductile
 ```
 
-## 30 秒上手
+## 30 秒看懂
 
 写一个 `.pipeline` 文件：
 
 ```
-Pipeline("research", "搜索主题并撰写报告")
+Pipeline("research")
   .proc("search")
-    .desc("多路搜索")
     .plan(
       web -> web_search(query="{topic}")
         .tags(#search, #web)
-        .desc("网页搜索")
         .retry(n=3),
       mcp -> mcp_search(query="{topic}")
         .tags(#search, #mcp)
-        .desc("MCP搜索")
     )
     .check(result => has_results, "搜索无结果")
 
-  .proc("summarize")
-    .desc("LLM 总结")
+  .proc("write_report")
     .plan(
-      s1 -> llm(input=@search, template="summary")
-        .tags(#llm, #parse)
-        .desc("LLM综合")
-    )
-
-  .proc("report")
-    .desc("写入报告文件")
-    .plan(
-      w1 -> write(to="~/output/report.md", content=@summarize)
+      w -> write(to="~/output/report.md", content=@search)
         .tags(#write, #file)
-        .desc("写文件")
     )
 
   .proc("deliver")
-    .deliver(@report)
+    .deliver(@write_report)
 ```
 
 运行：
@@ -87,249 +69,79 @@ Pipeline("research", "搜索主题并撰写报告")
 ductile run research.pipeline "RISC-V 架构"
 ```
 
-## 核心特性
+web 路径失败 → 自动滑到 mcp → check 不过 → 触发降级。连续失败 3 次 → 永久跳过。**你只管声明，引擎自己学。**
 
-### 1. 声明意图，不写控制流
+## 核心能力
 
-不写 `if/else/try/catch`。声明"有哪些路径"，引擎自动处理排序、降级、短路：
+### 声明意图，不写控制流
 
-```
-.plan(
-  fast -> quick_api(query="{topic}")
-    .tags(#search, #api),
-  slow -> deep_search(query="{topic}")
-    .tags(#search, #web)
-)
-```
+不写 `if/else/try/catch`。声明路径和优先级，引擎自动排序、降级、短路。
 
-A 失败 → 立即尝试 B → 直到成功或全挂。**零人工干预。**
+### 越跑越聪明
 
-### 2. 运行时自适应：越跑越聪明
+每个路径保留最近 20 次记录。失败率 > 10% → 指数惩罚。连续失败 3 次 → 自动 BLOCKED。不需要手调参数。
 
-每个路径保留最近 20 次执行记录。引擎根据实际数据自动调整：
+### Check 硬门槛
 
-| 情况 | 引擎行为 |
-|------|---------|
-| 失败率 ≤ 10% | 无惩罚，维持声明优先级 |
-| 失败率 > 10% | 指数权重惩罚，排名下降 |
-| 连续失败 3 次 | 自动 BLOCKED，永久跳过 |
-| 冷启动（< 3 次） | 按声明顺序探索 |
+结果不达标 = 当前路径失败 = 触发降级。废品不进门。
 
-**不需要手调 cost 参数。声明意图，执行数据自动排序。**
+### 热补丁
 
-### 3. E-graph 静态分析
-
-跑之前就知道瓶颈在哪：
+不改源文件，一行命令禁用/调整任意节点：
 
 ```bash
-$ ductile graph research.pipeline
-
-E-Graph:
-  Nodes: 4
-  Edges: 3
-
-Parallel groups:
-  ["search"]
-  ["summarize"]
-  ["report"]
-
-Critical path: ["search", "summarize", "report"]
-```
-
-并行组（可同时执行的节点）和关键路径（最长依赖链）一目了然。
-
-### 4. Check 硬门槛
-
-结果不达标 = 当前路径失败 = 触发降级：
-
-```
-.check(result => has_results, "搜索无结果")
-.check(result => has_items, "结果少于2条")
-```
-
-**废品不进门。** check 失败的路径会被记录为失败，拉低排名，最终被淘汰。
-
-### 5. SQLite 统一存储
-
-所有数据——pipeline 库、proc 注册、执行记录、组合方案——全部存在单文件 `ductile.db` 中：
-
-```bash
-# 导入 pipeline 到库
-ductile import ./pipelines
-
-# 搜索 proc 库
-ductile search "llm"
-ductile search "search"
-
-# 查看数据库统计
-ductile db-stats
-```
-
-输出：
-```
-Ductile SQLite Database
-=======================
-  Pipelines:     3
-  Procs:         12
-  Run records:   47
-  Compositions:  2
-  Location:      "~/.local/share/ductile/ductile.db"
-```
-
-### 6. 同构发现 + 打散重组
-
-导入多个 pipeline 后，自动识别跨 pipeline 的同构 proc（tag 集合相同的节点）：
-
-```bash
-ductile discover
-```
-
-输出：
-```
-Proc Registry — Isomorphism Discovery
-=====================================
-
-  {#search, #web} — 3 procs
-    search — 多路搜索 [research]
-    find — 网页检索 [translate]
-    lookup — 在线查找 [summarize]
-```
-
-然后从零件库组装新流水线：
-
-```bash
-ductile compose "my_pipeline" "搜索+翻译+写入" "#search,#web" "#llm,#parse" "#write,#file"
-```
-
-每一步展示 top-3 候选 proc + description，系统自动选出最匹配的。
-
-### 7. 库学习（频率压缩）
-
-扫描所有 pipeline 文件，发现重复的 tag 序列模式：
-
-```bash
-ductile learn ./pipelines
-```
-
-输出：
-```
-Library Learning (Frequency Compression)
-=========================================
-
-Pipelines scanned: 18
-Tag sequences: 42
-Total tokens: 87
-
-Discovered patterns:
-  [×6] llm → parse  → found in: research, translate, summarize, ...
-  [×5] search → web  → found in: research, news, factcheck, ...
-  [×3] file → write  → found in: research, report, export, ...
-
-Compression summary:
-  Original:   87 tokens
-  Compressed: 46 tokens
-  Ratio:      52.9%
-```
-
-### 8. 热补丁（不改源文件）
-
-运行时覆盖节点属性，不需要编辑 `.pipeline` 文件：
-
-```bash
-# 禁用某个 impl
 ductile patch research search web enabled false
-
-# 调整 cost
-ductile patch research search web cost.latency 5000
-
-# 改 retry 次数
 ductile patch research summarize s1 retry 5
-
-# 查看所有 patch
-ductile patch list
-
-# 清除某 pipeline 的所有 patch
-ductile patch clear research
 ```
 
-下次 `ductile run` 自动加载 patch，stderr 会打印 `[patch]` 日志。**源文件不动，随时可清除。**
+### 同构发现 + 打散重组
 
-### 9. 版本快照
+导入多个 pipeline 后，自动识别跨 pipeline 的相似节点。从零件库按 tag 组装新流水线。
 
-不需要 git 就能追踪 pipeline 变更：
+### SQLite 统一存储
 
-```bash
-ductile version save research.pipeline "加了 MCP fallback"
-ductile version log  research.pipeline
-ductile version diff research.pipeline 1 3
-```
+pipeline 库、执行记录、proc 注册、组合方案、热补丁——全部一个 `.db` 文件。
 
-### 10. DSL_RESULT 协议：零改接入
+### 零改接入
 
-任何脚本只需在 stdout 末尾打几行，就能返回结构化数据：
+任何脚本 stdout 末尾打 5 行就能返回结构化数据，引擎自动解析，下游直接 `@proc.field` 引用。
 
-```bash
-#!/bin/bash
-echo "处理完成"
+---
 
-echo "##DSL_RESULT"
-echo "path=/tmp/output.mp4"
-echo "duration=5.2"
-echo "##DSL_END"
-```
+## 🤖 让 AI 帮你用 Ductile
 
-下游通过 `@proc.field` 引用具体字段。**新工具接入零改代码。**
+Ductile 专为 AI 协作设计。**把 [SPEC.md](SPEC.md) 喂给你的 AI 助手**，它就能：
 
-### 11. 标签系统
+1. **自动安装** — `pip install ductile`
+2. **编写 pipeline** — 按 SPEC 语法生成 `.pipeline` 文件
+3. **执行和管理** — 调用全部 CLI 命令
+4. **热补丁调优** — 根据执行结果动态 patch
+5. **同构发现** — 跨 pipeline 搜索可复用节点
 
-自由格式 tag 做结构识别，不需要预定义枚举：
+### 使用方法
 
-```
-.tags(#search, #web)
-```
+把下面这段话发给你的 AI 助手（ChatGPT / Claude / Gemini / 任何支持工具调用的 Agent）：
 
-标签用 BTreeSet 存储，保证确定性。Pipeline 效果 = 所有 impl 标签的并集（自动计算）。
+> 请阅读以下 Ductile DSL 规格文档，然后帮我完成流水线任务。
+> 
+> [粘贴 SPEC.md 全文，或提供链接：https://github.com/lsmind/ductile/blob/main/SPEC.md]
 
-## DSL 语法参考
+AI 读完 SPEC 后，你就可以直接用自然语言下指令：
 
-| 语法 | 说明 |
-|------|------|
-| `Pipeline("name", "desc")` | 流水线头 |
-| `.proc("name")` | 处理节点，依赖自动从 `@ref` 推导 |
-| `.desc("text")` | proc/impl 级描述 |
-| `.plan(a -> body, b -> body)` | 多路径，声明顺序=优先级 |
-| `.tags(#tag1, #tag2)` | 标签（仅叶子 impl） |
-| `.check(result => pred, "msg")` | 结果检查 |
-| `.retry(n=3)` | 指数退避重试 |
-| `.foreach(source=@proc, var=item)` | 扇出迭代 |
-| `.when(mode == "deep")` | 条件路由 |
-| `.disabled` | 临时禁用 |
-| `.deliver(@proc)` | 终端输出 |
+- *"帮我写一个搜索+总结+写报告的 pipeline"*
+- *"把 search 节点的 web 路径禁掉，看看效果"*
+- *"分析一下我这几个 pipeline 有没有可以复用的节点"*
+- *"给 research pipeline 加个版本快照"*
 
-**内置谓词**：`not_empty`、`has_results`、`has_items`、`has_content`、`no_error`、`has_date`、`has_citations`
+AI 会自动生成正确的 `.pipeline` 文件和 CLI 命令。
 
-**内置函数**：`web_search`、`mcp_search`、`llm`、`write`、`read`、`run`/`sh`、`merge`
+---
 
-## CLI 命令
+## 设计哲学
 
-| 命令 | 说明 |
-|------|------|
-| `check <file>` | 解析 + 类型检查 |
-| `run <file> [topic]` | 解析 + 检查 + 执行 |
-| `graph <file>` | E-graph 结构：并行组 + 关键路径 |
-| `parse <file>` | 仅解析（展示结构 + 同构提示） |
-| `import <dir\|file>` | 导入 pipeline 到 SQLite |
-| `search "query"` | 搜索 proc 库 |
-| `compose <name> <desc> <#tags...>` | 从零件库组装 pipeline |
-| `db-stats` | 数据库统计 |
-| `discover [file]` | 同构发现 |
-| `learn [dir]` | 频率压缩 / 库学习 |
-| `version save <file> "desc"` | 保存版本快照 |
-| `version log <file>` | 版本历史 |
-| `version diff <file> v1 v2` | 版本对比 |
-| `patch <pipeline> <proc> <impl> <field> <value>` | 热补丁（不改源文件） |
-| `patch list` | 查看所有热补丁 |
-| `patch clear <pipeline>` | 清除热补丁 |
+- **声明意图，不声明猜测值** — 不需要手写 cost 数字，引擎自己学
+- **机制替代意志力** — 连续失败自动 BLOCKED，不需要人盯
+- **tag 做索引，description 做判断** — 系统识别结构，决定权在使用者
 
 ## 测试
 
@@ -338,12 +150,6 @@ cargo test --lib
 ```
 
 98 个测试，全部通过。
-
-## 设计哲学
-
-- **声明意图，不声明猜测值** — 不需要手写 cost 数字，引擎自己学
-- **机制替代意志力** — 连续失败自动 BLOCKED，不需要人盯
-- **tag 做索引，description 做判断** — 系统识别结构，决定权在使用者
 
 ## License
 
