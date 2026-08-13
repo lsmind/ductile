@@ -1,32 +1,39 @@
-# Ductile DSL
+# Ductile
 
-> 声明式流水线 DSL —— 用文本描述工作流，运行时自动学习最优路径。
+> 声明式流水线 DSL —— 声明意图，引擎自动处理路由、降级和质量控制。
 
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/Tests-90%20passed-brightgreen.svg)](#测试)
+[![PyPI](https://img.shields.io/badge/PyPI-0.4.1-blue.svg)](https://pypi.org/project/ductile/)
 
 ## 这是什么
 
-Ductile 让你把数据处理流水线写成一个简单的 `.pipeline` 文本文件：
+Ductile 是一个**声明式流水线引擎**。你写一个 `.pipeline` 文本文件，声明"做什么"和"有哪些备选路径"，引擎负责"怎么选、怎么降级、怎么淘汰"。
 
-- **零配置** — 不需要声明 cost、weight、level。声明意图，不声明猜测值
-- **多路径容错** — 声明顺序即优先级，A 路径失败自动尝试 B
-- **运行时学习** — 执行记录自动跟踪成功率 + 延迟，好路径排名上升，连续 3 次失败的路径自动 BLOCKED
-- **标签系统** — 自由格式 tag 做同构识别和检索，不需要预定义枚举
-- **零外部依赖** — 纯 Rust std，二进制约 400KB，启动 1ms
+它解决的核心问题是：**把不确定性管理从人工判断变成引擎的自适应数值优化。**
+
+### 与同类工具的区别
+
+| 能力 | Ductile | LangGraph / AutoGen | Airflow / Prefect | 传统路由层 |
+|------|---------|---------------------|--------------------|-----------|
+| 声明式流程定义 | ✅ 纯文本 DSL | ⚠️ 代码+图 | ✅ DAG | ❌ 仅模型级 |
+| 编译时类型检查 | ✅ check 命令 | ❌ 运行时 | ⚠️ 部分 | ❌ 无 |
+| 多路径自动降级 | ✅ 内核能力 | ❌ 需手写条件边 | ❌ 需重试逻辑 | ⚠️ 静态路由 |
+| 运行时自适应惩罚 | ✅ 滑动窗口闭环 | ❌ 无 | ❌ 无 | ❌ 无 |
+| 关键路径静态分析 | ✅ graph 命令 | ❌ 仅运行时 trace | ⚠️ 运行时 | ❌ 无 |
+| 零改接入外部工具 | ✅ DSL_RESULT 协议（5 行 echo） | ❌ 需写 Tool 类 | ❌ 需写 Operator | ⚠️ 需适配器 |
+| 外部依赖 | 0（纯 Rust std） | Python 生态 | Python + DB | 各异 |
+
+**一句话**：路由层只解决"选哪个模型"，编排框架只解决"怎么连起来"，Ductile 把"怎么选 + 怎么降级 + 怎么越跑越聪明"塞进一个引擎。
 
 ## 安装
 
-**Cargo（推荐）：**
-
 ```bash
-cargo install --path .
-```
+# Cargo（推荐）
+cargo install ductile
 
-**pip（Python 绑定）：**
-
-```bash
+# pip
 pip install ductile
 ```
 
@@ -47,7 +54,7 @@ Pipeline("research", "搜索主题并撰写报告")
         .tags(#search, #mcp)
         .desc("MCP搜索")
     )
-    .check(not_empty, "搜索无结果")
+    .check(result => has_results, "搜索无结果")
 
   .proc("summarize")
     .desc("LLM 总结")
@@ -56,7 +63,6 @@ Pipeline("research", "搜索主题并撰写报告")
         .tags(#llm, #parse)
         .desc("LLM综合")
     )
-    .check(not_empty, "总结为空")
 
   .proc("report")
     .desc("写入报告文件")
@@ -76,35 +82,113 @@ Pipeline("research", "搜索主题并撰写报告")
 ductile run research.pipeline "RISC-V 架构"
 ```
 
-其他命令：
+## 核心特性
 
-```bash
-ductile check research.pipeline    # 解析 + 类型检查
-ductile parse research.pipeline    # 查看解析结构
-ductile graph research.pipeline    # 查看 DAG 依赖图
-ductile stats research.pipeline    # 查看执行统计
-ductile tags research.pipeline     # 查看计算出的标签
+### 1. 声明意图，不写控制流
+
+不写 `if/else/try/catch`。声明"有哪些路径"，引擎自动处理排序、降级、短路：
+
+```
+.plan(
+  fast -> quick_api(query="{topic}")     // 优先尝试
+    .tags(#search, #api),
+  slow -> deep_search(query="{topic}")   // 失败后自动滑到这里
+    .tags(#search, #web)
+)
 ```
 
-## DSL 语法
+A 失败 → 立即尝试 B → 直到成功或全挂。**零人工干预。**
+
+### 2. 运行时自适应：越跑越聪明
+
+每个路径保留最近 20 次执行记录。引擎根据实际数据自动调整：
+
+| 情况 | 引擎行为 |
+|------|---------|
+| 失败率 ≤ 10% | 无惩罚，维持声明优先级 |
+| 失败率 > 10% | 指数权重惩罚，排名下降 |
+| 连续失败 3 次 | 自动 BLOCKED，永久跳过 |
+| 冷启动（< 3 次） | 按声明顺序探索 |
+
+**不需要手调 cost 参数。声明意图，执行数据自动排序。**
+
+### 3. E-graph 静态分析
+
+跑之前就知道瓶颈在哪：
+
+```bash
+$ ductile graph research.pipeline
+
+E-Graph:
+  Nodes: 4
+  Edges: 3
+
+Parallel groups:
+  ["search"]
+  ["summarize"]
+  ["report"]
+
+Critical path: ["search", "summarize", "report"]
+```
+
+并行组（可同时执行的节点）和关键路径（最长依赖链）一目了然。
+
+### 4. Check 硬门槛
+
+结果不达标 = 当前路径失败 = 触发降级：
+
+```
+.check(result => has_results, "搜索无结果")
+.check(result => has_items, "结果少于2条")
+```
+
+**废品不进门。** check 失败的路径会被记录为失败，拉低排名，最终被淘汰。
+
+### 5. DSL_RESULT 协议：零改接入
+
+任何脚本只需在 stdout 末尾打几行，就能返回结构化数据：
+
+```bash
+#!/bin/bash
+# 你的脚本照常输出...
+echo "处理完成"
+
+# 末尾加上这5行
+echo "##DSL_RESULT"
+echo "path=/tmp/output.mp4"
+echo "duration=5.2"
+echo "##DSL_END"
+```
+
+下游通过 `@proc.field` 引用具体字段。**新工具接入零改 Haskell/Rust 代码。**
+
+### 6. 标签系统
+
+自由格式 tag 做结构识别，不需要预定义枚举：
+
+```
+.tags(#search, #web)
+.tags(#llm, #parse)
+```
+
+标签用 BTreeSet 存储，保证确定性。Pipeline 效果 = 所有 impl 标签的并集（自动计算）。
+
+## DSL 语法参考
 
 ### Pipeline 头
 
 ```
-Pipeline("名称", "描述")
+Pipeline("名称", "可选描述")
 ```
-
-- `名称` — 流水线唯一标识
-- `描述`（可选）— 自然语言描述，用于检索索引
 
 ### Proc（处理节点）
 
 ```
 .proc("search")
-  .desc("多路搜索")      // 可选描述
+  .desc("多路搜索")           // 可选描述
 ```
 
-处理步骤。依赖关系自动从 `@proc_name` 引用推导。
+处理步骤。依赖关系自动从 `@proc_name` 引用推导，不需要手动声明 DAG。
 
 ### Plan（多路径 + fallback）
 
@@ -115,42 +199,35 @@ Pipeline("名称", "描述")
 )
 ```
 
-声明顺序 = 优先级。A 失败 → 自动尝试 B。
+声明顺序 = 优先级。
 
-### Tags（标签）
+### Tags
 
 ```
 .tags(#search, #web)
 ```
 
-只在叶子 impl 上声明。Pipeline 效果 = 所有 impl 标签的并集（自动计算）。
+只在叶子 impl 上声明。
 
-标签用 BTreeSet 存储，保证确定性匹配。
-
-### Description（描述）
+### Description
 
 ```
 .proc("search")
-  .desc("多路并行搜索")    // proc 级描述
+  .desc("多路并行搜索")    // proc 级
 
 web_search(query="{topic}")
-  .desc("网页搜索")        // impl 级描述
+  .desc("网页搜索")        // impl 级
 ```
 
-proc 和 impl 都可以加描述。用途：
-- 跨流水线同构识别（tag 匹配 + description 语义判断）
-- 搜索引擎索引
-- AI 决定是否复用已有节点
-
-### Check（结果检查）
+### Check
 
 ```
-.check(not_empty, "结果为空")
+.check(result => not_empty, "结果为空")
 ```
 
-核心谓词：`not_empty`、`no_error`、`min_length(N)`、`has_items`、`has_content`。
+内置谓词：`not_empty`、`has_results`、`has_items`、`has_content`、`no_error`、`has_date`、`has_citations`。
 
-### Retry（重试）
+### Retry
 
 ```
 .retry(n=3)
@@ -164,7 +241,7 @@ proc 和 impl 都可以加描述。用途：
 .foreach(source=@decompose, var=subtask)
 ```
 
-遍历源 proc 结果的每一行，将 `{subtask}` 替换到下游 body 中。
+遍历源 proc 结果的每一行，将 `{subtask}` 替换到下游 body。
 
 ### When（条件路由）
 
@@ -172,7 +249,7 @@ proc 和 impl 都可以加描述。用途：
 .when(mode == "deep")
 ```
 
-### Disabled（临时禁用）
+### Disabled
 
 ```
 .disabled
@@ -185,15 +262,14 @@ proc 和 impl 都可以加描述。用途：
   .deliver(@report)
 ```
 
-## 路径选择（零参数）
+## CLI 命令
 
-完全运行时驱动，不需要调参：
-
-| 阶段 | 策略 |
+| 命令 | 说明 |
 |------|------|
-| 冷启动（< 3 次执行） | 声明顺序优先，探索新路径 |
-| 有数据后 | 按最近 20 次成功率排序（高→低），相同则按延迟（低→高） |
-| 连续 3 次失败 | 自动 BLOCKED，跳过该路径 |
+| `check <file>` | 解析 + 类型检查（跑之前拦错） |
+| `run <file> [topic]` | 解析 + 检查 + 执行 |
+| `graph <file>` | E-graph 结构：并行组 + 关键路径 |
+| `parse <file>` | 仅解析（展示 AST 结构） |
 
 ## 内置函数
 
@@ -201,50 +277,17 @@ proc 和 impl 都可以加描述。用途：
 |------|------|
 | `web_search(query="...")` | 网页搜索（通过 bridge 脚本） |
 | `mcp_search(query="...", engine=zai)` | MCP 搜索 |
-| `llm(input=@prev, template="...")` | LLM 调用（通过 bridge 脚本） |
+| `llm(input=@prev, template="...", count=5)` | LLM 调用 |
 | `write(to="path", content=@prev)` | 写文件 |
 | `read(from="path")` | 读文件 |
-| `run("shell command")` | 执行 shell 命令 |
-| `sh("shell command")` | `run()` 的别名 |
-| `merge(@a, @b)` | 合并多个结果 |
+| `run("shell command")` / `sh(...)` | 执行 shell 命令 |
+| `merge(@a, @b, dedup)` | 合并多个结果 |
 
-## CLI 命令
+## 设计哲学
 
-| 命令 | 说明 |
-|------|------|
-| `check <file>` | 解析 + 类型检查 |
-| `run <file> [topic]` | 解析 + 检查 + 执行 |
-| `graph <file>` | 查看 DAG 结构（并行组、关键路径） |
-| `parse <file>` | 仅解析（展示结构） |
-| `stats <file>` | 查看执行统计 |
-| `tags <file>` | 查看标签 |
-
-## DSL_RESULT 协议
-
-外部脚本通过 `run()`/`sh()` 可以返回结构化数据：
-
-```
-##DSL_RESULT
-path=/tmp/output.mp4
-duration=5.2
-frames=243
-##DSL_END
-```
-
-下游通过 `@proc.field` 引用具体字段。
-
-## GCF 记录格式
-
-每次执行追加到 `~/.local/share/ductile/records/<proc>/runs.gcf`：
-
-```
-GCF profile=generic
-## runs
-2026-08-13T00:04:51|web|Ok|3124|A|-|-
-2026-08-13T00:04:52|mcp|Fail|5100|B|a1b2c3d4|search.mcp.step
-```
-
-字段：`时间戳 | 路径 | 状态 | 延迟ms | 选择 | 错误哈希 | 错误位置`
+- **声明意图，不声明猜测值** — 不需要手写 cost 数字，引擎自己学
+- **机制替代意志力** — 连续失败自动 BLOCKED，不需要人盯
+- **tag 做索引，description 做判断** — 系统识别结构，决定权在使用者
 
 ## 测试
 
@@ -253,21 +296,6 @@ cargo test --lib
 ```
 
 90 个测试，全部通过。
-
-## 性能
-
-| 指标 | 值 |
-|------|-----|
-| 启动时间 | ~1ms |
-| 外部依赖 | 0（纯 std） |
-| 二进制大小 | ~400KB |
-| 测试数量 | 90 |
-
-## 设计哲学
-
-- **声明意图，不声明猜测值** — 不需要手写 cost 数字，引擎自己学
-- **tag 做索引，description 做判断** — 系统识别同构，AI 决定是否复用
-- **机制替代意志力** — 连续失败自动 BLOCKED，不需要人盯
 
 ## License
 
