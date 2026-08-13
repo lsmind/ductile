@@ -8,6 +8,10 @@ pub mod parser;
 pub mod typecheck;
 pub mod egraph;
 pub mod executor;
+pub mod db;
+pub mod registry;
+pub mod learn;
+pub mod version;
 
 pub mod cli;
 

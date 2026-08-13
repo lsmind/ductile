@@ -6,12 +6,12 @@
 
 use crate::ast::*;
 use crate::egraph;
+use crate::db;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn exec_pipeline(topic: &str, params: &BTreeMap<String, String>, pl: &Pipeline) -> ExecResult {
     let eg = egraph::build_egraph(pl);
@@ -644,68 +644,33 @@ fn eval_when(params: &BTreeMap<String, String>, _results: &BTreeMap<String, Valu
     params.get(cond).map(|v| v == "true").unwrap_or(false)
 }
 
-// ── Record I/O (GCF) ──
-
-fn records_dir(proc_name: &str) -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    let slug = proc_name.replace('/', "_");
-    Path::new(&home)
-        .join(".local/share/ductile/records")
-        .join(&slug)
-}
+// ── Record I/O (SQLite) ──
 
 fn append_run(proc_name: &str, impl_name: &str, pid: char, status: Status, _err_hash: Option<&str>, _err_at: Option<&str>) {
-    let dir = records_dir(proc_name);
-    let _ = fs::create_dir_all(&dir);
-    let path = dir.join("runs.gcf");
-
-    if !path.exists() {
-        let _ = fs::write(&path, "GCF profile=generic\n## runs\n");
-    }
-
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| {
-            let secs = d.as_secs();
-            format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
-                    1970 + secs / 31536000,
-                    (secs % 31536000) / 2592000 + 1,
-                    (secs % 2592000) / 86400 + 1,
-                    (secs % 86400) / 3600,
-                    (secs % 3600) / 60,
-                    secs % 60)
-        })
-        .unwrap_or_else(|_| "unknown".into());
-
-    let row = format!("{}|{}|{}|0|{}|-|-\n", ts, impl_name, status, pid);
-
-    if let Ok(mut f) = fs::OpenOptions::new().append(true).open(&path) {
-        let _ = f.write_all(row.as_bytes());
-    }
+    let status_str = match status {
+        Status::Ok => "Ok",
+        Status::Fail => "Fail",
+    };
+    db::record_run(proc_name, impl_name, "", status_str, 0, _err_hash, _err_at);
+    // Keep pid logging for backwards compat in stderr
+    let _ = pid;
 }
 
 fn load_recent_runs(proc_name: &str) -> BTreeMap<String, RecentRuns> {
-    let path = records_dir(proc_name).join("runs.gcf");
-    let content = match fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return BTreeMap::new(),
-    };
-
-    // Parse entries
-    let mut entries: Vec<(String, bool)> = Vec::new();
-    for line in content.lines() {
-        if line.starts_with("GCF") || line.starts_with("##") || line.trim().is_empty() { continue; }
-        let parts: Vec<&str> = line.split('|').collect();
-        if parts.len() >= 3 {
-            entries.push((parts[1].to_string(), parts[2] == "Ok"));
-        }
+    let rows = db::recent_runs(proc_name);
+    if rows.is_empty() {
+        return BTreeMap::new();
     }
 
-    // Group by impl name and compute sliding window
-    let impl_names: Vec<String> = entries.iter().map(|(n, _)| n.clone()).collect();
+    // Group by impl name, compute sliding window
+    let mut by_impl: BTreeMap<String, Vec<bool>> = BTreeMap::new();
+    for row in &rows {
+        let ok = row.status == "Ok";
+        by_impl.entry(row.impl_name.clone()).or_default().push(ok);
+    }
+
     let mut result = BTreeMap::new();
-    for name in impl_names {
-        let all_runs: Vec<bool> = entries.iter().filter(|(n, _)| n == &name).map(|(_, ok)| *ok).collect();
+    for (name, all_runs) in &by_impl {
         let recent = if all_runs.len() > WINDOW_SIZE {
             &all_runs[all_runs.len() - WINDOW_SIZE..]
         } else {

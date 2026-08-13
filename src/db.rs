@@ -1,0 +1,390 @@
+//! Database — SQLite 统一存储。
+//!
+//! 单文件 `~/.local/share/ductile/ductile.db`，4 张表：
+//! pipelines / procs / runs / compositions。
+//! 替代旧版 .gcf 文件系统。
+
+use crate::ast::*;
+use rusqlite::{params, Connection};
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::PathBuf;
+
+// ── Path ──
+
+pub fn db_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let dir = PathBuf::from(&home).join(".local/share/ductile");
+    let _ = fs::create_dir_all(&dir);
+    dir.join("ductile.db")
+}
+
+pub fn open() -> Connection {
+    let path = db_path();
+    let conn = Connection::open(&path)
+        .unwrap_or_else(|e| panic!("Cannot open ductile.db: {}", e));
+    conn.execute_batch("PRAGMA journal_mode=WAL;").ok();
+    conn
+}
+
+pub fn init_db() {
+    let conn = open();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS pipelines (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT UNIQUE NOT NULL,
+            description TEXT DEFAULT '',
+            source_file TEXT DEFAULT '',
+            imported_at TEXT DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS procs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL,
+            pipeline_id INTEGER NOT NULL,
+            description TEXT DEFAULT '',
+            tags        TEXT DEFAULT '',
+            impl_count  INTEGER DEFAULT 0,
+            is_deliver  INTEGER DEFAULT 0,
+            FOREIGN KEY (pipeline_id) REFERENCES pipelines(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_procs_tags ON procs(tags);
+        CREATE INDEX IF NOT EXISTS idx_procs_name ON procs(name);
+        CREATE TABLE IF NOT EXISTS runs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            proc_name   TEXT NOT NULL,
+            impl_name   TEXT NOT NULL,
+            pipeline    TEXT DEFAULT '',
+            status      TEXT NOT NULL,
+            latency_ms  INTEGER DEFAULT 0,
+            err_hash    TEXT DEFAULT '',
+            err_at      TEXT DEFAULT '',
+            recorded_at TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_runs_proc ON runs(proc_name);
+        CREATE TABLE IF NOT EXISTS compositions (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            proc_names  TEXT DEFAULT '',
+            created_at  TEXT DEFAULT ''
+        );",
+    )
+    .expect("init_db failed");
+}
+
+// ── Timestamp ──
+
+fn now_ts() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        1970 + secs / 31536000,
+        (secs % 31536000) / 2592000 + 1,
+        (secs % 2592000) / 86400 + 1,
+        (secs % 86400) / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
+}
+
+// ── Row types ──
+
+#[derive(Debug, Clone)]
+pub struct ProcRow {
+    pub id: i64,
+    pub name: String,
+    pub pipeline: String,
+    pub description: String,
+    pub tags: BTreeSet<String>,
+    pub impl_count: i64,
+    pub is_deliver: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RunRow {
+    pub proc_name: String,
+    pub impl_name: String,
+    pub status: String,
+    pub latency_ms: i64,
+    pub recorded_at: String,
+}
+
+// ── Import pipeline ──
+
+pub fn import_pipeline(pl: &Pipeline, source_file: &str) {
+    init_db();
+    let conn = open();
+    let ts = now_ts();
+
+    // Upsert pipeline
+    conn.execute(
+        "INSERT INTO pipelines (name, description, source_file, imported_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(name) DO UPDATE SET
+           description=excluded.description,
+           source_file=excluded.source_file,
+           imported_at=excluded.imported_at",
+        params![pl.name, pl.description, source_file, ts],
+    )
+    .ok();
+
+    let pid: i64 = conn
+        .query_row(
+            "SELECT id FROM pipelines WHERE name = ?1",
+            params![pl.name],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    // Replace procs
+    conn.execute("DELETE FROM procs WHERE pipeline_id = ?1", params![pid])
+        .ok();
+
+    for proc in &pl.procs {
+        let tags: Vec<String> = proc_tags(proc).iter().cloned().collect();
+        let tags_str = tags.join(",");
+        conn.execute(
+            "INSERT INTO procs (name, pipeline_id, description, tags, impl_count, is_deliver)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                proc.name,
+                pid,
+                proc.description,
+                tags_str,
+                proc.plan.len(),
+                if proc.deliver { 1 } else { 0 },
+            ],
+        )
+        .ok();
+    }
+}
+
+pub fn import_pipeline_file(path: &str) -> Result<String, String> {
+    let pl = crate::parser::parse_pipeline_file(path).map_err(|e| format!("{}", e))?;
+    import_pipeline(&pl, path);
+    Ok(pl.name)
+}
+
+// ── Search procs ──
+
+pub fn search_procs(query: &str) -> Vec<ProcRow> {
+    init_db();
+    let conn = open();
+    let pattern = format!("%{}%", query);
+    let mut stmt = conn
+        .prepare(
+            "SELECT p.id, p.name, pl.name, p.description, p.tags, p.impl_count, p.is_deliver
+             FROM procs p JOIN pipelines pl ON p.pipeline_id = pl.id
+             WHERE p.tags LIKE ?1 OR p.name LIKE ?1 OR p.description LIKE ?1
+             ORDER BY p.tags",
+        )
+        .unwrap();
+
+    stmt.query_map(params![pattern], |row| {
+        let tags_str: String = row.get(4).unwrap_or_default();
+        let tags: BTreeSet<String> = tags_str
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        Ok(ProcRow {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            pipeline: row.get(2)?,
+            description: row.get(3).unwrap_or_default(),
+            tags,
+            impl_count: row.get(5).unwrap_or(0),
+            is_deliver: row.get::<_, i64>(6).unwrap_or(0) == 1,
+        })
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
+}
+
+pub fn all_procs() -> Vec<ProcRow> {
+    init_db();
+    let conn = open();
+    let mut stmt = conn
+        .prepare(
+            "SELECT p.id, p.name, pl.name, p.description, p.tags, p.impl_count, p.is_deliver
+             FROM procs p JOIN pipelines pl ON p.pipeline_id = pl.id
+             ORDER BY p.tags, p.name",
+        )
+        .unwrap();
+
+    stmt.query_map([], |row| {
+        let tags_str: String = row.get(4).unwrap_or_default();
+        let tags: BTreeSet<String> = tags_str
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        Ok(ProcRow {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            pipeline: row.get(2)?,
+            description: row.get(3).unwrap_or_default(),
+            tags,
+            impl_count: row.get(5).unwrap_or(0),
+            is_deliver: row.get::<_, i64>(6).unwrap_or(0) == 1,
+        })
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
+}
+
+// ── Run records ──
+
+pub fn record_run(
+    proc_name: &str,
+    impl_name: &str,
+    pipeline: &str,
+    status: &str,
+    latency_ms: i64,
+    err_hash: Option<&str>,
+    err_at: Option<&str>,
+) {
+    init_db();
+    let conn = open();
+    let ts = now_ts();
+    conn.execute(
+        "INSERT INTO runs (proc_name, impl_name, pipeline, status, latency_ms, err_hash, err_at, recorded_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            proc_name,
+            impl_name,
+            pipeline,
+            status,
+            latency_ms,
+            err_hash.unwrap_or("-"),
+            err_at.unwrap_or("-"),
+            ts,
+        ],
+    )
+    .ok();
+}
+
+pub fn recent_runs(proc_name: &str) -> Vec<RunRow> {
+    init_db();
+    let conn = open();
+    let mut stmt = conn
+        .prepare(
+            "SELECT proc_name, impl_name, status, latency_ms, recorded_at
+             FROM runs WHERE proc_name = ?1
+             ORDER BY id DESC LIMIT 20",
+        )
+        .unwrap();
+
+    stmt.query_map(params![proc_name], |row| {
+        Ok(RunRow {
+            proc_name: row.get(0)?,
+            impl_name: row.get(1)?,
+            status: row.get(2)?,
+            latency_ms: row.get(3).unwrap_or(0),
+            recorded_at: row.get(4).unwrap_or_default(),
+        })
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
+}
+
+// ── Composition ──
+
+pub fn save_composition(name: &str, desc: &str, proc_names: &[String]) {
+    init_db();
+    let conn = open();
+    let ts = now_ts();
+    let names = proc_names.join(",");
+    conn.execute(
+        "INSERT INTO compositions (name, description, proc_names, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![name, desc, names, ts],
+    )
+    .ok();
+}
+
+// ── Stats ──
+
+pub fn db_stats() -> (i64, i64, i64, i64) {
+    init_db();
+    let conn = open();
+    let count = |table: &str| -> i64 {
+        conn.query_row(
+            &format!("SELECT COUNT(*) FROM {}", table),
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0)
+    };
+    (
+        count("pipelines"),
+        count("procs"),
+        count("runs"),
+        count("compositions"),
+    )
+}
+
+// ── Isomorphic groups (tag-based, cross-pipeline) ──
+
+#[derive(Debug, Clone)]
+pub struct IsoGroup {
+    pub tags: BTreeSet<String>,
+    pub members: Vec<ProcRow>,
+}
+
+pub fn isomorphic_groups() -> Vec<IsoGroup> {
+    let procs = all_procs();
+    let with_tags: Vec<ProcRow> = procs.into_iter().filter(|p| !p.tags.is_empty()).collect();
+
+    // Group by tags
+    let mut groups: std::collections::BTreeMap<Vec<String>, Vec<ProcRow>> =
+        std::collections::BTreeMap::new();
+    for p in with_tags {
+        let key: Vec<String> = p.tags.iter().cloned().collect();
+        groups.entry(key).or_default().push(p);
+    }
+
+    groups
+        .into_iter()
+        .filter(|(_, members)| {
+            // Need 2+ members from different pipelines
+            let unique_pipelines: BTreeSet<&str> =
+                members.iter().map(|m| m.pipeline.as_str()).collect();
+            unique_pipelines.len() >= 2
+        })
+        .map(|(tags, members)| IsoGroup {
+            tags: tags.into_iter().collect(),
+            members,
+        })
+        .collect()
+}
+
+// ── Tests ──
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn db_init_and_stats() {
+        // Use in-memory for test
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE pipelines (id INTEGER PRIMARY KEY, name TEXT);
+             CREATE TABLE procs (id INTEGER PRIMARY KEY, name TEXT);",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO pipelines (name) VALUES ('test')", [])
+            .unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pipelines", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+}
