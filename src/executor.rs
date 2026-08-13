@@ -9,19 +9,24 @@ use crate::db;
 use crate::egraph;
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
 // ── Hot patches ──
 
 /// Load patches from SQLite and apply them to a cloned pipeline.
+/// Returns Cow-like: if no patches, returns original reference wrapped in Ok.
 /// Supports overriding: enabled, cost.latency, cost.risk, cost.tokens, cost.money, retry, stub.
 fn apply_patches(pl: &Pipeline) -> Pipeline {
     let patches = db::load_patches(&pl.name);
     if patches.is_empty() {
         return pl.clone();
     }
+    eprintln!(
+        "  [patch] {} patches applied to pipeline '{}'",
+        patches.len(),
+        pl.name
+    );
     let mut cloned = pl.clone();
     for patch in &patches {
         for proc in &mut cloned.procs {
@@ -278,7 +283,7 @@ fn exec_foreach_proc(
                 body_text: impl_
                     .body_text
                     .replace(&format!("{{{}}}", var_name), &clean_item),
-                ..impl_.clone().clone()
+                ..(*impl_).clone()
             };
 
             match run_impl_with_retry(&expanded, topic, &item_results) {
