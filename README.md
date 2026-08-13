@@ -237,13 +237,13 @@ Compression summary:
 
 ```bash
 # 禁用某个 impl
-ductile patch set research search web enabled false
+ductile patch research search web enabled false
 
 # 调整 cost
-ductile patch set research search web cost.latency 5000
+ductile patch research search web cost.latency 5000
 
 # 改 retry 次数
-ductile patch set research summarize s1 retry 5
+ductile patch research summarize s1 retry 5
 
 # 查看所有 patch
 ductile patch list
@@ -327,7 +327,7 @@ echo "##DSL_END"
 | `version save <file> "desc"` | 保存版本快照 |
 | `version log <file>` | 版本历史 |
 | `version diff <file> v1 v2` | 版本对比 |
-| `patch set <pipeline> <proc> <impl> <field> <value>` | 热补丁（不改源文件） |
+| `patch <pipeline> <proc> <impl> <field> <value>` | 热补丁（不改源文件） |
 | `patch list` | 查看所有热补丁 |
 | `patch clear <pipeline>` | 清除热补丁 |
 

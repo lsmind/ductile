@@ -49,12 +49,11 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         "version" if args.len() >= 4 && args[2] == "log" => cmd_version_log(&args[3]),
         "version" if args.len() >= 6 && args[2] == "diff" => cmd_version_diff(&args[3], &args[4], &args[5]),
 
-        // Hot patch
+        // Hot patch: patch <pipeline> <proc> <impl> <field> <value>
         "patch" if args.len() >= 3 && args[2] == "list" => cmd_patch_list(),
-        "patch" if args.len() >= 3 && args[2] == "clear" && args.len() >= 4 => cmd_patch_clear(&args[3]),
-        "patch" if args.len() >= 7 && args[2] == "set" => {
-            // patch set <pipeline> <proc> <impl> <field> <value>
-            cmd_patch_set(&args[3], &args[4], &args[5], &args[6], &args[7])
+        "patch" if args.len() >= 4 && args[2] == "clear" => cmd_patch_clear(&args[3]),
+        "patch" if args.len() >= 7 => {
+            cmd_patch_set(&args[2], &args[3], &args[4], &args[5], &args[6])
         }
 
         _ => { print_usage(); Ok(1) }
@@ -88,7 +87,7 @@ fn print_usage() {
     eprintln!("  version diff <file> v1 v2    Diff two versions");
     eprintln!();
     eprintln!("Patch (hot override, no file edit):");
-    eprintln!("  patch set <pipeline> <proc> <impl> <field> <value>");
+    eprintln!("  patch <pipeline> <proc> <impl> <field> <value>");
     eprintln!("  patch list");
     eprintln!("  patch clear <pipeline>");
 }
