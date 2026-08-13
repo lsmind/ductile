@@ -30,11 +30,13 @@ Ductile 是一个**声明式流水线引擎**。你写一个 `.pipeline` 文本�
 ## 安装
 
 ```bash
-# Cargo（推荐）
-cargo install ductile
-
-# pip
+# pip（推荐，已发布到 PyPI）
 pip install ductile
+
+# 从源码编译
+git clone https://github.com/lsmind/ductile.git
+cd ductile && cargo build --release
+# 二进制在 target/release/ductile
 ```
 
 ## 30 秒上手
@@ -144,7 +146,17 @@ Critical path: ["search", "summarize", "report"]
 
 **废品不进门。** check 失败的路径会被记录为失败，拉低排名，最终被淘汰。
 
-### 5. DSL_RESULT 协议：零改接入
+### 5. 版本快照（Haskell 版）
+
+Haskell 版提供版本管理命令，不需要 git 就能追踪 pipeline 变更：
+
+```bash
+ductile version save research.pipeline "加了 MCP fallback"   # 保存快照
+ductile version log  research.pipeline                        # 查看历史
+ductile version diff research.pipeline 1 3                    # 对比两个版本
+```
+
+### 6. DSL_RESULT 协议：零改接入
 
 任何脚本只需在 stdout 末尾打几行，就能返回结构化数据：
 
@@ -162,7 +174,7 @@ echo "##DSL_END"
 
 下游通过 `@proc.field` 引用具体字段。**新工具接入零改 Haskell/Rust 代码。**
 
-### 6. 标签系统
+### 7. 标签系统
 
 自由格式 tag 做结构识别，不需要预定义枚举：
 
@@ -270,6 +282,9 @@ web_search(query="{topic}")
 | `run <file> [topic]` | 解析 + 检查 + 执行 |
 | `graph <file>` | E-graph 结构：并行组 + 关键路径 |
 | `parse <file>` | 仅解析（展示 AST 结构） |
+| `version save <file> "desc"` | 保存版本快照（Haskell 版） |
+| `version log <file>` | 查看版本历史（Haskell 版） |
+| `version diff <file> v1 v2` | 对比两个版本（Haskell 版） |
 
 ## 内置函数
 
