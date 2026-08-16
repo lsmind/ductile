@@ -294,11 +294,12 @@ ductile version diff <file.pipeline> <v1> <v2>
 eligible = plan.filter(impl => when_condition_passes)
 ranked = eligible.sort_by(score)
 
-score(impl) = base_cost × (1 + penalty)
+score(impl) = base_cost × (1 + penalty) + rd_surcharge
 ```
 
 - `base_cost = 0.001×latency + 10×risk + 0.0001×tokens + 1×money`
 - `penalty` 见下表
+- `rd_surcharge = weights.rd × (Σest_loss / max(Σrate_tokens, 1))`（见 3.6）
 
 ### 3.3 滑动窗口惩罚
 
@@ -311,6 +312,25 @@ score(impl) = base_cost × (1 + penalty)
 | 失败率 ≤ 10% | 0.0 | 无惩罚 |
 | 失败率 > 10% | `e^(7×rate) - 1` | 指数惩罚 |
 | 连续失败 ≥ 3 | `∞` | 永久 BLOCKED |
+
+**惩罚域与失真域分家（反双重计费）**：penalty 只管瞬时故障（可 retry 恢复的失败），est_loss 只管信息质量（重试也不会好的字段丢失）。同一次失败不会同时吃两种惩罚——est_loss 无结构化证据时恒为 0。
+
+### 3.6 RD 附加费（率失真感知排序）
+
+每次成功执行自动测量并落库：
+
+- `rate_tokens` = 输出字符数 / 4（token 代理）
+- `est_loss` = **v1 字段覆盖度**：上游字段集 `F_up`（body 中 `@dep` 引用的上游 DSL_RESULT 字段并集）与输出字段集 `F_out` 的保留度 `1 − |F_up ∩ F_out| / |F_up|`；**无结构化证据（上游无字段或输出无 DSL_RESULT）时 = 0.0，不用 check 二值兜底**
+
+排序时（窗口内聚合）：
+
+```
+rd_surcharge = weights.rd × (Σest_loss / max(Σrate_tokens, 1))
+```
+
+- `weights.rd`（λ_rd）默认 `0.0` = 完全关闭（行为同 v4.0）；可在 `.plan()` 内 `weights(rd = N)` 设置
+- 语义：同样 token 预算下单位信息损耗大的 impl 排后——"快但丢字段"不再无条件赢
+- 冷启动（无历史记录）不惩罚
 
 ### 3.4 retry
 
@@ -358,6 +378,8 @@ CREATE TABLE runs (
     latency_ms INTEGER DEFAULT 0,
     err_hash TEXT DEFAULT '',
     err_at TEXT DEFAULT '',
+    rate_tokens INTEGER DEFAULT 0, -- RD: 输出字符数/4（token 代理）
+    est_loss REAL DEFAULT 0.0,     -- RD: v1 字段覆盖度；无结构化证据 = 0
     recorded_at TEXT DEFAULT ''
 );
 
