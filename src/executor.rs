@@ -1309,13 +1309,18 @@ mod tests {
 
     #[test]
     fn est_loss_v1_field_coverage() {
-        let up = vec!["status".to_string(), "count".to_string(), "score".to_string()];
+        let up = vec![
+            "status".to_string(),
+            "count".to_string(),
+            "score".to_string(),
+        ];
         // 全保留 → 0
         let full = "x\n##DSL_RESULT\nstatus=ok\ncount=5\nscore=9\n##DSL_END";
         assert_eq!(est_loss_field_coverage(&up, full), Some(0.0));
-        // 丢 1/3 → 1/3
+        // 丢 1/3 → ≈1/3
         let partial = "x\n##DSL_RESULT\nstatus=ok\ncount=5\n##DSL_END";
-        assert_eq!(est_loss_field_coverage(&up, partial), Some(1.0 / 3.0));
+        let got = est_loss_field_coverage(&up, partial).unwrap();
+        assert!((got - 1.0 / 3.0).abs() < 1e-12);
         // 全丢 → 1
         let none = "x\n##DSL_RESULT\nother=1\n##DSL_END";
         assert_eq!(est_loss_field_coverage(&up, none), Some(1.0));
@@ -1506,7 +1511,12 @@ mod tests {
         // rd=0（默认）：cheap 在前；rd>0 且 cheap 失真率高：expensive 在前
         let impls_cost = |name: &str, latency: i64| Impl {
             name: name.into(),
-            cost: Cost { latency, risk: 0.0, tokens: 0, money: 0.0 },
+            cost: Cost {
+                latency,
+                risk: 0.0,
+                tokens: 0,
+                money: 0.0,
+            },
             ..default_impl()
         };
         let a = impls_cost("cheap", 10);
@@ -1517,16 +1527,24 @@ mod tests {
         recent.insert(
             "cheap".into(),
             RecentRuns {
-                window: 10, fails: 0, consec_fail: 0,
-                n: 10, sum_tokens: 200, sum_loss: 5.0,
+                window: 10,
+                fails: 0,
+                consec_fail: 0,
+                n: 10,
+                sum_tokens: 200,
+                sum_loss: 5.0,
             },
         );
         // expensive: 10 次运行, 2000 tokens, est_loss 累计 2.0 → loss_rate = 2/2000 = 0.001
         recent.insert(
             "expensive".into(),
             RecentRuns {
-                window: 10, fails: 0, consec_fail: 0,
-                n: 10, sum_tokens: 2000, sum_loss: 2.0,
+                window: 10,
+                fails: 0,
+                consec_fail: 0,
+                n: 10,
+                sum_tokens: 2000,
+                sum_loss: 2.0,
             },
         );
         // rd=0: 纯 cost 排序
@@ -1535,7 +1553,10 @@ mod tests {
         let ranked0 = rank_impls(&w0, &recent, &impls, "cost");
         assert_eq!(ranked0[0].name, "cheap");
         // rd=10000: cheap surcharge = 10000×0.025 = 250 ≫ cost 差; expensive = 10000×0.001 = 10
-        let w1 = Weights { rd: 10000.0, ..Weights::default() };
+        let w1 = Weights {
+            rd: 10000.0,
+            ..Weights::default()
+        };
         let ranked1 = rank_impls(&w1, &recent, &impls, "cost");
         assert_eq!(ranked1[0].name, "expensive");
     }
