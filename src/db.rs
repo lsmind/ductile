@@ -57,7 +57,9 @@ pub fn init_db() {
             latency_ms  INTEGER DEFAULT 0,
             err_hash    TEXT DEFAULT '',
             err_at      TEXT DEFAULT '',
-            recorded_at TEXT DEFAULT ''
+            recorded_at TEXT DEFAULT '',
+            rate_tokens INTEGER DEFAULT 0,
+            est_loss    REAL DEFAULT 0.0
         );
         CREATE INDEX IF NOT EXISTS idx_runs_proc ON runs(proc_name);
         CREATE TABLE IF NOT EXISTS compositions (
@@ -79,6 +81,21 @@ pub fn init_db() {
         );",
     )
     .expect("init_db failed");
+    // RD 扩展迁移：老库补列（新库 CREATE 已含；ALTER 幂等检测防重）
+    let has_rate = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name='rate_tokens'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    if has_rate == 0 {
+        conn.execute_batch(
+            "ALTER TABLE runs ADD COLUMN rate_tokens INTEGER DEFAULT 0;
+             ALTER TABLE runs ADD COLUMN est_loss REAL DEFAULT 0.0;",
+        )
+        .ok();
+    }
 }
 
 // ── Timestamp ──
@@ -151,6 +168,9 @@ pub fn import_pipeline(pl: &Pipeline, source_file: &str) {
     // Replace procs
     conn.execute("DELETE FROM procs WHERE pipeline_id = ?1", params![pid])
         .ok();
+
+    // Ensure FTS5 table exists before inserting
+    ensure_fts(&conn);
 
     for proc in &pl.procs {
         let tags: Vec<String> = proc_tags(proc).iter().cloned().collect();
@@ -258,12 +278,30 @@ pub fn record_run(
     err_hash: Option<&str>,
     err_at: Option<&str>,
 ) {
+    record_run_rd(
+        proc_name, impl_name, pipeline, status, latency_ms, err_hash, err_at, 0, 0.0,
+    );
+}
+
+/// RD-aware run record: rate_tokens = impl 输出 token 数（rate 的操作代理），
+/// est_loss = 失真代理（v0: 下游 check 失败=1.0, 通过=0.0; 由 executor 填）。
+pub fn record_run_rd(
+    proc_name: &str,
+    impl_name: &str,
+    pipeline: &str,
+    status: &str,
+    latency_ms: i64,
+    err_hash: Option<&str>,
+    err_at: Option<&str>,
+    rate_tokens: i64,
+    est_loss: f64,
+) {
     init_db();
     let conn = open();
     let ts = now_ts();
     conn.execute(
-        "INSERT INTO runs (proc_name, impl_name, pipeline, status, latency_ms, err_hash, err_at, recorded_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO runs (proc_name, impl_name, pipeline, status, latency_ms, err_hash, err_at, recorded_at, rate_tokens, est_loss)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             proc_name,
             impl_name,
@@ -273,6 +311,8 @@ pub fn record_run(
             err_hash.unwrap_or("-"),
             err_at.unwrap_or("-"),
             ts,
+            rate_tokens,
+            est_loss,
         ],
     )
     .ok();
@@ -458,6 +498,119 @@ pub fn all_patches() -> Vec<PatchRow> {
     .collect()
 }
 
+// ── Full-text search (FTS5 + BM25) ──
+
+/// Search result with BM25 relevance score.
+#[derive(Debug, Clone)]
+pub struct FtsRow {
+    pub name: String,
+    pub pipeline: String,
+    pub description: String,
+    pub tags: BTreeSet<String>,
+    pub impl_count: i64,
+    pub is_deliver: bool,
+    pub bm25_score: f64,
+}
+
+/// Initialize FTS5 virtual table + triggers (idempotent).
+/// Creates `procs_fts` synced to `procs` via triggers.
+fn ensure_fts(conn: &Connection) {
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS procs_fts USING fts5(
+            name,
+            description,
+            tags,
+            content='procs',
+            content_rowid='id',
+            tokenize='porter unicode61'
+        );",
+    )
+    .ok();
+
+    // Triggers keep FTS in sync with procs table.
+    // `tokenize='porter unicode61'` — porter stemming for English + unicode for CJK.
+    conn.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS procs_ai AFTER INSERT ON procs BEGIN
+            INSERT INTO procs_fts(rowid, name, description, tags)
+            VALUES (new.id, new.name, new.description, new.tags);
+        END;
+        CREATE TRIGGER IF NOT EXISTS procs_ad AFTER DELETE ON procs BEGIN
+            INSERT INTO procs_fts(procs_fts, rowid, name, description, tags)
+            VALUES ('delete', old.id, old.name, old.description, old.tags);
+        END;
+        CREATE TRIGGER IF NOT EXISTS procs_au AFTER UPDATE ON procs BEGIN
+            INSERT INTO procs_fts(procs_fts, rowid, name, description, tags)
+            VALUES ('delete', old.id, old.name, old.description, old.tags);
+            INSERT INTO procs_fts(rowid, name, description, tags)
+            VALUES (new.id, new.name, new.description, new.tags);
+        END;",
+    )
+    .ok();
+}
+
+/// Rebuild FTS index from scratch (use after bulk import or migration).
+pub fn rebuild_fts() {
+    init_db();
+    let conn = open();
+    conn.execute_batch("INSERT INTO procs_fts(procs_fts) VALUES('rebuild');")
+        .expect("FTS rebuild failed — does your SQLite support FTS5?");
+}
+
+/// BM25 full-text search over procs.
+///
+/// Returns results ranked by BM25 relevance (lower score = better match,
+/// consistent with SQLite's negative BM25 convention).
+pub fn search_fts(query: &str, limit: usize) -> Vec<FtsRow> {
+    init_db();
+    let conn = open();
+    ensure_fts(&conn);
+
+    // Sanitize query for FTS5: wrap each token in double quotes to avoid
+    // FTS5 query syntax injection (AND/OR/NOT/NEAR/column: etc.)
+    let tokens: Vec<String> = query
+        .split_whitespace()
+        .map(|t| format!("\"{}\"", t.replace('"', "")))
+        .collect();
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+    let fts_query = tokens.join(" "); // implicit AND
+
+    let sql = format!(
+        "SELECT p.name, pl.name, p.description, p.tags, p.impl_count, p.is_deliver,
+                bm25(procs_fts) AS score
+         FROM procs_fts
+         JOIN procs p ON p.id = procs_fts.rowid
+         JOIN pipelines pl ON p.pipeline_id = pl.id
+         WHERE procs_fts MATCH ?1
+         ORDER BY score ASC
+         LIMIT {}",
+        limit
+    );
+
+    let mut stmt = conn.prepare(&sql).unwrap();
+    stmt.query_map(params![fts_query], |row| {
+        let tags_str: String = row.get(3).unwrap_or_default();
+        let tags: BTreeSet<String> = tags_str
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        Ok(FtsRow {
+            name: row.get(0)?,
+            pipeline: row.get(1)?,
+            description: row.get(2).unwrap_or_default(),
+            tags,
+            bm25_score: row.get::<_, f64>(6).unwrap_or(0.0),
+            impl_count: row.get(4).unwrap_or(0),
+            is_deliver: row.get::<_, i64>(5).unwrap_or(0) == 1,
+        })
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
+}
+
 // ── Tests ──
 
 #[cfg(test)]
@@ -479,5 +632,64 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM pipelines", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn fts5_is_available() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE VIRTUAL TABLE t USING fts5(content)")
+            .expect("FTS5 is required — your bundled SQLite does not support it");
+        conn.execute("INSERT INTO t (content) VALUES ('hello world')", [])
+            .unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM t WHERE t MATCH 'hello'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn runs_rd_columns_exist_after_migration() {
+        // 模拟老库（无 rate_tokens/est_loss）→ init 迁移逻辑的等价路径
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                proc_name TEXT NOT NULL, impl_name TEXT NOT NULL,
+                pipeline TEXT DEFAULT '', status TEXT NOT NULL,
+                latency_ms INTEGER DEFAULT 0, err_hash TEXT DEFAULT '',
+                err_at TEXT DEFAULT '', recorded_at TEXT DEFAULT ''
+            );",
+        )
+        .unwrap();
+        let has_rate: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name='rate_tokens'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_rate, 0, "老库不应有 rate_tokens");
+        conn.execute_batch(
+            "ALTER TABLE runs ADD COLUMN rate_tokens INTEGER DEFAULT 0;
+             ALTER TABLE runs ADD COLUMN est_loss REAL DEFAULT 0.0;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO runs (proc_name, impl_name, status, rate_tokens, est_loss)
+             VALUES ('p', 'i', 'Ok', 6, 0.0)",
+            [],
+        )
+        .unwrap();
+        let (rt, el): (i64, f64) = conn
+            .query_row(
+                "SELECT rate_tokens, est_loss FROM runs WHERE proc_name='p'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(rt, 6);
+        assert!((el - 0.0).abs() < 1e-12);
     }
 }

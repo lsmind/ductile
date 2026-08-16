@@ -46,6 +46,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         // Database
         "import" if args.len() >= 3 => cmd_import(&args[2..]),
         "search" if args.len() >= 3 => cmd_search(&args[2]),
+        "fts" if args.len() >= 3 => cmd_fts(&args[2]),
         "compose" if args.len() >= 5 => cmd_compose(&args[2], &args[3], &args[4..]),
         "db-stats" => cmd_db_stats(),
 
@@ -92,7 +93,8 @@ fn print_usage() {
     eprintln!();
     eprintln!("Database:");
     eprintln!("  import <dir|file>      Import pipelines into SQLite");
-    eprintln!("  search \"query\"         Search proc library");
+    eprintln!("  search \"query\"         Search proc library (LIKE)");
+    eprintln!("  fts \"query\"            BM25 full-text search (relevance ranked)");
     eprintln!("  compose <name> <desc> <#tag1> <#tag2>...  Assemble from library");
     eprintln!("  db-stats               Show database statistics");
     eprintln!();
@@ -563,6 +565,32 @@ fn cmd_patch_clear(pipeline: &str) -> Result<i32, String> {
     conn.execute("DELETE FROM patches WHERE pipeline = ?1", params![pipeline])
         .ok();
     println!("✓ Cleared all patches for pipeline: {}", pipeline);
+    Ok(0)
+}
+
+// ── fts (BM25 full-text search) ──
+
+fn cmd_fts(query: &str) -> Result<i32, String> {
+    db::init_db();
+    // Try FTS search; fall back to LIKE if FTS index not built yet
+    let results = db::search_fts(query, 20);
+    if results.is_empty() {
+        println!("No results for \"{}\" (BM25).", query);
+        return Ok(0);
+    }
+    println!("BM25 search \"{}\" — {} results:\n", query, results.len());
+    for r in &results {
+        let tag_str: Vec<String> = r.tags.iter().map(|t| format!("#{t}")).collect();
+        print!("  {}", r.name);
+        if !tag_str.is_empty() {
+            print!(" {{{}}}", tag_str.join(", "));
+        }
+        println!("  [score: {:.2}]", r.bm25_score);
+        if !r.description.is_empty() {
+            println!("    {}", r.description);
+        }
+        println!("    [{}, {} impls]", r.pipeline, r.impl_count);
+    }
     Ok(0)
 }
 

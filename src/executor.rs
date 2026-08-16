@@ -185,7 +185,19 @@ fn exec_proc(
                     proc.checks.iter().chain(impl_.ensure.iter()).collect();
                 match run_checks(&all_checks, &val) {
                     Ok(val) => {
-                        append_run(&proc.name, &impl_.name, pid, Status::Ok, None, None);
+                        let out_text = match &val {
+                            Value::Text(t) => t.clone(),
+                            _ => String::new(),
+                        };
+                        append_run_rd(
+                            &proc.name,
+                            &impl_.name,
+                            pid,
+                            Status::Ok,
+                            None,
+                            None,
+                            &out_text,
+                        );
                         return Ok(val);
                     }
                     Err(chk_err) => {
@@ -930,11 +942,39 @@ fn append_run(
     _err_hash: Option<&str>,
     _err_at: Option<&str>,
 ) {
+    append_run_rd(proc_name, impl_name, pid, status, _err_hash, _err_at, "");
+}
+
+/// RD-aware append_run: rate_tokens 从 impl 输出文本估算（len/4 ≈ token 数），
+/// est_loss v0 = check 结果二值代理（Ok=0.0, Fail=1.0）。
+fn append_run_rd(
+    proc_name: &str,
+    impl_name: &str,
+    pid: char,
+    status: Status,
+    _err_hash: Option<&str>,
+    _err_at: Option<&str>,
+    output_text: &str,
+) {
     let status_str = match status {
         Status::Ok => "Ok",
         Status::Fail => "Fail",
     };
-    db::record_run(proc_name, impl_name, "", status_str, 0, _err_hash, _err_at);
+    // rate 代理：输出字符数 / 4（英文 ~4 char/token 的粗估；中文偏保守）
+    let rate_tokens = (output_text.chars().count() as i64) / 4;
+    // loss 代理 v0：check 失败 = 全失真；通过 = 0（后续版本接入语义距离）
+    let est_loss = if status == Status::Fail { 1.0 } else { 0.0 };
+    db::record_run_rd(
+        proc_name,
+        impl_name,
+        "",
+        status_str,
+        0,
+        _err_hash,
+        _err_at,
+        rate_tokens,
+        est_loss,
+    );
     // Keep pid logging for backwards compat in stderr
     let _ = pid;
 }
