@@ -984,8 +984,9 @@ fn append_run(
     append_run_rd(proc_name, impl_name, pid, status, _err_hash, _err_at, "");
 }
 
-/// RD-aware append_run: rate_tokens 从 impl 输出文本估算（len/4 ≈ token 数），
-/// est_loss v0 = check 结果二值代理（Ok=0.0, Fail=1.0）。
+/// RD-aware append_run: rate_tokens 从 impl 输出文本估算（len/4 ≈ token 数）。
+/// 惩罚域/失真域分家（反双重计费）：失败由 fail-rate 惩罚独占计费（e^(7r)），
+/// est_loss 只在有结构化证据（v1 字段覆盖度）时非零；无证据 = 0.0。
 fn append_run_rd(
     proc_name: &str,
     impl_name: &str,
@@ -1001,8 +1002,9 @@ fn append_run_rd(
     };
     // rate 代理：输出字符数 / 4（英文 ~4 char/token 的粗估；中文偏保守）
     let rate_tokens = (output_text.chars().count() as i64) / 4;
-    // loss 代理 v0：check 失败 = 全失真；通过 = 0（后续版本接入语义距离）
-    let est_loss = if status == Status::Fail { 1.0 } else { 0.0 };
+    // loss：v1 字段覆盖度（有上游字段与 DSL_RESULT 时）；否则 0——不再用 check 二值兜底，
+    // 否则同一次失败既吃乘法惩罚又吃 RD 加法费（双重计费）。
+    let est_loss = est_loss_v0(output_text, &status).unwrap_or(0.0);
     db::record_run_rd(
         proc_name,
         impl_name,
@@ -1016,6 +1018,12 @@ fn append_run_rd(
     );
     // Keep pid logging for backwards compat in stderr
     let _ = pid;
+}
+
+/// est_loss 证据函数：当前无 v1 上游字段上下文传入（调用点未接线），
+/// 返回 None = 无结构化证据 → RD 域不计费。
+fn est_loss_v0(_output_text: &str, _status: &Status) -> Option<f64> {
+    None
 }
 
 fn load_recent_runs(proc_name: &str) -> BTreeMap<String, RecentRuns> {
@@ -1324,6 +1332,10 @@ mod tests {
         // 全丢 → 1
         let none = "x\n##DSL_RESULT\nother=1\n##DSL_END";
         assert_eq!(est_loss_field_coverage(&up, none), Some(1.0));
+        // 反双重计费：Fail 无结构化证据 → est_loss = 0（失败只由 fail-rate 惩罚计费）
+        let status = Status::Fail;
+        assert_eq!(est_loss_v0("raw error output", &status), None);
+        assert_eq!(est_loss_v0("raw error output", &status).unwrap_or(0.0), 0.0);
         // 无 DSL_RESULT → None（退回 v0）
         assert_eq!(est_loss_field_coverage(&up, "plain text"), None);
         // 上游无字段 → None
