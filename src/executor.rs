@@ -729,6 +729,25 @@ fn exec_run(
 
 // ── ##DSL_RESULT protocol ──
 
+/// est_loss v1: 结构化字段保留度。上游有 DSL_RESULT 字段集 F_up，
+/// 本 impl 输出字段集 F_out → loss = 1 − |F_up ∩ F_out| / |F_up|。
+/// 上游无结构化字段 → None（退化到 v0 二值代理）。
+pub fn est_loss_field_coverage(upstream_fields: &[String], output_text: &str) -> Option<f64> {
+    if upstream_fields.is_empty() {
+        return None;
+    }
+    let out_kvs = parse_dsl_result_block(output_text)?;
+    if out_kvs.is_empty() {
+        return None;
+    }
+    let out_keys: std::collections::BTreeSet<&str> =
+        out_kvs.iter().map(|(k, _)| k.as_str()).collect();
+    let up_keys: std::collections::BTreeSet<&str> =
+        upstream_fields.iter().map(|s| s.as_str()).collect();
+    let inter = up_keys.intersection(&out_keys).count();
+    Some(1.0 - inter as f64 / up_keys.len() as f64)
+}
+
 fn parse_dsl_result_block(stdout: &str) -> Option<Vec<(String, String)>> {
     let mut in_block = false;
     let mut kvs = Vec::new();
@@ -863,11 +882,31 @@ fn rank_impls<'a>(
         .map(|i| {
             let base = weights.cost_total(&i.cost);
             let penalty = impl_penalty(recent, &i.name);
-            (base * (1.0 + penalty), *i)
+            let rd = impl_rd_surcharge(weights, recent, &i.name);
+            (base * (1.0 + penalty) + rd, *i)
         })
         .collect();
     ranked.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     ranked.into_iter().map(|(_, imp)| imp).collect()
+}
+
+/// RD 附加费：weights.rd × 该 impl 近 20 次的平均失真率 est_loss/max(rate_tokens,1)。
+/// 语义：同样 token 预算下，单位信息损耗大的 impl 排后（E7a 准则的运行时形态）。
+/// 无历史记录 = 0（冷启动不惩罚）；rd 权重 0 = 完全关闭（默认）。
+fn impl_rd_surcharge(weights: &Weights, recent: &BTreeMap<String, RecentRuns>, name: &str) -> f64 {
+    if weights.rd <= 0.0 {
+        return 0.0;
+    }
+    match recent.get(name) {
+        None => 0.0,
+        Some(rr) => {
+            if rr.n == 0 {
+                return 0.0;
+            }
+            let loss_rate = rr.sum_loss / (rr.sum_tokens.max(1) as f64);
+            weights.rd * loss_rate
+        }
+    }
 }
 
 fn impl_penalty(recent: &BTreeMap<String, RecentRuns>, name: &str) -> f64 {
@@ -986,10 +1025,9 @@ fn load_recent_runs(proc_name: &str) -> BTreeMap<String, RecentRuns> {
     }
 
     // Group by impl name, compute sliding window
-    let mut by_impl: BTreeMap<String, Vec<bool>> = BTreeMap::new();
+    let mut by_impl: BTreeMap<String, Vec<&db::RunRow>> = BTreeMap::new();
     for row in &rows {
-        let ok = row.status == "Ok";
-        by_impl.entry(row.impl_name.clone()).or_default().push(ok);
+        by_impl.entry(row.impl_name.clone()).or_default().push(row);
     }
 
     let mut result = BTreeMap::new();
@@ -999,14 +1037,19 @@ fn load_recent_runs(proc_name: &str) -> BTreeMap<String, RecentRuns> {
         } else {
             &all_runs[..]
         };
-        let fails = recent.iter().filter(|&&ok| !ok).count();
-        let consec = recent.iter().rev().take_while(|&&ok| !ok).count();
+        let fails = recent.iter().filter(|r| r.status != "Ok").count();
+        let consec = recent.iter().rev().take_while(|r| r.status != "Ok").count();
+        let sum_tokens: i64 = recent.iter().map(|r| r.rate_tokens).sum();
+        let sum_loss: f64 = recent.iter().map(|r| r.est_loss).sum();
         result.insert(
             name.clone(),
             RecentRuns {
                 window: recent.len(),
                 fails,
                 consec_fail: consec,
+                n: recent.len(),
+                sum_tokens,
+                sum_loss,
             },
         );
     }
@@ -1265,6 +1308,24 @@ mod tests {
     }
 
     #[test]
+    fn est_loss_v1_field_coverage() {
+        let up = vec!["status".to_string(), "count".to_string(), "score".to_string()];
+        // 全保留 → 0
+        let full = "x\n##DSL_RESULT\nstatus=ok\ncount=5\nscore=9\n##DSL_END";
+        assert_eq!(est_loss_field_coverage(&up, full), Some(0.0));
+        // 丢 1/3 → 1/3
+        let partial = "x\n##DSL_RESULT\nstatus=ok\ncount=5\n##DSL_END";
+        assert_eq!(est_loss_field_coverage(&up, partial), Some(1.0 / 3.0));
+        // 全丢 → 1
+        let none = "x\n##DSL_RESULT\nother=1\n##DSL_END";
+        assert_eq!(est_loss_field_coverage(&up, none), Some(1.0));
+        // 无 DSL_RESULT → None（退回 v0）
+        assert_eq!(est_loss_field_coverage(&up, "plain text"), None);
+        // 上游无字段 → None
+        assert_eq!(est_loss_field_coverage(&[], "any"), None);
+    }
+
+    #[test]
     fn parse_dsl_result_empty_block() {
         let stdout = "##DSL_RESULT\n##DSL_END";
         assert!(parse_dsl_result_block(stdout).is_none());
@@ -1324,6 +1385,9 @@ mod tests {
                 window: 10,
                 fails: 1,
                 consec_fail: 0,
+                n: 0,
+                sum_tokens: 0,
+                sum_loss: 0.0,
             },
         );
         assert_eq!(impl_penalty(&recent, "a"), 0.0); // 0.1 rate = no penalty
@@ -1338,6 +1402,9 @@ mod tests {
                 window: 5,
                 fails: 3,
                 consec_fail: 3,
+                n: 0,
+                sum_tokens: 0,
+                sum_loss: 0.0,
             },
         );
         assert!(impl_penalty(&recent, "a").is_infinite());
@@ -1352,6 +1419,9 @@ mod tests {
                 window: 10,
                 fails: 8,
                 consec_fail: 0,
+                n: 0,
+                sum_tokens: 0,
+                sum_loss: 0.0,
             },
         );
         let p = impl_penalty(&recent, "a");
@@ -1400,6 +1470,9 @@ mod tests {
                 window: 10,
                 fails: 8,
                 consec_fail: 0,
+                n: 0,
+                sum_tokens: 0,
+                sum_loss: 0.0,
             },
         );
         let a = Impl {
@@ -1426,6 +1499,45 @@ mod tests {
         let ranked = rank_impls(&weights, &recent, &impls, "cost");
         // With penalty, expensive should come first
         assert_eq!(ranked[0].name, "expensive");
+    }
+
+    #[test]
+    fn rank_impls_rd_surcharge_reorders() {
+        // rd=0（默认）：cheap 在前；rd>0 且 cheap 失真率高：expensive 在前
+        let impls_cost = |name: &str, latency: i64| Impl {
+            name: name.into(),
+            cost: Cost { latency, risk: 0.0, tokens: 0, money: 0.0 },
+            ..default_impl()
+        };
+        let a = impls_cost("cheap", 10);
+        let b = impls_cost("expensive", 100);
+        let impls = vec![&a, &b];
+        let mut recent = BTreeMap::new();
+        // cheap: 10 次运行, 200 tokens, est_loss 累计 5.0 → loss_rate = 5/200 = 0.025
+        recent.insert(
+            "cheap".into(),
+            RecentRuns {
+                window: 10, fails: 0, consec_fail: 0,
+                n: 10, sum_tokens: 200, sum_loss: 5.0,
+            },
+        );
+        // expensive: 10 次运行, 2000 tokens, est_loss 累计 2.0 → loss_rate = 2/2000 = 0.001
+        recent.insert(
+            "expensive".into(),
+            RecentRuns {
+                window: 10, fails: 0, consec_fail: 0,
+                n: 10, sum_tokens: 2000, sum_loss: 2.0,
+            },
+        );
+        // rd=0: 纯 cost 排序
+        let w0 = Weights::default();
+        assert_eq!(w0.rd, 0.0);
+        let ranked0 = rank_impls(&w0, &recent, &impls, "cost");
+        assert_eq!(ranked0[0].name, "cheap");
+        // rd=10000: cheap surcharge = 10000×0.025 = 250 ≫ cost 差; expensive = 10000×0.001 = 10
+        let w1 = Weights { rd: 10000.0, ..Weights::default() };
+        let ranked1 = rank_impls(&w1, &recent, &impls, "cost");
+        assert_eq!(ranked1[0].name, "expensive");
     }
 
     fn default_impl() -> Impl {

@@ -136,6 +136,8 @@ pub struct RunRow {
     pub status: String,
     pub latency_ms: i64,
     pub recorded_at: String,
+    pub rate_tokens: i64,
+    pub est_loss: f64,
 }
 
 // ── Import pipeline ──
@@ -323,7 +325,7 @@ pub fn recent_runs(proc_name: &str) -> Vec<RunRow> {
     let conn = open();
     let mut stmt = conn
         .prepare(
-            "SELECT proc_name, impl_name, status, latency_ms, recorded_at
+            "SELECT proc_name, impl_name, status, latency_ms, recorded_at, rate_tokens, est_loss
              FROM runs WHERE proc_name = ?1
              ORDER BY id DESC LIMIT 20",
         )
@@ -336,6 +338,8 @@ pub fn recent_runs(proc_name: &str) -> Vec<RunRow> {
             status: row.get(2)?,
             latency_ms: row.get(3).unwrap_or(0),
             recorded_at: row.get(4).unwrap_or_default(),
+            rate_tokens: row.get(5).unwrap_or(0),
+            est_loss: row.get(6).unwrap_or(0.0),
         })
     })
     .unwrap()

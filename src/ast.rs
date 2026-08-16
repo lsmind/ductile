@@ -43,6 +43,9 @@ pub struct Weights {
     pub latency: f64,
     pub risk: f64,
     pub money: f64,
+    /// RD 失真感知权重：乘在 est_loss/rate_tokens（每千 token 失真率）上。
+    /// 0 = 关闭 RD 排序（默认，向后兼容）；>0 启用。
+    pub rd: f64,
 }
 
 impl Default for Weights {
@@ -52,6 +55,7 @@ impl Default for Weights {
             latency: 0.001,
             risk: 10.0,
             money: 1.0,
+            rd: 0.0,
         }
     }
 }
@@ -184,6 +188,10 @@ pub struct RecentRuns {
     pub window: usize,
     pub fails: usize,
     pub consec_fail: usize,
+    /// RD 统计：样本数、rate_tokens 累计、est_loss 累计
+    pub n: usize,
+    pub sum_tokens: i64,
+    pub sum_loss: f64,
 }
 
 pub const WINDOW_SIZE: usize = 20;
