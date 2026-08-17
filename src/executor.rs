@@ -10,6 +10,7 @@ use crate::egraph;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 
 // ── Hot patches ──
@@ -387,6 +388,18 @@ fn run_impl_steps(
         "write" => exec_write(impl_, topic, body, results),
         "read" => exec_read(impl_, body),
         "run" | "sh" => exec_run(impl_, topic, body, results),
+        // ── v0.7 resource management ops ──
+        "spawn" => exec_spawn(impl_, topic, body, results),
+        "procs" => exec_procs(impl_, topic, body, results),
+        "kill" => exec_kill(impl_, topic, body, results),
+        "wait" => exec_wait(impl_, topic, body, results),
+        "exists" => exec_fs_exists(impl_, body),
+        "stat" => exec_fs_stat(impl_, body),
+        "ls" => exec_fs_ls(impl_, body),
+        "rm" => exec_fs_rm(impl_, body),
+        "cp" => exec_fs_cp(impl_, body),
+        "mkdir" => exec_fs_mkdir(impl_, body),
+        "disk" => exec_disk(impl_, body),
         "cache" => Err("cache miss".into()),
         _ => Ok(Value::Text(format!("<noop: {}>", func))),
     }
@@ -642,6 +655,42 @@ fn exec_merge(
     Ok(Value::Text(merged))
 }
 
+// ── Resource management helpers (v0.7) ──
+
+/// Best-effort kill of an entire process group (POSIX only; no-op elsewhere).
+/// Uses kill(-pid, SIGKILL) via libc-free syscall wrapper: we shell out to
+/// `kill` itself to avoid adding a libc dependency.
+fn libc_kill_group(pid: i32) {
+    let _ = Command::new("kill")
+        .arg("-9")
+        .arg(format!("-{}", pid))
+        .output();
+}
+
+/// Extract ALL quoted values for a repeated key: env="A=1" env="B=2" → ["A=1","B=2"]
+fn extract_all_string_args(key: &str, body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let pattern = format!("{}=\"", key);
+    let mut rest = body;
+    while let Some(pos) = rest.find(&pattern) {
+        // guard against substring matches (e.g. "envx=")
+        let before = if pos > 0 { &rest[..pos] } else { "" };
+        if let Some(c) = before.chars().last() {
+            if c.is_alphanumeric() || c == '_' {
+                rest = &rest[pos + pattern.len()..];
+                continue;
+            }
+        }
+        let after = &rest[pos + pattern.len()..];
+        let val: String = after.chars().take_while(|c| *c != '"').collect();
+        if !val.is_empty() {
+            out.push(val);
+        }
+        rest = &rest[pos + pattern.len()..];
+    }
+    out
+}
+
 fn exec_write(
     _impl_: &Impl,
     topic: &str,
@@ -661,6 +710,298 @@ fn exec_write(
     }
     fs::write(path, &resolved_content).map_err(|e| format!("write failed: {}", e))?;
     Ok(Value::File(expanded))
+}
+
+// ── v0.7 Resource management ops: processes ──
+
+use std::collections::HashMap as StdHashMap;
+use std::sync::Mutex;
+use std::sync::OnceLock;
+
+/// Global process table: handle name → (pid, start_unix, command)
+static PROC_TABLE: OnceLock<Mutex<StdHashMap<String, (u32, u64, String)>>> = OnceLock::new();
+
+fn proc_table() -> &'static Mutex<StdHashMap<String, (u32, u64, String)>> {
+    PROC_TABLE.get_or_init(|| Mutex::new(StdHashMap::new()))
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// spawn("name", "cmd") [timeout=0] — background launch, returns pid.
+/// Handle name is used by wait/kill/procs. Non-blocking.
+fn exec_spawn(
+    _impl_: &Impl,
+    topic: &str,
+    body: &str,
+    results: &BTreeMap<String, Value>,
+) -> Result<Value, String> {
+    let name = extract_string_arg("name", body);
+    if name.is_empty() {
+        return Err("spawn requires name=\"handle\"".into());
+    }
+    // cmd: prefer cmd="..." arg; fall back to first quoted string that isn't the name
+    let cmd_raw = {
+        let c = extract_string_arg("cmd", body);
+        if !c.is_empty() {
+            c
+        } else {
+            // strip name="..." then take first quoted string
+            let stripped = body.replace(&format!("name=\"{}\"", name), "");
+            extract_first_string(&stripped)
+        }
+    };
+    let cmd = resolve_vars(&cmd_raw, topic, results);
+    if cmd.is_empty() || cmd == name {
+        return Err("spawn requires a command string".into());
+    }
+    use std::process::Stdio;
+    let child = Command::new("bash")
+        .arg("-c")
+        .arg(&cmd)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("spawn failed: {}", e))?;
+    let pid = child.id();
+    eprintln!("    -> spawn[{}]: pid={} cmd={}", name, pid, cmd);
+    proc_table()
+        .lock()
+        .map_err(|e| format!("proc table poisoned: {}", e))?
+        .insert(name, (pid, unix_now(), cmd));
+    Ok(Value::Text(format!("{}", pid)))
+}
+
+/// procs() or procs("name") — list live handles. Output: name pid age_s cmd per line.
+fn exec_procs(
+    _impl_: &Impl,
+    _topic: &str,
+    _body: &str,
+    _results: &BTreeMap<String, Value>,
+) -> Result<Value, String> {
+    let filter = extract_string_arg("name", _body);
+    let table = proc_table()
+        .lock()
+        .map_err(|e| format!("proc table poisoned: {}", e))?;
+    let now = unix_now();
+    let mut lines = Vec::new();
+    for (name, (pid, start, cmd)) in table.iter() {
+        if !filter.is_empty() && name != &filter {
+            continue;
+        }
+        // liveness check via /proc
+        let alive = Path::new(&format!("/proc/{}", pid)).exists();
+        lines.push(format!(
+            "{}\t{}\t{}\t{}\t{}",
+            name,
+            pid,
+            now.saturating_sub(*start),
+            if alive { "alive" } else { "dead" },
+            cmd
+        ));
+    }
+    Ok(Value::Text(lines.join("\n")))
+}
+
+/// kill("name") — SIGKILL the handle's process group; also accepts raw pid("1234").
+fn exec_kill(
+    _impl_: &Impl,
+    topic: &str,
+    body: &str,
+    results: &BTreeMap<String, Value>,
+) -> Result<Value, String> {
+    let target = resolve_vars(&extract_string_arg("name", body), topic, results);
+    if target.is_empty() {
+        return Err("kill requires name=\"handle\" or a pid".into());
+    }
+    let pid: i32 = if let Ok(p) = target.parse::<i32>() {
+        p
+    } else {
+        let table = proc_table()
+            .lock()
+            .map_err(|e| format!("proc table poisoned: {}", e))?;
+        table
+            .get(&target)
+            .map(|(pid, _, _)| *pid as i32)
+            .ok_or_else(|| format!("unknown handle: {}", target))?
+    };
+    eprintln!("    -> kill: -{}", pid);
+    let _ = Command::new("kill")
+        .arg("-9")
+        .arg(format!("-{}", pid))
+        .output();
+    Ok(Value::Text(format!("killed -{}", pid)))
+}
+
+/// wait("name", timeout=60) — block until handle exits (or timeout). Returns exit info.
+fn exec_wait(
+    _impl_: &Impl,
+    topic: &str,
+    body: &str,
+    results: &BTreeMap<String, Value>,
+) -> Result<Value, String> {
+    let name = resolve_vars(&extract_string_arg("name", body), topic, results);
+    let timeout: u64 = extract_string_arg("timeout", body).parse().unwrap_or(60);
+    if name.is_empty() {
+        return Err("wait requires name=\"handle\"".into());
+    }
+    let pid = {
+        let table = proc_table()
+            .lock()
+            .map_err(|e| format!("proc table poisoned: {}", e))?;
+        table
+            .get(&name)
+            .map(|(pid, _, _)| *pid)
+            .ok_or_else(|| format!("unknown handle: {}", name))?
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout.max(1));
+    loop {
+        let alive = Path::new(&format!("/proc/{}", pid)).exists();
+        if !alive {
+            return Ok(Value::Text(format!("{} exited", name)));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "wait timeout: {} still running after {}s",
+                name, timeout
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+// ── v0.7 Resource management ops: filesystem ──
+
+/// exists("path") → "true"/"false"
+fn exec_fs_exists(_impl_: &Impl, body: &str) -> Result<Value, String> {
+    let path = expand_tilde(&extract_first_string(body));
+    Ok(Value::Text(if Path::new(&path).exists() {
+        "true".into()
+    } else {
+        "false".into()
+    }))
+}
+
+/// stat("path") → "size_bytes mtime_unix" or error if missing
+fn exec_fs_stat(_impl_: &Impl, body: &str) -> Result<Value, String> {
+    let path = expand_tilde(&extract_first_string(body));
+    let meta = fs::metadata(&path).map_err(|e| format!("stat failed: {}", e))?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let kind = if meta.is_dir() {
+        "dir"
+    } else if meta.is_file() {
+        "file"
+    } else {
+        "other"
+    };
+    Ok(Value::Text(format!("{} {} {}", kind, meta.len(), mtime)))
+}
+
+/// ls("dir") → lines of entries (name only)
+fn exec_fs_ls(_impl_: &Impl, body: &str) -> Result<Value, String> {
+    let path = expand_tilde(&extract_first_string(body));
+    let entries = fs::read_dir(&path).map_err(|e| format!("ls failed: {}", e))?;
+    let mut names: Vec<String> = Vec::new();
+    for e in entries.flatten() {
+        names.push(e.file_name().to_string_lossy().to_string());
+    }
+    names.sort();
+    Ok(Value::Text(names.join("\n")))
+}
+
+/// rm("path") — recursive; refuses / and $HOME roots.
+fn exec_fs_rm(_impl_: &Impl, body: &str) -> Result<Value, String> {
+    let path = expand_tilde(&extract_first_string(body));
+    let p = Path::new(&path);
+    let danger = p == Path::new("/") || p == dirs_home();
+    if danger {
+        return Err(format!("rm refused: {} is a protected root", path));
+    }
+    if !p.exists() {
+        return Ok(Value::Text("noop: not found".into()));
+    }
+    if p.is_dir() {
+        fs::remove_dir_all(p).map_err(|e| format!("rm failed: {}", e))?;
+    } else {
+        fs::remove_file(p).map_err(|e| format!("rm failed: {}", e))?;
+    }
+    Ok(Value::Text(format!("removed {}", path)))
+}
+
+fn dirs_home() -> &'static Path {
+    static HOME: OnceLock<PathBuf> = OnceLock::new();
+    HOME.get_or_init(|| PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into())))
+}
+
+/// cp("src", "dst") — file or directory tree.
+fn exec_fs_cp(_impl_: &Impl, body: &str) -> Result<Value, String> {
+    let src = expand_tilde(&extract_string_arg("from", body));
+    let dst = expand_tilde(&extract_string_arg("to", body));
+    if src.is_empty() || dst.is_empty() {
+        return Err("cp requires from=\"...\" to=\"...\"".into());
+    }
+    let s = Path::new(&src);
+    if !s.exists() {
+        return Err(format!("cp: source not found: {}", src));
+    }
+    if s.is_dir() {
+        // shell out for recursive copy (keeps this fn small)
+        let st = Command::new("cp")
+            .arg("-r")
+            .arg(&src)
+            .arg(&dst)
+            .output()
+            .map_err(|e| format!("cp failed: {}", e))?;
+        if !st.status.success() {
+            return Err(format!(
+                "cp failed: {}",
+                String::from_utf8_lossy(&st.stderr)
+            ));
+        }
+    } else {
+        fs::copy(&src, &dst).map_err(|e| format!("cp failed: {}", e))?;
+    }
+    Ok(Value::Text(format!("copied {} -> {}", src, dst)))
+}
+
+/// mkdir("path") — create all parents.
+fn exec_fs_mkdir(_impl_: &Impl, body: &str) -> Result<Value, String> {
+    let path = expand_tilde(&extract_first_string(body));
+    fs::create_dir_all(&path).map_err(|e| format!("mkdir failed: {}", e))?;
+    Ok(Value::Text(path))
+}
+
+/// disk("dir") → "avail_gb total_gb" via df -BG.
+fn exec_disk(_impl_: &Impl, body: &str) -> Result<Value, String> {
+    let path = expand_tilde(&extract_first_string(body));
+    let out = Command::new("df")
+        .arg("-BG")
+        .arg(&path)
+        .output()
+        .map_err(|e| format!("df failed: {}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "df failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    // last line: fs size used avail use% mount
+    let text = String::from_utf8_lossy(&out.stdout);
+    let last = text.lines().last().unwrap_or("");
+    let fields: Vec<&str> = last.split_whitespace().collect();
+    if fields.len() >= 4 {
+        return Ok(Value::Text(format!("{} {}", fields[3], fields[1])));
+    }
+    Err("disk: unexpected df output".into())
 }
 
 fn exec_read(_impl_: &Impl, body: &str) -> Result<Value, String> {
@@ -691,24 +1032,81 @@ fn exec_run(
 ) -> Result<Value, String> {
     let cmd_raw = extract_first_string(body);
     let cmd = resolve_vars(&cmd_raw, topic, results);
-    eprintln!("    -> run: {}", cmd);
+    // v0.7 resource management: optional timeout=seconds arg (default 300s, 0 = no limit)
+    let timeout_secs: u64 = extract_string_arg("timeout", body).parse().unwrap_or(300);
+    // v0.7 resource management: env vars via env="K=V" args (repeatable)
+    let envs = extract_all_string_args("env", body);
+    eprintln!("    -> run: {} (timeout={}s)", cmd, timeout_secs);
 
-    let output = Command::new("bash")
-        .arg("-c")
-        .arg(&cmd)
-        .output()
+    let mut command = Command::new("bash");
+    command.arg("-c").arg(&cmd);
+    for e in &envs {
+        if let Some(eq) = e.find('=') {
+            let (k, v) = (&e[..eq], &e[eq + 1..]);
+            if k == "PATH" || k == "HOME" || k == "USER" {
+                // never clobber identity vars
+                continue;
+            }
+            command.env(k, v);
+        }
+    }
+
+    // Spawn + deadline: kill the whole process group on timeout so orphaned
+    // children (e.g. `foo &`) don't outlive the pipeline.
+    use std::process::Stdio;
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("run failed: {}", e))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs.max(1));
+    let status;
+    loop {
+        match child.try_wait() {
+            Ok(Some(s)) => {
+                status = s;
+                break;
+            }
+            Ok(None) => {
+                if timeout_secs > 0 && std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    // Best-effort group kill: negative pid of the child.
+                    // (child.id() is the group leader under setsid-less bash -c)
+                    let pid = child.id() as i32;
+                    if pid > 0 {
+                        libc_kill_group(pid);
+                    }
+                    return Err(format!("run timed out after {}s: {}", timeout_secs, cmd));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => return Err(format!("run failed: {}", e)),
+        }
+    }
 
-    if !output.status.success() {
-        let stderr_text = String::from_utf8_lossy(&output.stderr);
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let mut stdout_buf: Vec<u8> = Vec::new();
+    let mut stderr_buf: Vec<u8> = Vec::new();
+    use std::io::Read;
+    if let Some(p) = stdout_pipe.as_mut() {
+        let _ = p.read_to_end(&mut stdout_buf);
+    }
+    if let Some(p) = stderr_pipe.as_mut() {
+        let _ = p.read_to_end(&mut stderr_buf);
+    }
+
+    if !status.success() {
+        let stderr_text = String::from_utf8_lossy(&stderr_buf);
         return Err(format!(
             "run failed (exit {:?}): {}",
-            output.status.code(),
+            status.code(),
             &stderr_text.chars().take(300).collect::<String>()
         ));
     }
 
-    let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
+    let stdout_text = String::from_utf8_lossy(&stdout_buf).to_string();
 
     // Parse ##DSL_RESULT block
     if let Some(kvs) = parse_dsl_result_block(&stdout_text) {
