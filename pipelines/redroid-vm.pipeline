@@ -1,0 +1,66 @@
+// Redroid VM 全链路管理 pipeline
+// 包含 VM 启动、Redroid 容器启动、ADB 连接验证
+
+Pipeline("redroid-vm", "Redroid VM 全生命周期管理")
+
+  .proc("start-vm")
+    .desc("启动 QEMU VM daemon")
+    .plan(
+      launch -> run("bash ~/projects/tools/redroid-vm/start-vm-daemon.sh")
+        .tags(#vm, #qemu, #systemd)
+        .retry(n=2)
+        .cost(latency=30, risk=0.05, tokens=0, money=0),
+      fallback -> run("echo VM start failed")
+        .tags(#vm, #fallback)
+    )
+    .check(not_empty)
+
+  .proc("wait-ssh")
+    .desc("等待 VM SSH 可达")
+    .plan(
+      check_ssh -> run("for i in $(seq 1 30); do sshpass -p beef ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 -p 2222 beef@localhost echo ok && exit 0; sleep 2; done; echo TIMEOUT")
+        .tags(#ssh, #vm, #health)
+        .retry(n=1)
+        .cost(latency=90, risk=0.1, tokens=0, money=0)
+    )
+    .check(result => result.contains("ok"), "SSH not reachable")
+
+  .proc("load-binder")
+    .desc("VM 内加载 binder 内核模块")
+    .plan(
+      modprobe -> run("sshpass -p beef ssh -o StrictHostKeyChecking=no -p 2222 beef@localhost 'sudo modprobe binder_linux devices=binder,hwbinder,vndbinder && sudo chmod 666 /dev/binder /dev/hwbinder /dev/vndbinder && echo binder_ok'")
+        .tags(#vm, #kernel, #binder, #redroid)
+        .retry(n=1)
+        .cost(latency=10, risk=0.05, tokens=0, money=0)
+    )
+    .check(result => result.contains("binder_ok"), "binder module failed")
+
+  .proc("start-redroid")
+    .desc("启动 Redroid 容器")
+    .plan(
+      run_redroid -> run("sshpass -p beef ssh -o StrictHostKeyChecking=no -p 2222 beef@localhost 'sudo podman rm -f redroid 2>/dev/null; sudo podman run -d --name redroid --privileged -p 5555:5555 docker.m.daocloud.io/redroid/redroid:14.0.0-latest androidboot.hardware=qemu/init && echo started'")
+        .tags(#redroid, #container, #podman)
+        .retry(n=1)
+        .cost(latency=30, risk=0.1, tokens=0, money=0)
+    )
+    .check(result => result.contains("started"), "redroid container failed")
+
+  .proc("wait-adb")
+    .desc("等待 ADB 连接就绪")
+    .plan(
+      adb_check -> run("for i in $(seq 1 30); do BOOT=$(adb -s localhost:5555 shell getprop sys.boot_completed 2>/dev/null | tr -d '\\r'); if [ \"$BOOT\" = \"1\" ]; then echo adb_ok; exit 0; fi; sleep 2; done; echo TIMEOUT")
+        .tags(#adb, #redroid, #health)
+        .retry(n=1)
+        .cost(latency=90, risk=0.15, tokens=0, money=0)
+    )
+    .check(result => result.contains("adb_ok"), "ADB not ready")
+
+  .proc("full-chain")
+    .desc("全链路状态汇总")
+    .plan(
+      status -> run("echo '##DSL_RESULT'; echo vm=$(sshpass -p beef ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -p 2222 beef@localhost hostname 2>/dev/null | tr -d '\\r'); echo adb=$(adb -s localhost:5550 shell getprop ro.build.version.release 2>/dev/null | tr -d '\\r'); echo '##DSL_END'; echo 'VM host: '$(sshpass -p beef ssh -o StrictHostKeyChecking=no -p 2222 beef@localhost hostname 2>/dev/null); echo 'Android: '$(adb -s localhost:5555 shell getprop ro.build.version.release 2>/dev/null); echo 'Boot: '$(adb -s localhost:5555 shell getprop sys.boot_completed 2>/dev/null)'")
+        .tags(#health, #summary)
+        .cost(latency=15, risk=0.05, tokens=0, money=0)
+    )
+    .check(has_content)
+    .deliver(@start-vm)
