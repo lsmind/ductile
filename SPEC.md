@@ -456,6 +456,54 @@ patch clear → DELETE FROM patches WHERE pipeline = ?
 
 ---
 
+## 6a. 资源管理算子（v0.7）
+
+### 6a.1 进程管理
+
+```
+spawn(name="handle", cmd="long-running-cmd")   // 后台启动，返回 pid
+procs(name="handle")                           // 列句柄: name pid age_s alive cmd
+kill(name="handle")                            // SIGKILL 整个进程组（防孤儿）；也接受 kill(name="1234") 裸 pid
+wait(name="handle", timeout=60)                // 阻塞等句柄退出；超时报错
+```
+
+- 句柄注册进全局进程表（进程内 OnceLock），pipeline 结束后进程表不持久化
+- `kill` 用 `kill -9 -PID`（负 pid = 进程组），确保 `bash -c "foo &"` 的孤儿子进程一并回收
+- liveness 检查走 `/proc/<pid>`，无平台依赖
+
+### 6a.2 文件系统
+
+```
+exists("path")          // → "true" / "false"
+stat("path")            // → "kind size_bytes mtime_unix"（kind = file|dir|other）
+ls("dir")               // → 每行一个条目名，排序后
+cp(from="src", to="dst") // 文件直拷；目录树 shell 出 cp -r
+mkdir("path")           // create_dir_all，父目录自动建
+rm("path")              // 递归删除；拒绝 / 和 $HOME 根（硬保护，不可关闭）
+```
+
+### 6a.3 磁盘与 run() 增强
+
+```
+disk("/tmp")            // → "avail_gb total_gb"（df -BG 解析）
+
+run("cmd", timeout=120)             // 超时杀进程组后报错；默认 300s；timeout=0 不限
+run("cmd", env="K1=V1" env="K2=V2") // 重复 env 注入；PATH/HOME/USER 防覆写
+```
+
+### 6a.4 安全边界
+
+- `rm` 的根保护是编译期常量行为，无开关
+- `kill` 只能杀本 pipeline spawn 的句柄，或显式给出的 pid
+- `env` 注入不碰身份变量（PATH/HOME/USER）
+- 全部路径走 `expand_tilde`，支持 `~/...`
+
+### 6a.5 示例
+
+`~/notes/obsidian/default/个人系统/流程pipeline/resource-demo.pipeline`（仓库外 dogfooding 副本）：disk-check → spawn/kill → mkdir/cp/stat/ls/rm → timeout 降级，四 proc 全通过。
+
+---
+
 ## 7. DSL_RESULT 协议
 
 ### 7.1 脚本输出格式
