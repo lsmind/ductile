@@ -360,7 +360,7 @@ fn run_impl_with_retry(
                         attempt + 1,
                         impl_.retry,
                         delay,
-                        &err[..err.len().min(80)]
+                        crate::trunc_chars(&err, 80)
                     );
                     std::thread::sleep(std::time::Duration::from_secs(delay));
                     attempt += 1;
@@ -386,7 +386,7 @@ fn run_impl_steps(
         "llm" => exec_llm(impl_, topic, body, results),
         "merge" => exec_merge(impl_, body, results),
         "write" => exec_write(impl_, topic, body, results),
-        "read" => exec_read(impl_, body),
+        "read" | "read_file" => exec_read(impl_, body),
         "run" | "sh" => exec_run(impl_, topic, body, results),
         // ── v0.7 resource management ops ──
         "spawn" => exec_spawn(impl_, topic, body, results),
@@ -1118,7 +1118,7 @@ fn exec_run(
 
     // Raw stdout (truncated)
     let trimmed = if stdout_text.len() > 5000 {
-        format!("{}...[truncated]", &stdout_text[..5000])
+        format!("{}...[truncated]", crate::trunc_chars(&stdout_text, 5000))
     } else {
         stdout_text
     };

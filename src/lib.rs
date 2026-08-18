@@ -21,6 +21,58 @@ pub use executor::exec_pipeline;
 pub use parser::{parse_pipeline, parse_pipeline_file, ParseError};
 pub use typecheck::{check_pipeline, TypeError};
 
+/// Char-boundary-safe truncation: never splits a multi-byte UTF-8 char.
+/// Byte-slicing (`&s[..n]`) panics when n lands inside a CJK/emoji char —
+/// this bit the daily-planning cron in production (executor retry log).
+pub fn trunc_chars(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+#[cfg(test)]
+mod trunc_tests {
+    use super::trunc_chars;
+
+    #[test]
+    fn ascii_unchanged() {
+        assert_eq!(trunc_chars("hello world", 5), "hello");
+        assert_eq!(trunc_chars("short", 200), "short");
+    }
+
+    #[test]
+    fn cjk_boundary_backoff() {
+        // 中 is 3 bytes; byte 4 splits the 2nd char -> must back off to 3
+        assert_eq!(trunc_chars("中文测试", 4), "中");
+        assert_eq!(trunc_chars("中文测试", 6), "中文");
+        assert_eq!(trunc_chars("中文测试", 7), "中文");
+    }
+
+    #[test]
+    fn mixed_content() {
+        // "a中b" = 1+3+1 bytes; limit 2 -> "a"; limit 4 -> "a中"
+        assert_eq!(trunc_chars("a中b", 2), "a");
+        assert_eq!(trunc_chars("a中b", 4), "a中");
+    }
+
+    #[test]
+    fn emoji_4byte() {
+        assert_eq!(trunc_chars("a🎉b", 2), "a");
+        assert_eq!(trunc_chars("a🎉b", 5), "a🎉");
+    }
+
+    #[test]
+    fn zero_and_empty() {
+        assert_eq!(trunc_chars("", 5), "");
+        assert_eq!(trunc_chars("abc", 0), "");
+    }
+}
+
 // ── pyo3 Python bindings ──
 
 use pyo3::exceptions::PyRuntimeError;
@@ -72,7 +124,7 @@ fn run(path: &str, topic: &str, params: Option<BTreeMap<String, String>>) -> PyR
                 let shown = match v {
                     Value::Text(t) => {
                         if t.len() > 200 {
-                            format!("{}...", &t[..200])
+                            format!("{}...", crate::trunc_chars(t, 200))
                         } else {
                             t.clone()
                         }

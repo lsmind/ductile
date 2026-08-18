@@ -129,7 +129,7 @@ mod tests {
                 name: (*name).into(),
                 plan: refs
                     .iter()
-                    .filter(|(from, to)| *to == *name)
+                    .filter(|(_from, to)| *to == *name)
                     .map(|(from, _)| Impl {
                         name: format!("{}_impl", from),
                         tags: std::collections::BTreeSet::new(),

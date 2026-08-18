@@ -161,7 +161,7 @@ fn cmd_run(path: &str, topic_str: &str) -> Result<i32, String> {
                 let shown = match v {
                     Value::Text(t) => {
                         if t.len() > 200 {
-                            format!("{}...", &t[..200])
+                            format!("{}...", crate::trunc_chars(t, 200))
                         } else {
                             t.clone()
                         }

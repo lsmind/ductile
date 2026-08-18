@@ -124,6 +124,7 @@ mod tests {
     use super::*;
     use crate::ast::Cost;
 
+    #[allow(dead_code)]
     fn mk_pipeline(name: &str) -> Pipeline {
         Pipeline {
             name: name.into(),

@@ -103,7 +103,7 @@ fn parse_header(line: &str, line_num: usize) -> Result<(String, String), ParseEr
             col: 1,
             msg: format!(
                 "unexpected {:?} — expecting \"Pipeline\"",
-                &line[..line.len().min(20)]
+                crate::trunc_chars(line, 20)
             ),
             line_text: line.into(),
         });
