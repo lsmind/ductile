@@ -120,7 +120,43 @@ pub fn doctor() -> DoctorReport {
         db::db_path().display().to_string(),
     ));
 
-    // 4. degraded flags outstanding
+    // 4. Hermes state.db health — harvest's perception layer (2026-08-20 lesson:
+    // corrupted state.db silently blinded harvest to 0 candidates). Probe what
+    // harvest actually reads (messages recency, same query shape), NOT full
+    // integrity_check — that validates FTS5 inverted indexes and requires write
+    // access, so a read-only probe always false-alarms on healthy DBs.
+    let sdb = state_db_path();
+    let (sdb_ok, sdb_msg) = if !sdb.exists() {
+        (false, format!("MISSING at {}", sdb.display()))
+    } else {
+        match Connection::open_with_flags(&sdb, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            Ok(c) => {
+                let recent = c
+                    .query_row(
+                        "SELECT COUNT(*) FROM messages WHERE timestamp >= strftime('%s','now') - 604800",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap_or(-1);
+                match recent {
+                    n if n > 0 => (true, format!("readable, {} msgs in last 7d", n)),
+                    0 => (
+                        false,
+                        "opens but 0 recent messages (last 7d) — perception layer blind? recovered/reset?"
+                            .into(),
+                    ),
+                    _ => (
+                        false,
+                        "messages table unreadable — corrupted? check *.corrupt.bak / recover".into(),
+                    ),
+                }
+            }
+            Err(e) => (false, format!("cannot open: {}", e)),
+        }
+    };
+    checks.push(("hermes state.db health".into(), sdb_ok, sdb_msg));
+
+    // 5. degraded flags outstanding
     let flags = list_degraded();
     checks.push((
         "degraded flags".into(),
