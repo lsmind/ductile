@@ -5,6 +5,7 @@
 //! 替代旧版 .gcf 文件系统。
 
 use crate::ast::*;
+use crate::harvest::civil_from_days;
 use rusqlite::{params, Connection};
 use std::collections::BTreeSet;
 use std::fs;
@@ -111,16 +112,20 @@ pub fn init_db() {
 fn now_ts() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+        + 8 * 3600; // CST (UTC+8), matches harvest::fmt_ts convention
+    let days = secs.div_euclid(86400);
+    let (y, m, d) = civil_from_days(days);
+    let rem = secs.rem_euclid(86400);
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
-        1970 + secs / 31536000,
-        (secs % 31536000) / 2592000 + 1,
-        (secs % 2592000) / 86400 + 1,
-        (secs % 86400) / 3600,
-        (secs % 3600) / 60,
-        secs % 60
+        y,
+        m,
+        d,
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
     )
 }
 
