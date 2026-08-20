@@ -543,11 +543,40 @@ fn extract_string_arg(key: &str, body: &str) -> String {
 }
 
 fn extract_first_string(body: &str) -> String {
-    if let Some(pos) = body.find('"') {
-        let after = &body[pos + 1..];
-        if let Some(end) = after.find('"') {
-            return after[..end].to_string();
+    // Escape-aware: a DSL string literal may contain \" — the first raw '"'
+    // after the opener must not be preceded by an odd number of backslashes.
+    let chars: Vec<char> = body.chars().collect();
+    let Some(open) = chars.iter().position(|&c| c == '"') else {
+        return body.to_string();
+    };
+    let mut i = open + 1;
+    while i < chars.len() {
+        if chars[i] == '"' {
+            let mut backslashes = 0;
+            let mut j = i;
+            while j > 0 && chars[j - 1] == '\\' {
+                backslashes += 1;
+                j -= 1;
+            }
+            if backslashes % 2 == 0 {
+                // real terminator — also unescape \" and \\
+                let raw: String = chars[open + 1..i].iter().collect();
+                let mut out = String::with_capacity(raw.len());
+                let mut esc = false;
+                for c in raw.chars() {
+                    if esc {
+                        out.push(c);
+                        esc = false;
+                    } else if c == '\\' {
+                        esc = true;
+                    } else {
+                        out.push(c);
+                    }
+                }
+                return out;
+            }
         }
+        i += 1;
     }
     body.to_string()
 }
