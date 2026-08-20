@@ -7,6 +7,7 @@ pub mod ast;
 pub mod db;
 pub mod egraph;
 pub mod executor;
+pub mod harvest;
 pub mod learn;
 pub mod parser;
 pub mod registry;

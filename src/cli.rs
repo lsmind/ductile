@@ -56,6 +56,30 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         "learn" if args.len() >= 3 => cmd_learn(&args[2]),
         "learn" => cmd_learn(""),
 
+        // v0.8.1 harvest line
+        "doctor" => cmd_doctor(),
+        "wrap" if args.len() >= 5 => {
+            // ductile wrap <tag> -- <cmd...>
+            cmd_wrap(&args[2], &args[4..].join(" "))
+        }
+        "harvest" => {
+            let days: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(7);
+            cmd_harvest(days)
+        }
+        "degraded" if args.len() >= 3 && args[2] == "clear" && args.len() >= 4 => {
+            Ok(if harvest::clear_degraded(&args[3]) {
+                0
+            } else {
+                1
+            })
+        }
+        "degraded" => {
+            for f in harvest::list_degraded() {
+                eprintln!("DEGRADED: {}", f);
+            }
+            Ok(0)
+        }
+
         // Version
         "version" if args.len() >= 5 && args[2] == "save" => cmd_version_save(&args[3], &args[4]),
         "version" if args.len() >= 4 && args[2] == "log" => cmd_version_log(&args[3]),
@@ -155,6 +179,22 @@ fn cmd_run(path: &str, topic_str: &str) -> Result<i32, String> {
     match exec_pipeline(&topic, &params, &pl) {
         ExecResult::Success(results) => {
             println!();
+            // v0.8.1: learning visibility — what the prefs chose this run
+            for proc in &pl.procs {
+                if proc.plan.len() >= 2 {
+                    let prefs = executor::ImplPrefs::load(std::path::Path::new(""));
+                    let mut ws: Vec<(f64, &str)> = proc
+                        .plan
+                        .iter()
+                        .map(|i| (prefs.get(&proc.name, &i.name), i.name.as_str()))
+                        .collect();
+                    ws.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                    println!(
+                        "  [learned] {}: {} (w={:.2}) leads over {} (w={:.2})",
+                        proc.name, ws[0].1, ws[0].0, ws[1].1, ws[1].0
+                    );
+                }
+            }
             println!("Pipeline executed successfully");
             println!("  Procs completed: {}", results.len());
             for (k, v) in &results {
@@ -175,6 +215,11 @@ fn cmd_run(path: &str, topic_str: &str) -> Result<i32, String> {
         }
         ExecResult::Failed(err) => {
             eprintln!("Pipeline failed: {}", err);
+            harvest::set_degraded(&pl.name, &err);
+            eprintln!(
+                "[degraded] flag set — fix then: ductile degraded clear {}",
+                pl.name
+            );
             Ok(1)
         }
     }
@@ -611,4 +656,45 @@ fn parse_topic_params(input: &str) -> (String, BTreeMap<String, String>) {
         }
     }
     (topic, params)
+}
+
+// ── v0.8.1: doctor / wrap / harvest ──
+
+fn cmd_doctor() -> Result<i32, String> {
+    let report = harvest::doctor();
+    println!("Ductile doctor");
+    println!("==============");
+    for (name, ok, detail) in &report.checks {
+        let mark = if *ok { "OK " } else { "FIX" };
+        println!("  [{}] {} — {}", mark, name, detail);
+    }
+    Ok(if report.all_ok() { 0 } else { 1 })
+}
+
+fn cmd_wrap(tag: &str, cmd: &str) -> Result<i32, String> {
+    let (code, note) = harvest::wrap_and_run(cmd, tag)?;
+    eprintln!("[wrap] exit={} | {}", code, note);
+    Ok(code)
+}
+
+fn cmd_harvest(days: u32) -> Result<i32, String> {
+    match harvest::harvest(days) {
+        Err(e) => {
+            eprintln!("harvest failed: {}", e);
+            Ok(1)
+        }
+        Ok(hits) => {
+            println!("Harvested from last {}d (candidates: {})", days, hits.len());
+            println!("=================================================");
+            for h in hits.iter().take(30) {
+                println!("  [x{}] {}  (last: {})", h.count, h.cmd, h.last_seen);
+            }
+            if hits.is_empty() {
+                println!("  (no repeated commands found)");
+            } else {
+                println!("\nNext: ductile wrap <tag> -- <cmd>  to promote into the library");
+            }
+            Ok(0)
+        }
+    }
 }
