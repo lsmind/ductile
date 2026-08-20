@@ -48,6 +48,14 @@ pub fn init_db() {
         );
         CREATE INDEX IF NOT EXISTS idx_procs_tags ON procs(tags);
         CREATE INDEX IF NOT EXISTS idx_procs_name ON procs(name);
+        CREATE TABLE IF NOT EXISTS impl_prefs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            proc_name   TEXT NOT NULL,
+            impl_name   TEXT NOT NULL,
+            weight      REAL NOT NULL DEFAULT 1.0,
+            updated_at  TEXT DEFAULT '',
+            UNIQUE(proc_name, impl_name)
+        );
         CREATE TABLE IF NOT EXISTS runs (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             proc_name   TEXT NOT NULL,
@@ -345,6 +353,57 @@ pub fn recent_runs(proc_name: &str) -> Vec<RunRow> {
     .unwrap()
     .filter_map(|r| r.ok())
     .collect()
+}
+
+// ── Impl preferences (v0.8 LGuess-style multiplicative weights) ──
+
+/// Load all learned impl weights: (proc_name, impl_name) -> weight.
+pub fn load_impl_prefs() -> Vec<(String, String, f64)> {
+    init_db();
+    let conn = open();
+    let mut stmt = conn
+        .prepare("SELECT proc_name, impl_name, weight FROM impl_prefs")
+        .unwrap();
+    stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, f64>(2)?,
+        ))
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
+}
+
+/// Upsert one learned impl weight.
+pub fn upsert_impl_pref(proc_name: &str, impl_name: &str, weight: f64) {
+    init_db();
+    let conn = open();
+    conn.execute(
+        "INSERT INTO impl_prefs (proc_name, impl_name, weight, updated_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(proc_name, impl_name)
+         DO UPDATE SET weight = ?3, updated_at = ?4",
+        params![proc_name, impl_name, weight, now_ts()],
+    )
+    .ok();
+}
+
+/// v0.8 preference bump — 单语句原子乘性更新（免读改写）。
+/// success: ×1.1；fail: ÷1.5；clamp [0.05, 20]；初值 1.0。
+pub fn record_pref(proc_name: &str, impl_name: &str, success: bool) {
+    init_db();
+    let conn = open();
+    let factor = if success { 1.1f64 } else { 1.0 / 1.5 };
+    conn.execute(
+        "INSERT INTO impl_prefs (proc_name, impl_name, weight, updated_at)
+         VALUES (?1, ?2, MAX(0.05, MIN(20.0, 1.0 * ?3)), ?4)
+         ON CONFLICT(proc_name, impl_name)
+         DO UPDATE SET weight = MAX(0.05, MIN(20.0, weight * ?3)), updated_at = ?4",
+        params![proc_name, impl_name, factor, now_ts()],
+    )
+    .ok();
 }
 
 // ── Composition ──
