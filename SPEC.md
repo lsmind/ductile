@@ -265,7 +265,20 @@ ductile patch list
 ductile patch clear research
 ```
 
-### 2.12 version
+### 2.12 promote / grow / scaffold（v0.9.x 自组织线）
+
+```
+ductile promote [days] [top] [--dry]   # 跨会话 MDL 晋升门
+ductile grow [days] [top_import]       # 命令全文构式生长
+ductile scaffold [query]               # 查询构式库
+```
+
+- **promote**：从 state.db 收割命令 → 两部码检验（晋升成本 8B/char+32b 选择码 vs 次数×节省）→ 自动入 `_harvested` pipeline。**计数单位是跨会话数 sessions（≥2 才是复用证据）**——会话内重复是 agent 调试迭代（探索），不是知识。账本表 `promotions`（UNIQUE(tag,cmd)，可审计可回滚）。`--dry` 只评不写。
+- **grow**：行级 token 在 60d 命令全文语料上贪心 pair-merge（增益门>0，同 promote 账法），长出的多行构式入 `scaffolds`（source='grown'）。物理：脚手架住在行间，首行归一化会毁掉它。
+- **scaffold**：按关键词查 scaffolds（LIKE，按 save_b 降序）。
+- 表：`scaffolds(text, save_b, use_count, lines, source, imported_at)`；`use_count` 语义 = **迭代频率**（对召回排序有信息量），不是知识证据；知识证据 = promotions.count（跨会话数）。
+
+### 2.13 version
 
 ```bash
 ductile version save <file.pipeline> "change description"
@@ -400,6 +413,34 @@ CREATE TABLE patches (
     value TEXT NOT NULL,
     created_at TEXT DEFAULT '',
     UNIQUE(pipeline, proc_name, impl_name, field)
+);
+
+-- v0.8.1+ 自组织线 (harvest/wrap) 与 v0.9.x (promote/grow/scaffold)
+CREATE TABLE wrapped_cmds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tag TEXT NOT NULL, cmd TEXT NOT NULL,
+    exit_code INTEGER, recorded_at TEXT DEFAULT '',
+    UNIQUE(tag, cmd)
+);
+
+CREATE TABLE promotions (          -- 跨会话 MDL 晋升账本 (v0.9.0+)
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tag TEXT NOT NULL, cmd TEXT NOT NULL,
+    count INTEGER,                 -- 跨会话数 (sessions): ≥2 = 复用证据
+    gain_bits REAL,                -- 两部码净收益
+    promoted_at TEXT DEFAULT '',
+    UNIQUE(tag, cmd)
+);
+
+CREATE TABLE scaffolds (           -- 构式库 (V26 生长, v0.9.2+)
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    text TEXT NOT NULL,
+    save_b INTEGER,                -- 总节省 bits
+    use_count INTEGER,             -- 迭代频率 (非知识证据, 见 §2.12)
+    lines INTEGER,
+    source TEXT DEFAULT 'grown',   -- 'grown' = ductile grow; 'v26' = 首次导入
+    imported_at TEXT DEFAULT '',
+    UNIQUE(text)
 );
 ```
 
