@@ -52,7 +52,7 @@ impl Interner {
 pub fn grow(days: u32, top_import: usize) -> Result<GrowthReport, String> {
     // ── 1. 全文命令计数 (不做首行归一化) ──
     let cmds = harvest::harvest_full_counts(days)?;
-    let calls: usize = cmds.values().map(|c| *c as usize).sum();
+    let calls: usize = cmds.values().map(|c| c.calls as usize).sum();
     let distinct = cmds.len();
     if calls < 200 {
         return Err(format!("corpus too small: {calls} calls in {days}d"));
@@ -69,9 +69,9 @@ pub fn grow(days: u32, top_import: usize) -> Result<GrowthReport, String> {
             continue;
         }
         for l in &lines {
-            bits_raw += 8.0 * l.len() as f64 * *c as f64;
+            bits_raw += 8.0 * l.len() as f64 * c.calls as f64;
         }
-        for _ in 0..*c {
+        for _ in 0..c.calls {
             let mut s: Vec<u32> = lines.iter().map(|l| ir.intern(l)).collect();
             s.push(sentinel);
             seqs.push(s);

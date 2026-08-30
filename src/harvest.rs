@@ -332,9 +332,16 @@ pub fn harvest(days: u32) -> Result<Vec<HarvestHit>, String> {
     Ok(hits)
 }
 
+/// 命令计数 (calls + sessions) — promote/grow 的取数层.
+/// V28 物理: 99% 调用是会话内迭代, 跨会话计数才是复用证据.
+pub struct CmdCount {
+    pub calls: u32,
+    pub sessions: u32,
+}
+
 /// 全文命令计数 (无首行归一化) — grow.rs 的取数层.
-/// 返回 (command_full_text -> count); 多行 heredoc 保持完整.
-pub fn harvest_full_counts(days: u32) -> Result<std::collections::HashMap<String, u32>, String> {
+/// 返回 (command_full_text -> CmdCount); 多行 heredoc 保持完整.
+pub fn harvest_full_counts(days: u32) -> Result<std::collections::HashMap<String, CmdCount>, String> {
     let path = state_db_path();
     if !path.exists() {
         return Err(format!("state.db not found at {}", path.display()));
@@ -346,30 +353,42 @@ pub fn harvest_full_counts(days: u32) -> Result<std::collections::HashMap<String
         .map(|d| d.as_secs_f64() - cutoff_secs as f64)
         .unwrap_or(0.0);
     let sql = if has_column(&conn, "timestamp") {
-        "SELECT tool_calls, timestamp FROM messages
+        "SELECT tool_calls, timestamp, session_id FROM messages
          WHERE tool_calls LIKE '%command%' AND tool_calls LIKE '%terminal%'
            AND timestamp >= ?1
          ORDER BY timestamp DESC LIMIT 20000"
     } else {
-        "SELECT tool_calls, 0 FROM messages
+        "SELECT tool_calls, 0, session_id FROM messages
          WHERE tool_calls LIKE '%command%' AND tool_calls LIKE '%terminal%'
          ORDER BY id DESC LIMIT 20000"
     };
     let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
-    let rows: Vec<(String, f64)> = stmt
+    let rows: Vec<(String, f64, String)> = stmt
         .query_map(params![since_ts], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1).unwrap_or(0.0)))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, f64>(1).unwrap_or(0.0),
+                r.get::<_, String>(2).unwrap_or_default(),
+            ))
         })
         .map_err(|e| e.to_string())?
         .flatten()
         .collect();
-    let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    for (tc, _) in &rows {
+    let mut counts: std::collections::HashMap<String, CmdCount> = std::collections::HashMap::new();
+    let mut seen_sess: std::collections::HashMap<(String, String), ()> = std::collections::HashMap::new();
+    for (tc, _, sid) in &rows {
         for cmd in extract_commands_exact(tc) {
             let c = cmd.trim();
             if c.len() >= 6 {
-                *counts.entry(c.to_string()).or_insert(0) += 1;
+                let e = counts.entry(c.to_string()).or_insert(CmdCount { calls: 0, sessions: 0 });
+                e.calls += 1;
+                seen_sess.entry((c.to_string(), sid.clone())).or_insert(());
             }
+        }
+    }
+    for (c, sid) in seen_sess.keys() {
+        if let Some(e) = counts.get_mut(c) {
+            e.sessions += 1;
         }
     }
     Ok(counts)

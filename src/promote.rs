@@ -8,7 +8,7 @@
 //! 账本: promotions 表 (可审计可回滚).
 
 use crate::db;
-use crate::harvest;
+use crate::harvest::{self, HarvestHit};
 use rusqlite::{params, Connection};
 
 /// 查询已铸成的构式模板 (来自 V26 生长).
@@ -93,7 +93,18 @@ fn vocab_size(conn: &Connection) -> usize {
 }
 
 pub fn promote(days: u32, top: usize, dry_run: bool) -> Result<(usize, usize), String> {
-    let hits = harvest::harvest(days)?;
+    // v0.9.3: 跨会话判据 — 会话内重复=迭代(探索), 跨会话重复=复用(知识)
+    let full = harvest::harvest_full_counts(days)?;
+    let mut hits: Vec<HarvestHit> = full
+        .into_iter()
+        .filter(|(_, cc)| cc.sessions >= 2)
+        .map(|(cmd, cc)| HarvestHit {
+            count: cc.sessions as usize,
+            cmd,
+            last_seen: String::new(),
+        })
+        .collect();
+    hits.sort_by(|a, b| b.count.cmp(&a.count));
     let mut conn = db_open()?;
 
     conn.execute(
