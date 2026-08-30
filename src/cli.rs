@@ -66,6 +66,18 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             let days: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(7);
             cmd_harvest(days)
         }
+        "promote" => {
+            // promote [days] [top] [--dry]
+            let mut days: u32 = 7;
+            let mut top: usize = 40;
+            let mut dry = false;
+            for a in args.iter().skip(2) {
+                if a == "--dry" { dry = true; }
+                else if let Ok(d) = a.parse::<u32>() { days = d; }
+                else if let Ok(t) = a.parse::<usize>() { top = t; }
+            }
+            cmd_promote(days, top, dry)
+        }
         "degraded" if args.len() >= 3 && args[2] == "clear" && args.len() >= 4 => {
             Ok(if harvest::clear_degraded(&args[3]) {
                 0
@@ -675,6 +687,23 @@ fn cmd_wrap(tag: &str, cmd: &str) -> Result<i32, String> {
     let (code, note) = harvest::wrap_and_run(cmd, tag)?;
     eprintln!("[wrap] exit={} | {}", code, note);
     Ok(code)
+}
+
+fn cmd_promote(days: u32, top: usize, dry: bool) -> Result<i32, String> {
+    println!("MDL promotion gate{} (last {}d, top {})", if dry { " [DRY RUN]" } else { "" }, days, top);
+    println!("=================================================");
+    match promote::promote(days, top, dry) {
+        Err(e) => { eprintln!("promote failed: {}", e); Ok(1) }
+        Ok((promoted, evaluated)) => {
+            println!("-------------------------------------------------");
+            if dry {
+                println!("[DRY] evaluated {} candidates (no writes)", evaluated);
+            } else {
+                println!("promoted {} / evaluated {} candidates", promoted, evaluated);
+            }
+            Ok(0)
+        }
+    }
 }
 
 fn cmd_harvest(days: u32) -> Result<i32, String> {

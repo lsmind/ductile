@@ -10,6 +10,7 @@ pub mod executor;
 pub mod harvest;
 pub mod learn;
 pub mod parser;
+pub mod promote;
 pub mod registry;
 pub mod typecheck;
 pub mod version;

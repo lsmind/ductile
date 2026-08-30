@@ -228,7 +228,7 @@ pub fn wrap_and_run(cmd: &str, tag: &str) -> Result<(i32, String), String> {
     )
     .map_err(|e| e.to_string())?;
 
-    Ok((code, format!("recorded #{} → {}", tag, trunc(cmd, 60))))
+    Ok((code, format!("recorded #{} → {}", tag, trunc_str(cmd, 60))))
 }
 
 fn db_open() -> Result<Connection, String> {
@@ -254,7 +254,7 @@ fn now_ts() -> String {
         .unwrap_or_default()
 }
 
-fn trunc(s: &str, n: usize) -> String {
+pub fn trunc_str(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
     } else {
