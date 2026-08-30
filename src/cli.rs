@@ -547,6 +547,10 @@ fn cmd_learn(arg: &str) -> Result<i32, String> {
     println!("  Original:   {} tokens", result.total_tokens);
     println!("  Compressed: {} tokens", result.compressed_size);
     println!("  Ratio:      {:.1}%", result.compression_ratio * 100.0);
+    // v0.9.3: learn 的知识源已升级为命令语料 (V26/V28 物理) — 指路 grow
+    println!("\n[note] learn 只扫 .pipeline 文件的 tag 序列; 真正的构式生长在命令全文语料上:");
+    println!("       ductile grow 60 25    # MDL 构式生长 (脚手架住在行间, 见 SPEC §2.12)");
+    println!("       ductile promote 60 30 # 跨会话晋升门 (sessions>=2 = 复用证据)");
     Ok(0)
 }
 
