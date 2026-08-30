@@ -332,6 +332,232 @@ pub fn harvest(days: u32) -> Result<Vec<HarvestHit>, String> {
     Ok(hits)
 }
 
+/// 全文命令计数 (无首行归一化) — grow.rs 的取数层.
+/// 返回 (command_full_text -> count); 多行 heredoc 保持完整.
+pub fn harvest_full_counts(days: u32) -> Result<std::collections::HashMap<String, u32>, String> {
+    let path = state_db_path();
+    if !path.exists() {
+        return Err(format!("state.db not found at {}", path.display()));
+    }
+    let conn = Connection::open(&path).map_err(|e| e.to_string())?;
+    let cutoff_secs: i64 = (days as i64) * 86400;
+    let since_ts: f64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64() - cutoff_secs as f64)
+        .unwrap_or(0.0);
+    let sql = if has_column(&conn, "timestamp") {
+        "SELECT tool_calls, timestamp FROM messages
+         WHERE tool_calls LIKE '%command%' AND tool_calls LIKE '%terminal%'
+           AND timestamp >= ?1
+         ORDER BY timestamp DESC LIMIT 20000"
+    } else {
+        "SELECT tool_calls, 0 FROM messages
+         WHERE tool_calls LIKE '%command%' AND tool_calls LIKE '%terminal%'
+         ORDER BY id DESC LIMIT 20000"
+    };
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let rows: Vec<(String, f64)> = stmt
+        .query_map(params![since_ts], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1).unwrap_or(0.0)))
+        })
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .collect();
+    let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for (tc, _) in &rows {
+        for cmd in extract_commands_exact(tc) {
+            let c = cmd.trim();
+            if c.len() >= 6 {
+                *counts.entry(c.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+    Ok(counts)
+}
+
+// ── Minimal exact JSON extraction (v0.9.2): tool_calls 是合法 JSON ──
+
+enum Jv {
+    S(String),
+    A(Vec<Jv>),
+    O(Vec<(String, Jv)>),
+    Other,
+}
+
+fn jskip_ws(s: &str, i: &mut usize) {
+    while *i < s.len() && s.as_bytes()[*i].is_ascii_whitespace() {
+        *i += 1;
+    }
+}
+
+fn jparse(s: &str, i: &mut usize) -> Option<Jv> {
+    jskip_ws(s, i);
+    let b = s.as_bytes();
+    if *i >= s.len() {
+        return None;
+    }
+    match b[*i] {
+        b'"' => jparse_str(s, i).map(Jv::S),
+        b'[' => {
+            *i += 1;
+            let mut out = Vec::new();
+            loop {
+                jskip_ws(s, i);
+                if *i < s.len() && b[*i] == b']' {
+                    *i += 1;
+                    break;
+                }
+                out.push(jparse(s, i)?);
+                jskip_ws(s, i);
+                if *i < s.len() && b[*i] == b',' {
+                    *i += 1;
+                }
+            }
+            Some(Jv::A(out))
+        }
+        b'{' => {
+            *i += 1;
+            let mut out = Vec::new();
+            loop {
+                jskip_ws(s, i);
+                if *i < s.len() && b[*i] == b'}' {
+                    *i += 1;
+                    break;
+                }
+                let key = jparse_str(s, i)?;
+                jskip_ws(s, i);
+                if *i >= s.len() || b[*i] != b':' {
+                    return None;
+                }
+                *i += 1;
+                let val = jparse(s, i)?;
+                out.push((key, val));
+                jskip_ws(s, i);
+                if *i < s.len() && b[*i] == b',' {
+                    *i += 1;
+                }
+            }
+            Some(Jv::O(out))
+        }
+        _ => {
+            // number / true / false / null — 跳过
+            let start = *i;
+            while *i < s.len() && !matches!(b[*i], b',' | b']' | b'}') {
+                *i += 1;
+            }
+            if *i > start {
+                Some(Jv::Other)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn jparse_str(s: &str, i: &mut usize) -> Option<String> {
+    let b = s.as_bytes();
+    if *i >= s.len() || b[*i] != b'"' {
+        return None;
+    }
+    *i += 1;
+    let mut out = String::new();
+    loop {
+        if *i >= s.len() {
+            return None;
+        }
+        match b[*i] {
+            b'"' => {
+                *i += 1;
+                return Some(out);
+            }
+            b'\\' => {
+                *i += 1;
+                if *i >= s.len() {
+                    return None;
+                }
+                match b[*i] {
+                    b'n' => out.push('\n'),
+                    b't' => out.push('\t'),
+                    b'r' => out.push('\r'),
+                    b'"' => out.push('"'),
+                    b'\\' => out.push('\\'),
+                    b'/' => out.push('/'),
+                    b'b' => out.push('\u{8}'),
+                    b'f' => out.push('\u{c}'),
+                    b'u' => {
+                        if *i + 4 >= s.len() {
+                            return None;
+                        }
+                        let hex = &s[*i + 1..*i + 5];
+                        let cp = u32::from_str_radix(hex, 16).ok()?;
+                        *i += 4;
+                        if (0xD800..0xDC00).contains(&cp) && *i + 6 < s.len() && b[*i + 1] == b'\\' && b[*i + 2] == b'u' {
+                            let hex2 = &s[*i + 3..*i + 7];
+                            if let Ok(lo) = u32::from_str_radix(hex2, 16) {
+                                if (0xDC00..0xE000).contains(&lo) {
+                                    let c = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                                    if let Some(ch) = char::from_u32(c) {
+                                        out.push(ch);
+                                        *i += 6;
+                                        *i += 1; // advance past escape start handled below
+                                    }
+                                }
+                            }
+                        } else if let Some(ch) = char::from_u32(cp) {
+                            out.push(ch);
+                        }
+                    }
+                    other => out.push(other as char),
+                }
+                *i += 1;
+            }
+            _ => {
+                // 多字节 UTF-8: 按字符推进
+                let ch = s[*i..].chars().next()?;
+                out.push(ch);
+                *i += ch.len_utf8();
+            }
+        }
+    }
+}
+
+/// 精确提取: tool_calls JSON → function.arguments(JSON字符串) → command.
+/// 失败时回退旧启发式.
+fn extract_commands_exact(tool_calls: &str) -> Vec<String> {
+    let mut i = 0usize;
+    let Some(Jv::A(calls)) = jparse(tool_calls, &mut i) else {
+        return extract_commands(tool_calls);
+    };
+    let mut out = Vec::new();
+    for call in &calls {
+        let Jv::O(fields) = call else { continue };
+        for (k, val) in fields {
+            if k == "function" {
+                let Jv::O(fns) = val else { continue };
+                for (k2, v2) in fns {
+                    if k2 == "arguments" {
+                        let Jv::S(args_str) = v2 else { continue };
+                        let mut j = 0usize;
+                        if let Some(Jv::O(aps)) = jparse(args_str, &mut j) {
+                            for (k3, v3) in aps {
+                                if k3 == "command" {
+                                    if let Jv::S(c) = v3 {
+                                        out.push(c);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        return extract_commands(tool_calls);
+    }
+    out
+}
+
 fn has_column(conn: &Connection, col: &str) -> bool {
     conn.prepare(&format!("PRAGMA table_info(messages)"))
         .and_then(|mut s| {

@@ -66,6 +66,12 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             let days: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(7);
             cmd_harvest(days)
         }
+        "grow" => {
+            // grow [days] [top_import]
+            let days: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(60);
+            let top: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(25);
+            cmd_grow(days, top)
+        }
         "scaffold" => {
             // scaffold [query...] — 列出/搜索已铸成的构式模板
             let q = args[2..].join(" ");
@@ -692,6 +698,20 @@ fn cmd_wrap(tag: &str, cmd: &str) -> Result<i32, String> {
     let (code, note) = harvest::wrap_and_run(cmd, tag)?;
     eprintln!("[wrap] exit={} | {}", code, note);
     Ok(code)
+}
+
+fn cmd_grow(days: u32, top: usize) -> Result<i32, String> {
+    println!("MDL construction growth (last {}d, import top {}) [learn v2]", days, top);
+    match grow::grow(days, top) {
+        Err(e) => { eprintln!("grow failed: {}", e); Ok(1) }
+        Ok(rep) => {
+            println!("  corpus: {} calls / {} distinct commands", rep.calls, rep.distinct);
+            println!("  rounds: {}   two-part: {:.0} b vs raw {:.0} b  (ratio {:.4})",
+                rep.rounds, rep.bits_tp, rep.bits_raw, rep.bits_tp / rep.bits_raw);
+            println!("  scaffolds imported: {}", rep.imported);
+            Ok(0)
+        }
+    }
 }
 
 fn cmd_scaffold(q: &str) -> Result<i32, String> {
