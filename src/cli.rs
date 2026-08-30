@@ -66,6 +66,11 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             let days: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(7);
             cmd_harvest(days)
         }
+        "scaffold" => {
+            // scaffold [query...] — 列出/搜索已铸成的构式模板
+            let q = args[2..].join(" ");
+            cmd_scaffold(&q)
+        }
         "promote" => {
             // promote [days] [top] [--dry]
             let mut days: u32 = 7;
@@ -689,7 +694,27 @@ fn cmd_wrap(tag: &str, cmd: &str) -> Result<i32, String> {
     Ok(code)
 }
 
-fn cmd_promote(days: u32, top: usize, dry: bool) -> Result<i32, String> {
+fn cmd_scaffold(q: &str) -> Result<i32, String> {
+    use crate::promote;
+    match promote::list_scaffolds(q) {
+        Err(e) => { eprintln!("scaffold failed: {}", e); Ok(1) }
+        Ok(rows) => {
+            println!("Scaffolds ({} matches):", rows.len());
+            for (text, save_b, uses, lines) in rows.iter().take(20) {
+                println!(
+                    "  [{:>7}b x{:<4} L{}] {}",
+                    save_b,
+                    uses,
+                    lines,
+                    text.split('\n').next().unwrap_or("").chars().take(70).collect::<String>()
+                );
+            }
+            Ok(0)
+        }
+    }
+}
+
+fn cmd_promote(days: u32, top: usize, dry: bool, ) -> Result<i32, String> {
     println!("MDL promotion gate{} (last {}d, top {})", if dry { " [DRY RUN]" } else { "" }, days, top);
     println!("=================================================");
     match promote::promote(days, top, dry) {

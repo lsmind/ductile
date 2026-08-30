@@ -11,6 +11,31 @@ use crate::db;
 use crate::harvest;
 use rusqlite::{params, Connection};
 
+/// 查询已铸成的构式模板 (来自 V26 生长).
+pub fn list_scaffolds(q: &str) -> Result<Vec<(String, i64, i64, i64)>, String> {
+    let conn = db_open()?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS scaffolds (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            text TEXT NOT NULL, save_b INTEGER, use_count INTEGER, lines INTEGER,
+            source TEXT DEFAULT 'v26', imported_at TEXT,
+            UNIQUE(text))",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    let pat = format!("%{}%", q);
+    let mut stmt = conn
+        .prepare("SELECT text, save_b, use_count, lines FROM scaffolds WHERE text LIKE ?1 ORDER BY save_b DESC LIMIT 20")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![pat], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .collect();
+    Ok(rows)
+}
+
+
 pub struct PromotionVerdict {
     pub cmd: String,
     pub count: usize,
