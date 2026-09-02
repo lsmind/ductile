@@ -164,7 +164,7 @@ ductile graph <file.pipeline>
 ```
 
 - 动作：展示 E-graph 结构
-- 输出：节点数、边数、并行组、关键路径
+- 输出：节点数、边数、**e-class 数、融合规则命中、CSE 别名**、并行组、关键路径、静态提取计划
 
 ### 2.5 import
 
@@ -292,10 +292,31 @@ ductile version diff <file.pipeline> <v1> <v2>
 
 ## 3. 执行引擎行为
 
-### 3.1 执行顺序
+### 3.0 e-graph 执行模式（v0.10）
+
+启用方式（二选一）：
+
+```
+.proc("x").pick(egraph)    # 单 pipeline 内任一 proc 声明即全局生效
+环境变量 DUCTILE_EGRAPH=1  # 全局开关
+```
+
+管线内部：
+
+1. 每个 proc 一个初始 e-class；每个 impl 投影为 e-node `(op, children)`，op = body 检测到的函数名，children = `@ref` 的 canonical class id
+2. **equality saturation**（union-only，canonical class 数单调下降 → 必然终止，上限 64 轮）：
+   - **R1 同构合并**：两 class 的 canonical 节点集一致 → union
+   - **R2 merge 扁平化**：merge 节点的传递扁平子集相等 → union（涵盖交换律 `merge(@a,@b)≡merge(@b,@a)`、嵌套折叠 `merge(merge(a,b),c)≡merge(a,b,c)`、退化 `merge(@x)≡x`）
+   - **R3 write/read 对消**：`read(from=P)` ≡ `write(to=P, content=@src)` 的 `src`（即 write→read 融合为 pass-through，路径精确匹配，`{topic}` 等占位符原样比较）
+3. **提取器**：class 级 Kahn 拓扑（确定性）→ 逐 class 选最小静态 `cost_total` 的 enabled impl；对消 class 中 read 节点降级为缓存路径（class 内存在非 read 节点时不参与首选竞争）
+4. **CSE**：同 class 只执行代表 proc，其余成员共享结果（执行日志 `[egraph]` 行可见 classes/融合命中/别名表）
+
+两层分工：e-graph 决定"谁跑"（class 代表/序/别名），exec_proc 内部仍按历史惩罚/偏好排序决定"怎么跑"（impl 序 + retry）。默认关闭——不声明时行为与 v0.9 完全一致。
+
+### 3.1 执行顺序（legacy 默认）
 
 1. `apply_patches(pl)` — 从 SQLite 加载补丁，克隆并覆盖
-2. `build_egraph(pl)` — 构建 DAG
+2. `build_egraph(pl)` — 构建 e-graph（v0.10 起为真 e-class 结构，调度视图兼容旧接口）
 3. `parallel_groups(eg)` — 拓扑分层
 4. 逐层执行（层内串行）
 

@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-98%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/Tests-129%20passed-brightgreen.svg)](#测试)
 [![PyPI](https://img.shields.io/badge/PyPI-0.5.0-blue.svg)](https://pypi.org/project/ductile/)
 
 ---
@@ -21,6 +21,8 @@
 |------|---------|---------------------|--------------------|-----------|
 | 声明式流程定义 | ✅ 纯文本 | ⚠️ 代码+图 | ✅ DAG | ❌ |
 | 多路径自动降级 | ✅ 内核 | ❌ 手写 | ❌ 手写 | ⚠️ 静态 |
+| e-graph 等价类 + equality saturation | ✅ v0.10 | ❌ | ❌ | ❌ |
+| CSE（等价 proc 只跑一次） | ✅ v0.10 | ❌ | ❌ | ❌ |
 | 运行时自适应惩罚 | ✅ 独家 | ❌ | ❌ | ❌ |
 | 同构发现 + 打散重组 | ✅ | ❌ | ❌ | ❌ |
 | 热补丁（不改源文件） | ✅ | ❌ | ❌ | ❌ |
@@ -72,6 +74,14 @@ ductile run research.pipeline "RISC-V 架构"
 web 路径失败 → 自动滑到 mcp → check 不过 → 触发降级。连续失败 3 次 → 永久跳过。**你只管声明，引擎自己学。**
 
 ## 核心能力
+
+### e-graph 等价类 + equality saturation（v0.10 新增）
+
+`.pick(egraph)` 一行开启。等价 proc 自动并入同一 e-class（同构合并、merge 交换/结合律、write→read 对消），执行时每 class 只跑一个代表，其余 CSE 共享结果。5 procs 的管线压成 3 classes、少跑 2 次重复计算——多路径选择的数学本体从"贪心排序"升级为"等价类提取"。
+
+```bash
+ductile graph your.pipeline   # 看 e-class 明细 / 融合规则命中 / CSE 别名 / 静态提取计划
+```
 
 ### 声明意图，不写控制流
 
