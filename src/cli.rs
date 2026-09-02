@@ -83,9 +83,13 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             let mut top: usize = 40;
             let mut dry = false;
             for a in args.iter().skip(2) {
-                if a == "--dry" { dry = true; }
-                else if let Ok(d) = a.parse::<u32>() { days = d; }
-                else if let Ok(t) = a.parse::<usize>() { top = t; }
+                if a == "--dry" {
+                    dry = true;
+                } else if let Ok(d) = a.parse::<u32>() {
+                    days = d;
+                } else if let Ok(t) = a.parse::<usize>() {
+                    top = t;
+                }
             }
             cmd_promote(days, top, dry)
         }
@@ -258,19 +262,51 @@ fn cmd_graph(path: &str) -> Result<i32, String> {
         }
         Ok(pl) => pl,
     };
-    let eg = build_egraph(&pl);
+    let mut eg = build_egraph(&pl);
     let groups = parallel_groups(&eg);
     let cp = critical_path(&eg);
+    let plan = extract_plan(&pl, &eg);
     println!(
-        "E-Graph:\n  Nodes: {}\n  Edges: {}\n",
+        "E-Graph:\n  Nodes: {}\n  Edges: {}\n  E-classes: {}\n",
         pl.procs.len(),
-        eg.edges.len()
+        eg.edges.len(),
+        eg.class_count()
     );
-    println!("Parallel groups:");
+    if !eg.fusion_hits.is_empty() {
+        let f: Vec<String> = eg
+            .fusion_hits
+            .iter()
+            .map(|(k, v)| format!("{}×{}", k, v))
+            .collect();
+        println!("  Fusion rules fired: {}", f.join(", "));
+    }
+    // e-class 明细（仅多成员 class 展示）
+    for id in 0..eg.classes.len() {
+        if eg.uf.find_imm(id) != id || eg.classes[id].procs.len() < 2 {
+            continue;
+        }
+        println!("  [class] {{{}}}", eg.classes[id].procs.join(", "));
+    }
+    if !plan.aliases.is_empty() {
+        let a: Vec<String> = plan
+            .aliases
+            .iter()
+            .map(|(x, r)| format!("{}→{}", x, r))
+            .collect();
+        println!("  CSE aliases: {}", a.join(", "));
+    }
+    println!("\nParallel groups:");
     for g in &groups {
         println!("  {:?}", g);
     }
     println!("\nCritical path: {:?}", cp);
+    println!("\nExtracted plan (static):");
+    for name in &plan.order {
+        if let Some((p, i)) = plan.picks.get(name) {
+            let cost = plan.costs.get(name).copied().unwrap_or(0.0);
+            println!("  {} <- {}::{} (cost {:.3})", name, p, i, cost);
+        }
+    }
     Ok(0)
 }
 
@@ -705,13 +741,27 @@ fn cmd_wrap(tag: &str, cmd: &str) -> Result<i32, String> {
 }
 
 fn cmd_grow(days: u32, top: usize) -> Result<i32, String> {
-    println!("MDL construction growth (last {}d, import top {}) [learn v2]", days, top);
+    println!(
+        "MDL construction growth (last {}d, import top {}) [learn v2]",
+        days, top
+    );
     match grow::grow(days, top) {
-        Err(e) => { eprintln!("grow failed: {}", e); Ok(1) }
+        Err(e) => {
+            eprintln!("grow failed: {}", e);
+            Ok(1)
+        }
         Ok(rep) => {
-            println!("  corpus: {} calls / {} distinct commands", rep.calls, rep.distinct);
-            println!("  rounds: {}   two-part: {:.0} b vs raw {:.0} b  (ratio {:.4})",
-                rep.rounds, rep.bits_tp, rep.bits_raw, rep.bits_tp / rep.bits_raw);
+            println!(
+                "  corpus: {} calls / {} distinct commands",
+                rep.calls, rep.distinct
+            );
+            println!(
+                "  rounds: {}   two-part: {:.0} b vs raw {:.0} b  (ratio {:.4})",
+                rep.rounds,
+                rep.bits_tp,
+                rep.bits_raw,
+                rep.bits_tp / rep.bits_raw
+            );
             println!("  scaffolds imported: {}", rep.imported);
             Ok(0)
         }
@@ -721,7 +771,10 @@ fn cmd_grow(days: u32, top: usize) -> Result<i32, String> {
 fn cmd_scaffold(q: &str) -> Result<i32, String> {
     use crate::promote;
     match promote::list_scaffolds(q) {
-        Err(e) => { eprintln!("scaffold failed: {}", e); Ok(1) }
+        Err(e) => {
+            eprintln!("scaffold failed: {}", e);
+            Ok(1)
+        }
         Ok(rows) => {
             println!("Scaffolds ({} matches):", rows.len());
             for (text, save_b, uses, lines) in rows.iter().take(20) {
@@ -730,7 +783,12 @@ fn cmd_scaffold(q: &str) -> Result<i32, String> {
                     save_b,
                     uses,
                     lines,
-                    text.split('\n').next().unwrap_or("").chars().take(70).collect::<String>()
+                    text.split('\n')
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(70)
+                        .collect::<String>()
                 );
             }
             Ok(0)
@@ -738,11 +796,19 @@ fn cmd_scaffold(q: &str) -> Result<i32, String> {
     }
 }
 
-fn cmd_promote(days: u32, top: usize, dry: bool, ) -> Result<i32, String> {
-    println!("MDL promotion gate{} (last {}d, top {})", if dry { " [DRY RUN]" } else { "" }, days, top);
+fn cmd_promote(days: u32, top: usize, dry: bool) -> Result<i32, String> {
+    println!(
+        "MDL promotion gate{} (last {}d, top {})",
+        if dry { " [DRY RUN]" } else { "" },
+        days,
+        top
+    );
     println!("=================================================");
     match promote::promote(days, top, dry) {
-        Err(e) => { eprintln!("promote failed: {}", e); Ok(1) }
+        Err(e) => {
+            eprintln!("promote failed: {}", e);
+            Ok(1)
+        }
         Ok((promoted, evaluated)) => {
             println!("-------------------------------------------------");
             if dry {

@@ -219,7 +219,7 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
             continue;
         }
 
-        // .pick or .pick(by=...)
+        // .pick / .pick(by=...) / .pick(egraph) / .pick(static)
         if trimmed.starts_with(".pick") {
             if let Some(by_start) = trimmed.find("by=") {
                 let after = &trimmed[by_start + 3..];
@@ -232,6 +232,16 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
                     .to_string();
                 if !by_val.is_empty() {
                     pick_by = by_val;
+                }
+            } else if trimmed.starts_with(".pick(") && trimmed.ends_with(')') {
+                // 裸策略词：.pick(egraph) / .pick(static)
+                let inner = trimmed[".pick(".len()..trimmed.len() - 1].trim();
+                if !inner.is_empty()
+                    && inner
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == ' ')
+                {
+                    pick_by = inner.split_whitespace().next().unwrap().to_string();
                 }
             }
             idx += 1;

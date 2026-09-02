@@ -7,7 +7,7 @@
 use crate::ast::*;
 use crate::db;
 use crate::egraph;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -104,6 +104,68 @@ fn apply_patches(pl: &Pipeline) -> Pipeline {
 pub fn exec_pipeline(topic: &str, params: &BTreeMap<String, String>, pl: &Pipeline) -> ExecResult {
     // Apply hot patches: clone pipeline, override fields from SQLite
     let pl = apply_patches(pl);
+
+    // v0.10: e-graph 提取模式（.pick(egraph) 或 DUCTILE_EGRAPH=1）。
+    // 两层分工：e-graph 决定"谁跑"（class 代表/序/别名），
+    // exec_proc 内部仍按历史排序决定"怎么跑"（impl 序 + retry）。
+    let egraph_mode = pl.procs.iter().any(|p| p.pick_by == "egraph")
+        || std::env::var("DUCTILE_EGRAPH")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+
+    if egraph_mode {
+        let mut eg = egraph::build_egraph(&pl);
+        let plan = egraph::extract_plan(&pl, &eg);
+        eprintln!(
+            "  [egraph] {} classes ({} procs) | fusion: {} | aliases: {}",
+            eg.class_count(),
+            pl.procs.len(),
+            eg.fusion_hits
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join(" "),
+            if plan.aliases.is_empty() {
+                "-".into()
+            } else {
+                plan.aliases
+                    .iter()
+                    .map(|(a, r)| format!("{}→{}", a, r))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            }
+        );
+        let mut results: BTreeMap<String, Value> = BTreeMap::new();
+        let mut alias_set: BTreeSet<String> = plan.aliases.keys().cloned().collect();
+        for rep in &plan.order {
+            let Some(proc) = pl.procs.iter().find(|p| &p.name == rep) else {
+                continue;
+            };
+            if proc.deliver {
+                continue;
+            }
+            // 别名成员不单独执行（结果由代表填充，CSE）
+            if alias_set.contains(rep) {
+                continue;
+            }
+            // 同 class 的下游 proc 已通过别名共享本结果（CSE）。
+            match exec_proc(proc, topic, params, &results, &pl) {
+                Ok(val) => {
+                    let val = val.clone();
+                    results.insert(proc.name.clone(), val.clone());
+                    // CSE：同 class 别名共享
+                    for (alias, rep_name) in &plan.aliases {
+                        if rep_name == rep {
+                            results.insert(alias.clone(), val.clone());
+                        }
+                    }
+                }
+                Err(e) => return ExecResult::Failed(e),
+            }
+        }
+        return ExecResult::Success(results);
+    }
+
     let eg = egraph::build_egraph(&pl);
     let layers = egraph::parallel_groups(&eg);
 
@@ -403,7 +465,7 @@ fn run_impl_steps(
         "llm" => exec_llm(impl_, topic, body, results),
         "merge" => exec_merge(impl_, body, results),
         "write" => exec_write(impl_, topic, body, results),
-        "read" | "read_file" => exec_read(impl_, body),
+        "read" | "read_file" => exec_read(impl_, topic, body, results),
         "run" | "sh" => exec_run(impl_, topic, body, results),
         // ── v0.7 resource management ops ──
         "spawn" => exec_spawn(impl_, topic, body, results),
@@ -1050,7 +1112,12 @@ fn exec_disk(_impl_: &Impl, body: &str) -> Result<Value, String> {
     Err("disk: unexpected df output".into())
 }
 
-fn exec_read(_impl_: &Impl, body: &str) -> Result<Value, String> {
+fn exec_read(
+    _impl_: &Impl,
+    topic: &str,
+    body: &str,
+    results: &BTreeMap<String, Value>,
+) -> Result<Value, String> {
     let path = extract_string_arg("from", body);
     let path = if path.is_empty() {
         extract_first_string(body)
@@ -1062,7 +1129,9 @@ fn exec_read(_impl_: &Impl, body: &str) -> Result<Value, String> {
         return Err("cache miss".into());
     }
 
-    let expanded = expand_tilde(&path);
+    // 与 exec_write 对齐：路径过 {topic}/{hash(topic)}/@ref 解析
+    let resolved = resolve_vars(&path, topic, results);
+    let expanded = expand_tilde(&resolved);
     if !Path::new(&expanded).exists() {
         return Err(format!("file not found: {}", expanded));
     }
@@ -2214,7 +2283,7 @@ mod tests {
             body_text: r#"read(from="/nonexistent/ductile_test_file.txt")"#.into(),
             ..default_impl()
         };
-        let result = exec_read(&impl_, &impl_.body_text);
+        let result = exec_read(&impl_, "test", &impl_.body_text, &BTreeMap::new());
         assert!(result.is_err());
     }
 
@@ -2224,7 +2293,7 @@ mod tests {
             body_text: r#"read(from="cache:abc")"#.into(),
             ..default_impl()
         };
-        let result = exec_read(&impl_, &impl_.body_text);
+        let result = exec_read(&impl_, "test", &impl_.body_text, &BTreeMap::new());
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "cache miss");
     }
@@ -2249,7 +2318,7 @@ mod tests {
             body_text: format!(r#"read(from="{}")"#, path),
             ..default_impl()
         };
-        let r = exec_read(&read_impl, &read_impl.body_text);
+        let r = exec_read(&read_impl, "test", &read_impl.body_text, &BTreeMap::new());
         assert!(r.is_ok());
         match r.unwrap() {
             Value::Text(t) => assert_eq!(t, "hello ductile"),

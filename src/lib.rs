@@ -19,7 +19,10 @@ pub mod version;
 pub mod cli;
 
 pub use ast::*;
-pub use egraph::{build_egraph, critical_path, parallel_groups, EGraph};
+pub use egraph::{
+    build_egraph, critical_path, extract_plan, parallel_groups, EClass, EGraph, ENode,
+    ExtractedPlan, UnionFind,
+};
 pub use executor::exec_pipeline;
 pub use parser::{parse_pipeline, parse_pipeline_file, ParseError};
 pub use typecheck::{check_pipeline, TypeError};
