@@ -4,6 +4,7 @@
 //! Pipeline header: Pipeline("name") — no effects, no min_level.
 
 use crate::ast::*;
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone)]
@@ -192,6 +193,7 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
     let mut foreach_var = String::new();
     let mut pick_by = "cost + history".to_string();
     let mut description = String::new();
+    let mut proc_when: Option<String> = None;
 
     // Parse proc body: .plan(...) .pick .check(...) .foreach(...) .deliver(...) .desc(...)
     while idx < lines.len() {
@@ -216,6 +218,30 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
             let (impls, next_idx) = parse_plan_block(lines, idx, &name)?;
             plan.extend(impls);
             idx = next_idx;
+            continue;
+        }
+
+        // .when(cond) — proc 级块状裁判路由（v0.11.1）：作用于该 proc 全部 impls。
+        // 此前独立行 .when 落进 Unknown-line 分支被静默丢弃 → @gen.score < 80 路由失效。
+        if trimmed.starts_with(".when(") {
+            let after = &trimmed[5..];
+            let close = find_matching_paren(after).ok_or_else(|| ParseError {
+                line: idx + 1,
+                col: 1,
+                msg: "unbalanced parens in block .when(...)".into(),
+                line_text: raw.to_string(),
+            })?;
+            let inner = after[1..close].trim().to_string();
+            if inner.is_empty() {
+                return Err(ParseError {
+                    line: idx + 1,
+                    col: 1,
+                    msg: "block .when() requires a condition".into(),
+                    line_text: raw.to_string(),
+                });
+            }
+            proc_when = Some(inner);
+            idx += 1;
             continue;
         }
 
@@ -250,8 +276,12 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
 
         // .check(result => predicate, "message")
         if trimmed.starts_with(".check(") || trimmed.starts_with(".check (") {
-            let check = parse_check_line(trimmed)?;
-            checks.push(check);
+            // v0.11 谓词层退役：裁判与生产分离。质量门槛改用独立 judge proc + .when 路由。
+            eprintln!(
+                "[v0.11] warning: .check() retired — predicate layer removed, quality gates now live in judge procs (.when routing). Line ignored: {}",
+                crate::trunc_chars(trimmed, 60)
+            );
+            let _ = parse_check_line(trimmed)?; // 仍解析以保留语法错误检查
             idx += 1;
             continue;
         }
@@ -279,6 +309,21 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
 
         // Unknown line — skip
         idx += 1;
+    }
+
+    // v0.11.1：块级 .when 下推到未持有内联 when 的全部 impls，裁判 @ref 并入 refs
+    //（egraph 据此建 gen→deliver 边，保证裁判先于路由消费者执行）。
+    if let Some(cond) = &proc_when {
+        for imp in plan.iter_mut() {
+            if imp.when.is_none() {
+                imp.when = Some(cond.clone());
+            }
+            for r in extract_refs(cond) {
+                if !imp.refs.contains(&r) {
+                    imp.refs.push(r);
+                }
+            }
+        }
     }
 
     Ok((
@@ -364,7 +409,16 @@ fn parse_impl_entries(text: &str, proc_name: &str) -> Result<Vec<Impl>, ParseErr
             let (body_text, cost, retry, ensure, when, enabled, stub, tags) =
                 extract_cost_and_modifiers(body_with_cost, &name);
 
-            let refs = extract_refs(&body_text);
+            // v0.11.1 重构：.when() 里的 @ref 也算依赖——裁判路由 `.when(@gate.score < 80)`
+            // 需要 gate → 本 proc 的 DAG 边，否则 deliver 会先于 gate 执行，判决必然落空。
+            let mut refs = extract_refs(&body_text);
+            if let Some(w) = &when {
+                for r in extract_refs(w) {
+                    if !refs.contains(&r) {
+                        refs.push(r);
+                    }
+                }
+            }
 
             impls.push(Impl {
                 name,
@@ -380,22 +434,17 @@ fn parse_impl_entries(text: &str, proc_name: &str) -> Result<Vec<Impl>, ParseErr
                 description: String::new(),
             });
         } else {
-            let (body_text, cost, retry, ensure, when, enabled, stub, tags) =
-                extract_cost_and_modifiers(entry, "unnamed");
-
-            let refs = extract_refs(&body_text);
-            impls.push(Impl {
-                name: format!("path_{}", impls.len() + 1),
-                tags,
-                cost,
-                enabled,
-                when,
-                refs,
-                body_text,
-                stub,
-                retry,
-                ensure,
-                description: String::new(),
+            // v0.11: .plan() 内每个条目必须是 `name -> body`。
+            // 旧版把无名条目静默命名为 path_N，产生 <noop> 幽灵 impl 污染数据流
+            // （实测：weights(rd=0.5) 被吃成 path_1 并假成功）。现在硬错误。
+            return Err(ParseError {
+                line: 0,
+                col: 0,
+                msg: format!(
+                    "plan entry without `name -> body` form: {:?} — every entry needs an impl name",
+                    crate::trunc_chars(entry, 60)
+                ),
+                line_text: entry.to_string(),
             });
         }
     }
@@ -480,33 +529,14 @@ fn extract_cost_and_modifiers(
         }
     }
 
-    // Extract .cost(latency=N, risk=N, tokens=N, money=N)
+    // v0.11: .cost() 退役——评价移入 .eval 策略文件（--policy 挂载）。
+    // 兼容处理：打警告并从 body 剥离，Cost 用 default（真实 cost 来源见 executor::apply_policy）。
     if let Some(cost_pos) = body.find(".cost(") {
+        eprintln!(
+            "[v0.11] warning: .cost() retired — costs move to .eval policy file (--policy). Declaration ignored."
+        );
         let after = &body[cost_pos..];
         if let Some(close) = find_matching_paren(after) {
-            let cost_inner = &after[6..close];
-            for field in cost_inner.split(',') {
-                let field = field.trim();
-                if let Some(eq) = field.find('=') {
-                    let key = field[..eq].trim();
-                    let val = field[eq + 1..].trim();
-                    match key {
-                        "latency" => {
-                            cost.latency = val.parse().unwrap_or(0);
-                        }
-                        "risk" => {
-                            cost.risk = val.parse().unwrap_or(0.0);
-                        }
-                        "tokens" => {
-                            cost.tokens = val.parse().unwrap_or(0);
-                        }
-                        "money" => {
-                            cost.money = val.parse().unwrap_or(0.0);
-                        }
-                        _ => {}
-                    }
-                }
-            }
             body = format!("{}{}", &body[..cost_pos], &after[close + 1..]);
         }
     }
@@ -527,6 +557,10 @@ fn extract_cost_and_modifiers(
     // Extract .ensure(cond, "msg")
     loop {
         if let Some(e_pos) = body.find(".ensure(") {
+            // v0.11 谓词层退役：.ensure 同 .check 一并退役。
+            eprintln!(
+                "[v0.11] warning: .ensure() retired — predicate layer removed. Modifier ignored."
+            );
             let prefix = ".ensure(";
             let after = &body[e_pos..];
             if let Some(close) = find_matching_paren(after) {
@@ -537,17 +571,12 @@ fn extract_cost_and_modifiers(
                     .unwrap_or(after.len());
                 let inner_start = prefix.len();
                 if char_close >= inner_start {
-                    let inner = &after[inner_start..char_close];
-                    if let Some(comma) = inner.rfind(',') {
-                        let cond = inner[..comma].trim().to_string();
-                        let mut msg = inner[comma + 1..].trim().to_string();
-                        msg = msg.trim_matches('"').to_string();
-                        ensure.push(Check { cond, msg });
-                    }
                     body = format!("{}{}", &body[..e_pos], &after[char_close + 1..]);
                     continue;
                 }
+                break;
             }
+            break;
         }
         break;
     }
@@ -683,6 +712,198 @@ pub fn parse_pipeline_file(path: &str) -> Result<Pipeline, ParseError> {
     parse_pipeline(&content)
 }
 
+// ── v0.11 Policy (.eval) 解析 ──
+//
+// 评价与流程分离：.pipeline 只描述流程；权重 / cost 来源写在这里，运行时 --policy 挂载。
+// 格式（行式，`#` 或 `//` 注释，空行忽略）：
+//   weights latency=0.001 risk=10.0 money=1.0 tokens=0.0001
+//   fail_closed = true
+//   <proc>.<impl> cost latency=measure("/abs/bench.sh {topic}") risk=0.05
+// 值语法：纯数字 → Direct(f64)；measure("命令") → Measure(cmd)。
+
+fn parse_policy_value(raw: &str) -> Result<CostValue, String> {
+    let raw = raw.trim();
+    if let Some(open) = raw.find("measure(") {
+        let rest = &raw[open + "measure(".len()..];
+        let close = rest
+            .rfind(')')
+            .ok_or_else(|| format!("measure( missing ')': {}", raw))?;
+        let cmd = extract_quoted(rest[..close].trim())
+            .ok_or_else(|| format!("measure(\"...\") expects a quoted command: {}", raw))?;
+        if cmd.trim().is_empty() {
+            return Err(format!("measure command is empty: {}", raw));
+        }
+        return Ok(CostValue::Measure(cmd));
+    }
+    raw.parse::<f64>().map(CostValue::Direct).map_err(|_| {
+        format!(
+            "bad cost value {:?} — expect number or measure(\"cmd\")",
+            raw
+        )
+    })
+}
+
+fn apply_policy_field(spec: &mut CostSpec, field: &str, val_raw: &str) -> Result<(), String> {
+    let v = parse_policy_value(val_raw)?;
+    match field {
+        "latency" => spec.latency = Some(v),
+        "risk" => spec.risk = Some(v),
+        "tokens" => spec.tokens = Some(v),
+        "money" => spec.money = Some(v),
+        other => return Err(format!("unknown cost field {:?}", other)),
+    }
+    Ok(())
+}
+
+pub fn parse_policy(input: &str) -> Result<Policy, String> {
+    let mut policy = Policy {
+        weights: Weights::default(),
+        costs: BTreeMap::new(),
+        fail_closed: true,
+    };
+    for (i, line) in input.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
+            continue;
+        }
+        let lineno = i + 1;
+
+        // weights <field>=<f64> ...
+        if let Some(rest) = trimmed.strip_prefix("weights") {
+            let rest = rest.trim();
+            if !rest.is_empty() && !rest.starts_with('=') && rest.contains('=') {
+                for part in rest.split_whitespace() {
+                    let (k, v) = part.split_once('=').ok_or_else(|| {
+                        format!(
+                            ".eval:{}: weights expects key=value, got {:?}",
+                            lineno, part
+                        )
+                    })?;
+                    let f = v.parse::<f64>().map_err(|_| {
+                        format!(
+                            ".eval:{}: weights.{} must be a number, got {:?}",
+                            lineno, k, v
+                        )
+                    })?;
+                    match k {
+                        "latency" => policy.weights.latency = f,
+                        "risk" => policy.weights.risk = f,
+                        "tokens" => policy.weights.tokens = f,
+                        "money" => policy.weights.money = f,
+                        other => {
+                            return Err(format!(
+                                ".eval:{}: unknown weight {:?} (v0.11: rd 已移除)",
+                                lineno, other
+                            ))
+                        }
+                    }
+                }
+                continue;
+            }
+            return Err(format!(
+                ".eval:{}: malformed weights line: {:?}",
+                lineno, trimmed
+            ));
+        }
+
+        // fail_closed = true|false
+        if let Some(rest) = trimmed.strip_prefix("fail_closed") {
+            let v = rest.trim().trim_start_matches('=').trim();
+            policy.fail_closed = match v {
+                "true" => true,
+                "false" => false,
+                other => {
+                    return Err(format!(
+                        ".eval:{}: fail_closed expects true/false, got {:?}",
+                        lineno, other
+                    ))
+                }
+            };
+            continue;
+        }
+
+        // <proc>.<impl> cost <field>=<value> ...
+        let mut parts = trimmed.split_whitespace();
+        let key = parts.next().unwrap_or_default();
+        if key.contains('.') && !key.contains('=') {
+            let verb = parts.next().unwrap_or_default();
+            if verb != "cost" {
+                return Err(format!(
+                    ".eval:{}: expecting {{proc}}.{{impl}} cost ..., got {:?}",
+                    lineno, trimmed
+                ));
+            }
+            let mut spec = CostSpec::default();
+            // 引号感知分词：measure("cmd with spaces {topic}") 不可按空白截断。
+            let args_raw: String = parts.collect::<Vec<_>>().join(" ");
+            for (field, val_raw) in
+                parse_cost_args(&args_raw).map_err(|e| format!(".eval:{}: {}", lineno, e))?
+            {
+                apply_policy_field(&mut spec, &field, &val_raw)
+                    .map_err(|e| format!(".eval:{}: {}", lineno, e))?;
+            }
+            policy.costs.insert(key.to_string(), spec);
+            continue;
+        }
+
+        return Err(format!(
+            ".eval:{}: unrecognized line {:?} — see SPEC v0.11 policy format",
+            lineno, trimmed
+        ));
+    }
+    Ok(policy)
+}
+
+/// cost 行参数的引号感知分词：`latency=measure("a b") risk=0.05` →
+/// [("latency", `measure("a b")`), ("risk", "0.05")]。
+fn parse_cost_args(args: &str) -> Result<Vec<(String, String)>, String> {
+    let chars: Vec<char> = args.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        while i < chars.len() && chars[i].is_whitespace() {
+            i += 1;
+        }
+        if i >= chars.len() {
+            break;
+        }
+        // 字段名
+        let start = i;
+        while i < chars.len() && chars[i] != '=' && !chars[i].is_whitespace() {
+            i += 1;
+        }
+        let field: String = chars[start..i].iter().collect();
+        if i >= chars.len() || chars[i] != '=' {
+            return Err(format!("expects field=value, got {:?}", field));
+        }
+        i += 1; // 跳过 '='
+                // 值：双引号内的空白不算分隔符
+        let val_start = i;
+        let mut in_quote = false;
+        while i < chars.len() {
+            let c = chars[i];
+            if c == '"' {
+                in_quote = !in_quote;
+            } else if !in_quote && c.is_whitespace() {
+                break;
+            }
+            i += 1;
+        }
+        if in_quote {
+            return Err(format!("unterminated quote after field {:?}", field));
+        }
+        let val: String = chars[val_start..i].iter().collect();
+        out.push((field, val));
+    }
+    Ok(out)
+}
+
+pub fn parse_policy_file(path: &str) -> Result<Policy, String> {
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {}", path, e))?;
+    parse_policy(&content)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -727,10 +948,11 @@ mod tests {
         assert_eq!(p.name, "fetch");
         assert_eq!(p.plan.len(), 2);
         assert_eq!(p.plan[0].name, "cheap");
-        assert_eq!(p.plan[0].cost.latency, 10);
+        // v0.11: .cost() 退役——声明被剥离，cost 用 default；评价在 .eval 策略文件。
+        assert_eq!(p.plan[0].cost.latency, 0);
         assert!(p.plan[0].tags.contains("file"));
         assert_eq!(p.plan[1].name, "pricey");
-        assert_eq!(p.plan[1].cost.latency, 500);
+        assert_eq!(p.plan[1].cost.latency, 0);
         assert!(p.plan[1].tags.contains("file"));
         assert_eq!(p.pick_by, "cost + history");
     }
@@ -764,6 +986,70 @@ mod tests {
 "#;
         let pl = parse_pipeline(input).unwrap();
         assert!(pl.procs[0].plan[0].tags.is_empty());
+    }
+
+    // ── v0.11.1 块级 .when（proc 级裁判路由）──
+
+    #[test]
+    fn block_when_pushes_to_all_impls() {
+        let input = r#"Pipeline("t")
+
+.proc("gen")
+  .plan(high -> run("echo 'score=85'"))
+
+.proc("deliver")
+  .plan(x -> run("echo DELIVERED"))
+  .when(@gen.score < 80)
+"#;
+        let pl = parse_pipeline(input).unwrap();
+        let deliver = pl.procs.iter().find(|p| p.name == "deliver").unwrap();
+        assert_eq!(deliver.plan.len(), 1);
+        let imp = &deliver.plan[0];
+        assert_eq!(imp.when.as_deref(), Some("@gen.score < 80"));
+        // 裁判 @ref 入 refs → egraph 建边的前提
+        assert!(imp.refs.contains(&"gen".to_string()));
+    }
+
+    #[test]
+    fn block_when_empty_condition_hard_error() {
+        let input = r#"Pipeline("t")
+
+.proc("deliver")
+  .plan(x -> run("echo hi"))
+  .when()
+"#;
+        let err = parse_pipeline(input).unwrap_err();
+        assert!(err.msg.contains("requires a condition"));
+    }
+
+    #[test]
+    fn block_when_unbalanced_parens_hard_error() {
+        let input = r#"Pipeline("t")
+
+.proc("deliver")
+  .plan(x -> run("echo hi"))
+  .when(@gen.score < 80
+"#;
+        let err = parse_pipeline(input).unwrap_err();
+        assert!(err.msg.contains("unbalanced parens"));
+    }
+
+    #[test]
+    fn inline_when_not_overridden_by_block() {
+        // 内联 when 优先：块级下推只填 when.is_none() 的 impl。
+        let input = r#"Pipeline("t")
+
+.proc("deliver")
+  .plan(x -> run("echo a").when(mode == "fast"), y -> run("echo b"))
+  .when(@gen.score < 80)
+
+.proc("gen")
+  .plan(g -> run("echo 'score=70'"))
+"#;
+        let pl = parse_pipeline(input).unwrap();
+        let deliver = pl.procs.iter().find(|p| p.name == "deliver").unwrap();
+        assert_eq!(deliver.plan[0].when.as_deref(), Some("mode == \"fast\""));
+        assert_eq!(deliver.plan[1].when.as_deref(), Some("@gen.score < 80"));
     }
 
     // ── Tags without # prefix ──
@@ -847,8 +1133,62 @@ mod tests {
   .check(result => has_results, "no search results")
 "#;
         let pl = parse_pipeline(input).unwrap();
-        assert_eq!(pl.procs[0].checks.len(), 1);
-        assert_eq!(pl.procs[0].checks[0].msg, "no search results");
+        // v0.11 谓词层退役：.check 解析但不入 AST（警告+忽略），门槛改独立 judge proc + .when。
+        assert_eq!(pl.procs[0].checks.len(), 0);
+    }
+
+    // ── v0.11 Policy (.eval) parsing ──
+    #[test]
+    fn parse_policy_basic() {
+        let input = r#"
+// comment line
+weights latency=0.002 risk=5.0 tokens=0.001 money=2.0
+fail_closed = true
+render.sdxl cost latency=measure("/abs/bench_sdxl.sh {topic}") risk=0.05
+render.flux  cost latency=120.0
+"#;
+        let pol = parse_policy(input).unwrap();
+        assert!((pol.weights.latency - 0.002).abs() < 1e-12);
+        assert!((pol.weights.risk - 5.0).abs() < 1e-12);
+        assert!((pol.weights.money - 2.0).abs() < 1e-12);
+        assert_eq!(pol.costs.len(), 2);
+        let spec = &pol.costs["render.sdxl"];
+        assert_eq!(
+            spec.latency,
+            Some(CostValue::Measure("/abs/bench_sdxl.sh {topic}".into()))
+        );
+        assert_eq!(spec.risk, Some(CostValue::Direct(0.05)));
+        assert_eq!(
+            pol.costs["render.flux"].latency,
+            Some(CostValue::Direct(120.0))
+        );
+    }
+
+    #[test]
+    fn parse_policy_rejects_garbage() {
+        assert!(parse_policy("weights latency=abc").is_err());
+        assert!(
+            parse_policy("weights rd=1.0").is_err(),
+            "rd removed in v0.11"
+        );
+        assert!(parse_policy("foo bar baz").is_err());
+        assert!(parse_policy("a.b spend latency=1.0").is_err());
+        assert!(parse_policy("a.b cost latency=measure(unclosed)").is_err());
+        assert!(parse_policy("a.b cost latency=1.0 extra=oops").is_err());
+    }
+
+    #[test]
+    fn parse_plan_rejects_unnamed_entry() {
+        // 幽灵 impl 陷阱回归测试：weights(rd=0.5) 旧版被吃成 path_1 假成功
+        let input = r#"Pipeline("t")
+
+.proc("p")
+  .plan(
+    ok -> read("x"),
+    weights(rd = 0.5)
+  )
+"#;
+        assert!(parse_pipeline(input).is_err());
     }
 
     // ── Refs extraction ──
@@ -956,8 +1296,8 @@ Pipeline("t")
   )
 "#;
         let pl = parse_pipeline(input).unwrap();
-        assert_eq!(pl.procs[0].plan[0].ensure.len(), 1);
-        assert_eq!(pl.procs[0].plan[0].ensure[0].msg, "empty result");
+        // v0.11 谓词层退役：.ensure 同 .check，警告+忽略。
+        assert_eq!(pl.procs[0].plan[0].ensure.len(), 0);
     }
 
     // ── pick default ──

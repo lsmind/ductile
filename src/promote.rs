@@ -28,13 +28,14 @@ pub fn list_scaffolds(q: &str) -> Result<Vec<(String, i64, i64, i64)>, String> {
         .prepare("SELECT text, save_b, use_count, lines FROM scaffolds WHERE text LIKE ?1 ORDER BY save_b DESC LIMIT 20")
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map(params![pat], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .query_map(params![pat], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
         .map_err(|e| e.to_string())?
         .flatten()
         .collect();
     Ok(rows)
 }
-
 
 pub struct PromotionVerdict {
     pub cmd: String,
@@ -121,7 +122,9 @@ pub fn promote(days: u32, top: usize, dry_run: bool) -> Result<(usize, usize), S
     // 已在库中的命令跳过 (重复晋升无意义)
     let known: std::collections::HashSet<String> = {
         let mut stmt = conn
-            .prepare("SELECT DISTINCT cmd FROM wrapped_cmds UNION SELECT DISTINCT cmd FROM promotions")
+            .prepare(
+                "SELECT DISTINCT cmd FROM wrapped_cmds UNION SELECT DISTINCT cmd FROM promotions",
+            )
             .map_err(|e| e.to_string())?;
         let v = stmt
             .query_map([], |r| r.get::<_, String>(0))
@@ -174,7 +177,11 @@ pub fn promote(days: u32, top: usize, dry_run: bool) -> Result<(usize, usize), S
         if v.promoted && !dry_run {
             // 铸成: _harvested pipeline 下的 proc + wrapped_cmds 入库 (不执行)
             let pid: i64 = conn
-                .query_row("SELECT id FROM pipelines WHERE name='_harvested'", [], |r| r.get(0))
+                .query_row(
+                    "SELECT id FROM pipelines WHERE name='_harvested'",
+                    [],
+                    |r| r.get(0),
+                )
                 .unwrap_or(0);
             if pid == 0 {
                 conn.execute(
@@ -183,7 +190,11 @@ pub fn promote(days: u32, top: usize, dry_run: bool) -> Result<(usize, usize), S
                 )
                 .map_err(|e| e.to_string())?;
                 let pid2: i64 = conn
-                    .query_row("SELECT id FROM pipelines WHERE name='_harvested'", [], |r| r.get(0))
+                    .query_row(
+                        "SELECT id FROM pipelines WHERE name='_harvested'",
+                        [],
+                        |r| r.get(0),
+                    )
                     .map_err(|e| e.to_string())?;
                 insert_proc(&mut conn, &tag, pid2, &h.cmd)?;
             } else {
@@ -210,7 +221,12 @@ fn insert_proc(conn: &mut Connection, tag: &str, pid: i64, cmd: &str) -> Result<
         "INSERT INTO procs (name, pipeline_id, description, tags, impl_count, is_deliver)
          SELECT ?1, ?2, ?3, ?4, 1, 0
          WHERE NOT EXISTS (SELECT 1 FROM procs WHERE name=?1 AND pipeline_id=?2)",
-        params![tag, pid, format!("MDL promoted (+gain): {}", harvest::trunc_str(cmd, 50)), format!("{},harvest", tag)],
+        params![
+            tag,
+            pid,
+            format!("MDL promoted (+gain): {}", harvest::trunc_str(cmd, 50)),
+            format!("{},harvest", tag)
+        ],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -230,8 +246,14 @@ fn auto_tag(res: &str, used: &mut std::collections::HashSet<String>) -> String {
     };
     // 防撞名: 传入已用集, 撞则加序号
     while used.contains(&t) {
-        t = format!("{}-{}", word.chars().take(14).collect::<String>(), used.len() + 1);
-        if t.len() > 20 { t.truncate(20); }
+        t = format!(
+            "{}-{}",
+            word.chars().take(14).collect::<String>(),
+            used.len() + 1
+        );
+        if t.len() > 20 {
+            t.truncate(20);
+        }
     }
     used.insert(t.clone());
     t

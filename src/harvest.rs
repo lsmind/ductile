@@ -341,7 +341,9 @@ pub struct CmdCount {
 
 /// 全文命令计数 (无首行归一化) — grow.rs 的取数层.
 /// 返回 (command_full_text -> CmdCount); 多行 heredoc 保持完整.
-pub fn harvest_full_counts(days: u32) -> Result<std::collections::HashMap<String, CmdCount>, String> {
+pub fn harvest_full_counts(
+    days: u32,
+) -> Result<std::collections::HashMap<String, CmdCount>, String> {
     let path = state_db_path();
     if !path.exists() {
         return Err(format!("state.db not found at {}", path.display()));
@@ -375,12 +377,16 @@ pub fn harvest_full_counts(days: u32) -> Result<std::collections::HashMap<String
         .flatten()
         .collect();
     let mut counts: std::collections::HashMap<String, CmdCount> = std::collections::HashMap::new();
-    let mut seen_sess: std::collections::HashMap<(String, String), ()> = std::collections::HashMap::new();
+    let mut seen_sess: std::collections::HashMap<(String, String), ()> =
+        std::collections::HashMap::new();
     for (tc, _, sid) in &rows {
         for cmd in extract_commands_exact(tc) {
             let c = cmd.trim();
             if c.len() >= 6 {
-                let e = counts.entry(c.to_string()).or_insert(CmdCount { calls: 0, sessions: 0 });
+                let e = counts.entry(c.to_string()).or_insert(CmdCount {
+                    calls: 0,
+                    sessions: 0,
+                });
                 e.calls += 1;
                 seen_sess.entry((c.to_string(), sid.clone())).or_insert(());
             }
@@ -510,7 +516,11 @@ fn jparse_str(s: &str, i: &mut usize) -> Option<String> {
                         let hex = &s[*i + 1..*i + 5];
                         let cp = u32::from_str_radix(hex, 16).ok()?;
                         *i += 4;
-                        if (0xD800..0xDC00).contains(&cp) && *i + 6 < s.len() && b[*i + 1] == b'\\' && b[*i + 2] == b'u' {
+                        if (0xD800..0xDC00).contains(&cp)
+                            && *i + 6 < s.len()
+                            && b[*i + 1] == b'\\'
+                            && b[*i + 2] == b'u'
+                        {
                             let hex2 = &s[*i + 3..*i + 7];
                             if let Ok(lo) = u32::from_str_radix(hex2, 16) {
                                 if (0xDC00..0xE000).contains(&lo) {

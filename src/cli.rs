@@ -33,12 +33,25 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             }
         },
         "run" if args.len() >= 3 => {
-            let topic = if args.len() > 3 {
-                args[3..].join(" ")
-            } else {
-                String::new()
-            };
-            cmd_run(&args[2], &topic)
+            // v0.11: --policy <file.eval> 可出现在 run 子命令任意位置；其余 token 为 topic。
+            let mut policy_path: Option<String> = None;
+            let mut topic_parts: Vec<&str> = Vec::new();
+            let mut i = 3;
+            while i < args.len() {
+                if args[i] == "--policy" {
+                    if i + 1 >= args.len() {
+                        eprintln!("--policy requires a .eval file path");
+                        return Ok(1);
+                    }
+                    policy_path = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    topic_parts.push(&args[i]);
+                    i += 1;
+                }
+            }
+            let topic = topic_parts.join(" ");
+            cmd_run(&args[2], &topic, policy_path.as_deref())
         }
         "graph" if args.len() >= 3 => cmd_graph(&args[2]),
         "parse" if args.len() >= 3 => cmd_parse(&args[2]),
@@ -166,13 +179,27 @@ fn print_usage() {
 
 // ── run ──
 
-fn cmd_run(path: &str, topic_str: &str) -> Result<i32, String> {
+fn cmd_run(path: &str, topic_str: &str, policy_path: Option<&str>) -> Result<i32, String> {
     let pl = match parse_pipeline_file(path) {
         Err(e) => {
             eprintln!("{}", e);
             return Ok(1);
         }
         Ok(pl) => pl,
+    };
+    // v0.11: 评价策略挂载（.eval 文件）。None = 引擎默认。
+    let policy = match policy_path {
+        Some(p) => match parse_policy_file(p) {
+            Ok(pol) => {
+                println!("Policy: {} (weights + {} cost specs)", p, pol.costs.len());
+                Some(pol)
+            }
+            Err(e) => {
+                eprintln!("Policy error in {}:\n  {}", p, e);
+                return Ok(1);
+            }
+        },
+        None => None,
     };
     let errs = check_pipeline(&pl);
     if !errs.is_empty() {
@@ -203,7 +230,7 @@ fn cmd_run(path: &str, topic_str: &str) -> Result<i32, String> {
         println!();
     }
 
-    match exec_pipeline(&topic, &params, &pl) {
+    match exec_pipeline(&topic, &params, &pl, policy.as_ref()) {
         ExecResult::Success(results) => {
             println!();
             // v0.8.1: learning visibility — what the prefs chose this run

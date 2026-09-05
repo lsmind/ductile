@@ -36,6 +36,36 @@ impl Cost {
     }
 }
 
+// ── v0.11 Policy：评价与流程分离 ──
+/// cost 值来源：直接数值，或测试方法（链接测试脚本，运行时实测）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum CostValue {
+    Direct(f64),
+    /// 测试命令（bash -c 执行；可含 {topic} 占位符），stdout 中第一个浮点数即值。
+    Measure(String),
+}
+
+/// 单个 `proc.impl` 的 cost 规格：字段 → 来源。未声明的字段 = 0。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CostSpec {
+    pub latency: Option<CostValue>,
+    pub risk: Option<CostValue>,
+    pub tokens: Option<CostValue>,
+    pub money: Option<CostValue>,
+}
+
+/// 评价策略（.eval 文件）。.pipeline 只描述流程；权重与 cost 来源全在这里，
+/// 运行时 `ductile run x.pipeline "topic" --policy p.eval` 挂载。
+/// 原则：不能又当运动员又当裁判——流程文件不自带判罚。
+#[derive(Debug, Clone, Default)]
+pub struct Policy {
+    pub weights: Weights,
+    /// key = "proc.impl"
+    pub costs: BTreeMap<String, CostSpec>,
+    /// v0.11 恒 fail-closed（未知函数/条件 = 硬失败）；字段保留为格式前瞻。
+    pub fail_closed: bool,
+}
+
 // ── Weights ──
 #[derive(Debug, Clone)]
 pub struct Weights {
@@ -43,9 +73,6 @@ pub struct Weights {
     pub latency: f64,
     pub risk: f64,
     pub money: f64,
-    /// RD 失真感知权重：乘在 est_loss/rate_tokens（每千 token 失真率）上。
-    /// 0 = 关闭 RD 排序（默认，向后兼容）；>0 启用。
-    pub rd: f64,
 }
 
 impl Default for Weights {
@@ -55,7 +82,6 @@ impl Default for Weights {
             latency: 0.001,
             risk: 10.0,
             money: 1.0,
-            rd: 0.0,
         }
     }
 }
@@ -103,7 +129,7 @@ pub struct Proc {
     pub pick_by: String, // pick strategy
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Pipeline {
     pub name: String,
     pub description: String, // v0.4.1: optional Pipeline("name", "desc")

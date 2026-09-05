@@ -1,0 +1,12 @@
+Pipeline("weights_probe", "验证 SPEC 声称的 .plan() 内 weights(rd=N) 语法")
+
+  .proc("fetch")
+    .desc("weights(rd=N) 是否真的能解析")
+    .plan(
+      weights(rd = 0.5),
+      a -> run("echo 'AAA'")
+        .tags(#run),
+      b -> run("echo 'BBB'")
+        .tags(#run)
+    )
+    .check(result => not_empty, "空")

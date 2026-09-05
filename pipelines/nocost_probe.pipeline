@@ -1,0 +1,10 @@
+Pipeline("nocost_probe", "无 .cost() 时引擎是否照常排序降级")
+
+  .proc("fetch")
+    .plan(
+      broken -> run("exit 1")
+        .tags(#run),
+      good -> run("echo 'recovered from fallback'")
+        .tags(#run)
+    )
+    .check(result => not_empty, "空")

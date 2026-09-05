@@ -29,7 +29,10 @@ struct Interner {
 
 impl Interner {
     fn new() -> Self {
-        Interner { map: HashMap::new(), strings: Vec::new() }
+        Interner {
+            map: HashMap::new(),
+            strings: Vec::new(),
+        }
     }
     fn intern(&mut self, s: &str) -> u32 {
         if let Some(&id) = self.map.get(s) {
@@ -161,10 +164,13 @@ pub fn grow(days: u32, top_import: usize) -> Result<GrowthReport, String> {
     }
     savings.sort_by(|x, y| y.0.partial_cmp(&x.0).unwrap_or(std::cmp::Ordering::Equal));
 
-    let bits_occ: f64 = freq.iter().map(|(&id, &c)| {
-        let occ_u = -((c / n_total).log2());
-        c * occ_u
-    }).sum();
+    let bits_occ: f64 = freq
+        .iter()
+        .map(|(&id, &c)| {
+            let occ_u = -((c / n_total).log2());
+            c * occ_u
+        })
+        .sum();
     let bits_tp = bits_occ + dict_bits;
 
     let mut conn = db_open()?;
@@ -178,8 +184,13 @@ pub fn grow(days: u32, top_import: usize) -> Result<GrowthReport, String> {
     )
     .map_err(|e| e.to_string())?;
     let mut imported = 0usize;
+    let mut junk_filtered = 0usize;
     for (sav, c, id) in savings.iter().take(top_import) {
         let text = ir.get(*id);
+        if is_junk_construct(text) {
+            junk_filtered += 1;
+            continue;
+        }
         let n_lines = text.split('\n').count() as i64;
         conn.execute(
             "INSERT OR IGNORE INTO scaffolds (text, save_b, use_count, lines, source, imported_at)
@@ -189,11 +200,87 @@ pub fn grow(days: u32, top_import: usize) -> Result<GrowthReport, String> {
         .map_err(|e| e.to_string())?;
         imported += 1;
     }
+    let _ = junk_filtered; // 报告字段留待 GrowthReport 扩展; 先行为对齐 Python 守门
+    Ok(GrowthReport {
+        calls,
+        distinct,
+        bits_raw,
+        bits_tp,
+        rounds,
+        imported,
+    })
+}
 
-    Ok(GrowthReport { calls, distinct, bits_raw, bits_tp, rounds, imported })
+/// 杂质构式守门 (2026-09-01 effect_flow 真发现, 与 Python effect_flow.py 同规则):
+/// grow 的语料清洗会放进三类杂质 — 裸终止符尾(print(...)\nPY)、泛型内联开头
+/// (python3 - <<PY)、全短行. 它们是"语法模板"不是"工作流构式", 对新语料的
+/// 命中是假效应 (任何 python 内联都命中). 三规则与 exp/effect_flow.py 逐条对齐.
+fn is_junk_construct(text: &str) -> bool {
+    // 1. 任一行是裸 heredoc 终止符 (PY/PYEOF/EOF/END)
+    for line in text.lines() {
+        let t = line.trim();
+        if t == "PY" || t == "PYEOF" || t == "EOF" || t == "END" || t == "PYEOF'" {
+            return true;
+        }
+    }
+    // 2. 首行是泛型内联开头 (python3 - <<..., python3 -c "...")
+    let first = text.lines().next().unwrap_or("").trim_start();
+    if first.starts_with("python3 - <<")
+        || first.starts_with("python - <<")
+        || first.starts_with("python3 -c '")
+        || first.starts_with("python3 -c \"")
+        || first == "python3"
+        || first == "python"
+    {
+        return true;
+    }
+    // 3. 全短行: 没有一行 ≥20 字符 → 无实质内容
+    let has_substance = text.lines().any(|l| l.trim().len() >= 20);
+    if !has_substance {
+        return true;
+    }
+    false
 }
 
 fn db_open() -> Result<Connection, String> {
     db::init_db();
     Connection::open(db::db_path()).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod junk_gate_tests {
+    use super::is_junk_construct;
+
+    #[test]
+    fn terminator_tail_is_junk() {
+        assert!(is_junk_construct("print(\"patched\")\nPY"));
+        assert!(is_junk_construct("echo hi\nPYEOF"));
+    }
+    #[test]
+    fn generic_opener_is_junk() {
+        assert!(is_junk_construct(
+            "python3 - <<'PY'\nimport json\nreal content line here ok"
+        ));
+        assert!(is_junk_construct(
+            "python3 -c \"\nimport json\nreal content line here ok"
+        ));
+    }
+    #[test]
+    fn short_lines_all_junk() {
+        assert!(is_junk_construct("a = 1\nb = 2\nc = 3"));
+    }
+    #[test]
+    fn real_construct_passes() {
+        assert!(!is_junk_construct("import pathlib\nimport json\nd = json.loads(pathlib.Path('ledger.json').read_text())  # workflow"));
+        assert!(!is_junk_construct(
+            "const { chromium } = require('playwright');\n(async () => {"
+        ));
+    }
+    #[test]
+    fn py_inside_code_line_not_junk() {
+        // "PY" 出现在行中但不是裸终止符行 → 不误杀
+        assert!(!is_junk_construct(
+            "import PYutils  # PY in middle of a real line here"
+        ));
+    }
 }

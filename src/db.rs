@@ -87,6 +87,14 @@ pub fn init_db() {
             value       TEXT NOT NULL,
             created_at  TEXT DEFAULT '',
             UNIQUE(pipeline, proc_name, impl_name, field)
+        );
+        CREATE TABLE IF NOT EXISTS cost_cache (
+            proc_name   TEXT NOT NULL,
+            impl_name   TEXT NOT NULL,
+            field       TEXT NOT NULL,
+            value       REAL NOT NULL,
+            measured_at INTEGER NOT NULL,
+            PRIMARY KEY (proc_name, impl_name, field)
         );",
     )
     .expect("init_db failed");
@@ -331,6 +339,45 @@ pub fn record_run_rd(
         ],
     )
     .ok();
+}
+
+/// v0.11 cost 实测缓存：measure 测试脚本的最近一次取值（TTL 内直接复用）。
+pub fn cost_cache_get_fresh(
+    proc_name: &str,
+    impl_name: &str,
+    field: &str,
+    ttl_secs: i64,
+) -> Option<f64> {
+    init_db();
+    let conn = open();
+    let now = unix_now();
+    conn.query_row(
+        "SELECT value FROM cost_cache
+         WHERE proc_name = ?1 AND impl_name = ?2 AND field = ?3 AND measured_at > ?4",
+        params![proc_name, impl_name, field, now - ttl_secs],
+        |r| r.get(0),
+    )
+    .ok()
+}
+
+pub fn cost_cache_put(proc_name: &str, impl_name: &str, field: &str, value: f64) {
+    init_db();
+    let conn = open();
+    conn.execute(
+        "INSERT INTO cost_cache (proc_name, impl_name, field, value, measured_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(proc_name, impl_name, field)
+         DO UPDATE SET value = excluded.value, measured_at = excluded.measured_at",
+        params![proc_name, impl_name, field, value, unix_now()],
+    )
+    .ok();
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 pub fn recent_runs(proc_name: &str) -> Vec<RunRow> {

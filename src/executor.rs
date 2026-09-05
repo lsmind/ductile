@@ -12,6 +12,7 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Instant;
 
 // ── Hot patches ──
 
@@ -101,9 +102,17 @@ fn apply_patches(pl: &Pipeline) -> Pipeline {
     cloned
 }
 
-pub fn exec_pipeline(topic: &str, params: &BTreeMap<String, String>, pl: &Pipeline) -> ExecResult {
-    // Apply hot patches: clone pipeline, override fields from SQLite
-    let pl = apply_patches(pl);
+/// v0.11: policy 挂载点。None = 引擎默认评价（与 v0.10 行为一致）。
+pub fn exec_pipeline(
+    topic: &str,
+    params: &BTreeMap<String, String>,
+    pl: &Pipeline,
+    policy: Option<&Policy>,
+) -> ExecResult {
+    // Apply hot patches: clone pipeline, override fields from SQLite.
+    // v0.11.1 Null Object：--policy 缺席不再走 Option 分支，统一为 Evaluator 多态调用。
+    let mut pl = apply_patches(pl);
+    crate::eval::evaluator(policy).apply(&mut pl, topic);
 
     // v0.10: e-graph 提取模式（.pick(egraph) 或 DUCTILE_EGRAPH=1）。
     // 两层分工：e-graph 决定"谁跑"（class 代表/序/别名），
@@ -247,47 +256,31 @@ fn exec_proc(
         }
 
         eprintln!("  [{}] trying: {}", proc.name, impl_.name);
+        // v0.11 谓词层退役：结果直接透传，质量门槛由独立 judge proc + .when 路由承担。
+        let started = Instant::now();
         match run_impl_with_retry(impl_, topic, results) {
             Ok(val) => {
-                // Run checks
-                let all_checks: Vec<&Check> =
-                    proc.checks.iter().chain(impl_.ensure.iter()).collect();
-                match run_checks(&all_checks, &val) {
-                    Ok(val) => {
-                        let out_text = match &val {
-                            Value::Text(t) => t.clone(),
-                            _ => String::new(),
-                        };
-                        append_run_rd(
-                            &proc.name,
-                            &impl_.name,
-                            pid,
-                            Status::Ok,
-                            None,
-                            None,
-                            &out_text,
-                        );
-                        // v0.8 preference learning: 成功 ×1.1（LGuess 乘性更新的奖励半边）
-                        db::record_pref(&proc.name, &impl_.name, true);
-                        return Ok(val);
-                    }
-                    Err(chk_err) => {
-                        eprintln!("  [{}] check failed: {}", proc.name, chk_err);
-                        append_run(
-                            &proc.name,
-                            &impl_.name,
-                            pid,
-                            Status::Fail,
-                            Some(&short_hash(&chk_err)),
-                            Some(&format!("{}.{}.check", proc.name, impl_.name)),
-                        );
-                        // v0.8 preference learning: 失败 ÷1.5（不对称：坏消息更重）
-                        db::record_pref(&proc.name, &impl_.name, false);
-                        continue;
-                    }
-                }
+                let latency_ms = started.elapsed().as_millis() as i64;
+                let out_text = match &val {
+                    Value::Text(t) => t.clone(),
+                    _ => String::new(),
+                };
+                append_run_rd(
+                    &proc.name,
+                    &impl_.name,
+                    pid,
+                    Status::Ok,
+                    None,
+                    None,
+                    &out_text,
+                    latency_ms,
+                );
+                // v0.8 preference learning: 成功 ×1.1（LGuess 乘性更新的奖励半边）
+                db::record_pref(&proc.name, &impl_.name, true);
+                return Ok(val);
             }
             Err(err) => {
+                let latency_ms = started.elapsed().as_millis() as i64;
                 eprintln!("  [{}] failed: {}", proc.name, err);
                 append_run(
                     &proc.name,
@@ -296,6 +289,7 @@ fn exec_proc(
                     Status::Fail,
                     Some(&short_hash(&err)),
                     Some(&format!("{}.{}.step", proc.name, impl_.name)),
+                    latency_ms,
                 );
                 db::record_pref(&proc.name, &impl_.name, false);
                 continue;
@@ -310,7 +304,7 @@ fn exec_foreach_proc(
     proc: &Proc,
     src_proc: &str,
     topic: &str,
-    _params: &BTreeMap<String, String>,
+    params: &BTreeMap<String, String>,
     results: &BTreeMap<String, Value>,
     pl: &Pipeline,
 ) -> Result<Value, String> {
@@ -338,7 +332,12 @@ fn exec_foreach_proc(
 
     let mut sub_results: Vec<Result<Value, String>> = Vec::new();
     let recent_map = load_recent_runs(&proc.name);
-    let eligible: Vec<&Impl> = proc.plan.iter().collect();
+    // v0.11.1：foreach 子 proc 也走 when 裁判过滤（此前整组绕过 is_eligible）。
+    let eligible: Vec<&Impl> = proc
+        .plan
+        .iter()
+        .filter(|i| is_eligible(params, results, i))
+        .collect();
     let ranked = rank_impls_named(
         &pl.weights,
         &recent_map,
@@ -378,14 +377,25 @@ fn exec_foreach_proc(
                 ..(*impl_).clone()
             };
 
+            let started = Instant::now();
             match run_impl_with_retry(&expanded, topic, &item_results) {
                 Ok(val) => {
-                    append_run(&proc.name, &impl_.name, pid, Status::Ok, None, None);
+                    let latency_ms = started.elapsed().as_millis() as i64;
+                    append_run(
+                        &proc.name,
+                        &impl_.name,
+                        pid,
+                        Status::Ok,
+                        None,
+                        None,
+                        latency_ms,
+                    );
                     sub_results.push(Ok(val));
                     found = true;
                     break;
                 }
                 Err(err) => {
+                    let latency_ms = started.elapsed().as_millis() as i64;
                     append_run(
                         &proc.name,
                         &impl_.name,
@@ -393,6 +403,7 @@ fn exec_foreach_proc(
                         Status::Fail,
                         Some(&short_hash(&err)),
                         Some(&format!("{}.{}.foreach", proc.name, impl_.name)),
+                        latency_ms,
                     );
                 }
             }
@@ -451,6 +462,85 @@ fn run_impl_with_retry(
     }
 }
 
+// ── Function Registry（v0.11.1 重构：Registry + Adapter 模式）──
+//
+// 旧形态：run_impl_steps 里 19 分支的裸 match。两个真实缺陷：
+//   1. fail-closed 错误文案里的 Known 函数清单是手工字符串，已漂移（web_search 写了两遍）；
+//   2. 新增函数要同时改 match 和文案，漏一处就静默不一致。
+// 新形态：单一注册表 = 函数名 → StepFn（统一签名）。异构签名的 fs 系函数用
+// 闭包 **Adapter** 归一；清单文案由表键自动生成——清单即注册表，不可能漂移。
+// `cache` 分支保留为显式 Err 表项（测试探针依赖此语义）。
+
+/// 统一步骤签名：所有 exec_* 归一到它。
+type StepFn = Box<dyn Fn(&Impl, &str, &str, &BTreeMap<String, Value>) -> Result<Value, String>>;
+
+/// fs 系（无 topic/results）→ 统一签名的 Adapter。
+fn fs_adapter(f: fn(&Impl, &str) -> Result<Value, String>) -> StepFn {
+    Box::new(move |impl_, _topic, body, _results| f(impl_, body))
+}
+
+/// 函数注册表：名字 → 执行器。新增函数只需在此插一行。
+fn step_registry() -> BTreeMap<&'static str, StepFn> {
+    let mut m: BTreeMap<&'static str, StepFn> = BTreeMap::new();
+    // search/llm/merge/write/read
+    m.insert(
+        "search",
+        Box::new(|i: &Impl, t: &str, b: &str, r: &BTreeMap<String, Value>| {
+            exec_search(i, t, b, r, true)
+        }),
+    );
+    m.insert(
+        "mcp_search",
+        Box::new(|i: &Impl, t: &str, b: &str, r: &BTreeMap<String, Value>| {
+            exec_search(i, t, b, r, true)
+        }),
+    );
+    m.insert(
+        "web_search",
+        Box::new(|i: &Impl, t: &str, b: &str, r: &BTreeMap<String, Value>| {
+            exec_search(i, t, b, r, false)
+        }),
+    );
+    m.insert("llm", Box::new(exec_llm));
+    m.insert(
+        "merge",
+        Box::new(|i: &Impl, _t: &str, b: &str, r: &BTreeMap<String, Value>| exec_merge(i, b, r)),
+    );
+    m.insert("write", Box::new(exec_write));
+    m.insert("read", Box::new(exec_read));
+    m.insert("read_file", Box::new(exec_read));
+    // run/sh
+    m.insert("run", Box::new(exec_run));
+    m.insert("sh", Box::new(exec_run));
+    // v0.7 resource ops
+    m.insert("spawn", Box::new(exec_spawn));
+    m.insert("procs", Box::new(exec_procs));
+    m.insert("kill", Box::new(exec_kill));
+    m.insert("wait", Box::new(exec_wait));
+    // fs ops（Adapter 归一）
+    m.insert("exists", fs_adapter(exec_fs_exists));
+    m.insert("stat", fs_adapter(exec_fs_stat));
+    m.insert("ls", fs_adapter(exec_fs_ls));
+    m.insert("rm", fs_adapter(exec_fs_rm));
+    m.insert("cp", fs_adapter(exec_fs_cp));
+    m.insert("mkdir", fs_adapter(exec_fs_mkdir));
+    m.insert(
+        "disk",
+        Box::new(|i: &Impl, _t: &str, b: &str, _r: &BTreeMap<String, Value>| exec_disk(i, b)),
+    );
+    m
+}
+
+/// 探针保留语义：cache = 恒 Err("cache miss")（故意失败路径的测试钩子）。
+fn is_probe_stub(func: &str) -> bool {
+    func == "cache"
+}
+
+/// 已知函数清单（由注册表键自动生成——清单即表，不可能漂移）。
+pub fn known_functions() -> Vec<&'static str> {
+    step_registry().keys().copied().collect()
+}
+
 fn run_impl_steps(
     impl_: &Impl,
     topic: &str,
@@ -459,28 +549,25 @@ fn run_impl_steps(
     let body = &impl_.body_text;
     let func = detect_func(body);
 
-    match func.as_str() {
-        "mcp_search" | "search" => exec_search(impl_, topic, body, results, true),
-        "web_search" => exec_search(impl_, topic, body, results, false),
-        "llm" => exec_llm(impl_, topic, body, results),
-        "merge" => exec_merge(impl_, body, results),
-        "write" => exec_write(impl_, topic, body, results),
-        "read" | "read_file" => exec_read(impl_, topic, body, results),
-        "run" | "sh" => exec_run(impl_, topic, body, results),
-        // ── v0.7 resource management ops ──
-        "spawn" => exec_spawn(impl_, topic, body, results),
-        "procs" => exec_procs(impl_, topic, body, results),
-        "kill" => exec_kill(impl_, topic, body, results),
-        "wait" => exec_wait(impl_, topic, body, results),
-        "exists" => exec_fs_exists(impl_, body),
-        "stat" => exec_fs_stat(impl_, body),
-        "ls" => exec_fs_ls(impl_, body),
-        "rm" => exec_fs_rm(impl_, body),
-        "cp" => exec_fs_cp(impl_, body),
-        "mkdir" => exec_fs_mkdir(impl_, body),
-        "disk" => exec_disk(impl_, body),
-        "cache" => Err("cache miss".into()),
-        _ => Ok(Value::Text(format!("<noop: {}>", func))),
+    if is_probe_stub(&func) {
+        return Err("cache miss".into());
+    }
+
+    match step_registry().get(func.as_str()) {
+        // v0.11 fail-closed：未知函数不再假成功（旧 <noop> 会把垃圾当结果污染下游并落库 Ok）。
+        // Err 触发正常降级；清单由注册表自动生成。
+        Some(f) => f(impl_, topic, body, results),
+        None => {
+            let known = known_functions().join("/");
+            if func.is_empty() {
+                Err("impl body has no recognizable function call".into())
+            } else {
+                Err(format!(
+                    "unknown function '{}' — fail-closed (v0.11). Known: {}",
+                    func, known
+                ))
+            }
+        }
     }
 }
 
@@ -1315,71 +1402,141 @@ fn extract_field(field: &str, text: &str) -> Option<String> {
     None
 }
 
-// ── Checks ──
+// ── v0.11 Policy 应用：评价与流程分离的运行时半边 ──
 
-fn run_checks(checks: &[&Check], val: &Value) -> Result<Value, String> {
-    for c in checks {
-        if !eval_cond(&c.cond, val) {
-            return Err(c.msg.clone());
+/// cost_cache 的 measure 值新鲜期（秒）。期内直接用缓存，不重跑测试脚本。
+pub const COST_MEASURE_TTL_SECS: i64 = 86400;
+
+/// 把策略文件的评价数据织入 pipeline：权重覆盖 + cost 来源解析。
+/// Measure 项真实执行测试命令取值（带 cost_cache TTL 缓存），
+/// 解析结果写入 impl.cost —— 排序公式不变，数据来源换了。
+fn apply_policy(pl: &mut Pipeline, policy: &Policy, topic: &str) {
+    pl.weights = policy.weights.clone();
+    eprintln!(
+        "  [policy] weights: latency={} risk={} tokens={:.4} money={}",
+        pl.weights.latency, pl.weights.risk, pl.weights.tokens, pl.weights.money
+    );
+    for proc in &mut pl.procs {
+        for impl_ in &mut proc.plan {
+            let key = format!("{}.{}", proc.name, impl_.name);
+            let Some(spec) = policy.costs.get(&key) else {
+                continue;
+            };
+            for (field, cv) in [
+                ("latency", &spec.latency),
+                ("risk", &spec.risk),
+                ("tokens", &spec.tokens),
+                ("money", &spec.money),
+            ] {
+                let Some(cv) = cv else { continue };
+                let (proc_name, impl_name) = split_key(&key);
+                match resolve_cost_value(cv, proc_name, impl_name, field, topic) {
+                    Some(v) => match field {
+                        "latency" => impl_.cost.latency = v as i64,
+                        "risk" => impl_.cost.risk = v,
+                        "tokens" => impl_.cost.tokens = v as i64,
+                        "money" => impl_.cost.money = v,
+                        _ => {}
+                    },
+                    None => eprintln!(
+                        "  [policy] {}.{}: field {} unresolvable — treated as 0 (sorts last among known)",
+                        key, field, field
+                    ),
+                }
+            }
+            eprintln!(
+                "  [policy] {}: resolved cost latency={} risk={:.3} tokens={} money={:.3}",
+                key, impl_.cost.latency, impl_.cost.risk, impl_.cost.tokens, impl_.cost.money
+            );
         }
-    }
-    Ok(val.clone())
-}
-
-fn eval_cond(cond: &str, val: &Value) -> bool {
-    // Parse "result => predicate" format
-    let cond = cond.trim();
-
-    // Extract predicate name after "=>"
-    let pred_name = if let Some(arrow) = cond.find("=>") {
-        cond[arrow + 2..].trim()
-    } else {
-        cond
-    };
-
-    // Split predicate name and args
-    let (name, _args_str): (&str, &str) = if let Some(open) = pred_name.find('(') {
-        (
-            &pred_name[..open],
-            pred_name[open + 1..].trim_end_matches(')'),
-        )
-    } else {
-        (pred_name, "")
-    };
-
-    let text = val.as_text();
-
-    // Structured result?
-    let is_structured = text.starts_with("§§FIELDS§§");
-    let raw = if is_structured {
-        extract_raw(text)
-    } else {
-        text.to_string()
-    };
-
-    match name {
-        "has_results" | "has_summary" | "has_content" | "valid_output" => raw.len() > 20,
-        "not_empty" => !raw.is_empty(),
-        "has_items" => raw.lines().filter(|l| !l.trim().is_empty()).count() >= 2,
-        "has_citations" => raw.contains("[1]") || raw.contains("[链接") || raw.contains("来源"),
-        "has_date" => (2020..=2030).any(|y| raw.contains(&y.to_string())),
-        "no_error" => !raw.contains("ERROR") && !raw.contains("Error") && !raw.contains("error"),
-        "all_has_url" => raw.contains("http"),
-        "file_exists" | "has_keywords" => raw.len() > 10,
-        "has_field" if is_structured => {
-            // Extract field name from args
-            true // simplified
-        }
-        _ => true, // unknown predicate: pass
     }
 }
 
-fn extract_raw(text: &str) -> String {
-    if let Some(pos) = text.find("§§RAW§§") {
-        text[pos + "§§RAW§§".len()..].to_string()
-    } else {
-        text.to_string()
+/// 解析单个 cost 值：Direct 直接返回；Measure 查缓存（TTL 内）否则执行测试命令。
+/// 取 stdout 第一个浮点数。失败 → None（该字段按 0 兜底并 warning，不 crash）。
+/// "proc.impl" → ("proc", "impl")（只切第一个点；impl 名可含点）。
+fn split_key(key: &str) -> (&str, &str) {
+    match key.find('.') {
+        Some(pos) => (&key[..pos], &key[pos + 1..]),
+        None => (key, ""),
     }
+}
+
+fn resolve_cost_value(
+    cv: &CostValue,
+    proc_name: &str,
+    impl_name: &str,
+    field: &str,
+    topic: &str,
+) -> Option<f64> {
+    match cv {
+        CostValue::Direct(v) => Some(*v),
+        CostValue::Measure(cmd) => {
+            if let Some(v) =
+                db::cost_cache_get_fresh(proc_name, impl_name, field, COST_MEASURE_TTL_SECS)
+            {
+                eprintln!(
+                    "  [policy] {}.{}: measure cache hit = {}",
+                    proc_name, impl_name, v
+                );
+                return Some(v);
+            }
+            let expanded = cmd.replace("{topic}", topic);
+            eprintln!(
+                "  [policy] {}.{}: measuring via: {}",
+                proc_name, impl_name, expanded
+            );
+            let out = Command::new("bash")
+                .arg("-c")
+                .arg(&expanded)
+                .output()
+                .map_err(|e| {
+                    eprintln!("  [policy] measure launch failed: {}", e);
+                    e
+                })
+                .ok()?;
+            if !out.status.success() {
+                eprintln!(
+                    "  [policy] measure script exited {} — stderr: {}",
+                    out.status.code().unwrap_or(-1),
+                    String::from_utf8_lossy(&out.stderr)
+                        .chars()
+                        .take(200)
+                        .collect::<String>()
+                );
+                return None;
+            }
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let v = first_f64(&stdout)?;
+            db::cost_cache_put(proc_name, impl_name, field, v);
+            eprintln!(
+                "  [policy] {}.{}: measured {} = {}",
+                proc_name, impl_name, field, v
+            );
+            Some(v)
+        }
+    }
+}
+
+/// stdout 中第一个浮点数（容忍 "0.21s"、"latency: 123 ms" 等输出）。
+fn first_f64(s: &str) -> Option<f64> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            let mut dot = false;
+            while i < bytes.len() && (bytes[i].is_ascii_digit() || (bytes[i] == b'.' && !dot)) {
+                if bytes[i] == b'.' {
+                    dot = true;
+                }
+                i += 1;
+            }
+            return s[start..i].parse::<f64>().ok().filter(|v| v.is_finite());
+        }
+        i += 1;
+    }
+    None
 }
 
 // ── Ranking ──
@@ -1467,13 +1624,12 @@ fn rank_impls_pref<'a>(
         .map(|i| {
             let base = weights.cost_total(&i.cost);
             let penalty = impl_penalty(recent, &i.name);
-            let rd = impl_rd_surcharge(weights, recent, &i.name);
             let w = if static_mode {
                 1.0
             } else {
                 prefs.get(proc_name, &i.name).max(1e-6)
             };
-            (base * (1.0 + penalty) / w + rd, *i)
+            (base * (1.0 + penalty) / w, *i)
         })
         .collect();
     ranked.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -1483,22 +1639,6 @@ fn rank_impls_pref<'a>(
 /// RD 附加费：weights.rd × 该 impl 近 20 次的平均失真率 est_loss/max(rate_tokens,1)。
 /// 语义：同样 token 预算下，单位信息损耗大的 impl 排后（E7a 准则的运行时形态）。
 /// 无历史记录 = 0（冷启动不惩罚）；rd 权重 0 = 完全关闭（默认）。
-fn impl_rd_surcharge(weights: &Weights, recent: &BTreeMap<String, RecentRuns>, name: &str) -> f64 {
-    if weights.rd <= 0.0 {
-        return 0.0;
-    }
-    match recent.get(name) {
-        None => 0.0,
-        Some(rr) => {
-            if rr.n == 0 {
-                return 0.0;
-            }
-            let loss_rate = rr.sum_loss / (rr.sum_tokens.max(1) as f64);
-            weights.rd * loss_rate
-        }
-    }
-}
-
 fn impl_penalty(recent: &BTreeMap<String, RecentRuns>, name: &str) -> f64 {
     match recent.get(name) {
         None => 0.0,
@@ -1537,28 +1677,12 @@ fn is_eligible(
 
 fn eval_when(
     params: &BTreeMap<String, String>,
-    _results: &BTreeMap<String, Value>,
+    results: &BTreeMap<String, Value>,
     cond: &str,
 ) -> bool {
-    let cond = cond.trim().trim_matches('"');
-    if cond.is_empty() {
-        return true;
-    }
-
-    // var == "value"
-    if let Some(pos) = cond.find("==") {
-        let lhs = cond[..pos].trim();
-        let rhs = cond[pos + 2..].trim().trim_matches('"');
-        return params.get(lhs).map(|v| v == rhs).unwrap_or(false);
-    }
-    // var != "value"
-    if let Some(pos) = cond.find("!=") {
-        let lhs = cond[..pos].trim();
-        let rhs = cond[pos + 2..].trim().trim_matches('"');
-        return params.get(lhs).map(|v| v != rhs).unwrap_or(false);
-    }
-    // bare var: exists and is "true"
-    params.get(cond).map(|v| v == "true").unwrap_or(false)
+    // v0.11.1 Interpreter 模式：条件 → AST（when::Cond）→ 求值。
+    // 落地 SPEC 承诺的裁判路由 .when(@gate.score < 80)；fail-closed：坏条件/缺席裁判不放行。
+    crate::when::eval_cond_str(cond, params, results)
 }
 
 // ── Record I/O (SQLite) ──
@@ -1570,8 +1694,11 @@ fn append_run(
     status: Status,
     _err_hash: Option<&str>,
     _err_at: Option<&str>,
+    latency_ms: i64,
 ) {
-    append_run_rd(proc_name, impl_name, pid, status, _err_hash, _err_at, "");
+    append_run_rd(
+        proc_name, impl_name, pid, status, _err_hash, _err_at, "", latency_ms,
+    );
 }
 
 /// RD-aware append_run: rate_tokens 从 impl 输出文本估算（len/4 ≈ token 数）。
@@ -1585,6 +1712,7 @@ fn append_run_rd(
     _err_hash: Option<&str>,
     _err_at: Option<&str>,
     output_text: &str,
+    latency_ms: i64,
 ) {
     let status_str = match status {
         Status::Ok => "Ok",
@@ -1592,28 +1720,22 @@ fn append_run_rd(
     };
     // rate 代理：输出字符数 / 4（英文 ~4 char/token 的粗估；中文偏保守）
     let rate_tokens = (output_text.chars().count() as i64) / 4;
-    // loss：v1 字段覆盖度（有上游字段与 DSL_RESULT 时）；否则 0——不再用 check 二值兜底，
-    // 否则同一次失败既吃乘法惩罚又吃 RD 加法费（双重计费）。
-    let est_loss = est_loss_v0(output_text, &status).unwrap_or(0.0);
+    // v0.11: est_loss 死路移除（原 est_loss_v0 恒返 None，从未接线）。
+    // latency_ms 从 exec_proc/exec_foreach_proc 的 Instant 实测传入——这是
+    // 「cost 从测量来」的地基：后续可按 runs 表实测 EMA 排序。
     db::record_run_rd(
         proc_name,
         impl_name,
         "",
         status_str,
-        0,
+        latency_ms,
         _err_hash,
         _err_at,
         rate_tokens,
-        est_loss,
+        0.0,
     );
     // Keep pid logging for backwards compat in stderr
     let _ = pid;
-}
-
-/// est_loss 证据函数：当前无 v1 上游字段上下文传入（调用点未接线），
-/// 返回 None = 无结构化证据 → RD 域不计费。
-fn est_loss_v0(_output_text: &str, _status: &Status) -> Option<f64> {
-    None
 }
 
 fn load_recent_runs(proc_name: &str) -> BTreeMap<String, RecentRuns> {
@@ -1799,63 +1921,6 @@ mod tests {
         assert_eq!(expand_tilde("/absolute/path"), "/absolute/path");
     }
 
-    // ── eval_cond (check predicates) ──
-    #[test]
-    fn eval_cond_has_results_long() {
-        let val = Value::Text("This is a long enough result text!".into());
-        assert!(eval_cond("result => has_results", &val));
-    }
-
-    #[test]
-    fn eval_cond_has_results_short() {
-        let val = Value::Text("short".into());
-        assert!(!eval_cond("result => has_results", &val));
-    }
-
-    #[test]
-    fn eval_cond_not_empty() {
-        assert!(eval_cond("result => not_empty", &Value::Text("x".into())));
-        assert!(!eval_cond("result => not_empty", &Value::Text("".into())));
-    }
-
-    #[test]
-    fn eval_cond_has_items() {
-        let val = Value::Text("line1\nline2\nline3".into());
-        assert!(eval_cond("result => has_items", &val));
-    }
-
-    #[test]
-    fn eval_cond_has_items_too_few() {
-        let val = Value::Text("only one".into());
-        assert!(!eval_cond("result => has_items", &val));
-    }
-
-    #[test]
-    fn eval_cond_has_date() {
-        let val = Value::Text("Published in 2024".into());
-        assert!(eval_cond("result => has_date", &val));
-    }
-
-    #[test]
-    fn eval_cond_no_error() {
-        assert!(eval_cond(
-            "result => no_error",
-            &Value::Text("all good".into())
-        ));
-        assert!(!eval_cond(
-            "result => no_error",
-            &Value::Text("ERROR occurred".into())
-        ));
-    }
-
-    #[test]
-    fn eval_cond_unknown_predicate_passes() {
-        assert!(eval_cond(
-            "result => unknown_pred",
-            &Value::Text("x".into())
-        ));
-    }
-
     // ── eval_when ──
     #[test]
     fn eval_when_eq_true() {
@@ -1922,10 +1987,6 @@ mod tests {
         // 全丢 → 1
         let none = "x\n##DSL_RESULT\nother=1\n##DSL_END";
         assert_eq!(est_loss_field_coverage(&up, none), Some(1.0));
-        // 反双重计费：Fail 无结构化证据 → est_loss = 0（失败只由 fail-rate 惩罚计费）
-        let status = Status::Fail;
-        assert_eq!(est_loss_v0("raw error output", &status), None);
-        assert_eq!(est_loss_v0("raw error output", &status).unwrap_or(0.0), 0.0);
         // 无 DSL_RESULT → None（退回 v0）
         assert_eq!(est_loss_field_coverage(&up, "plain text"), None);
         // 上游无字段 → None
@@ -2192,61 +2253,6 @@ mod tests {
         assert_eq!(ranked[0].name, "expensive");
     }
 
-    #[test]
-    fn rank_impls_rd_surcharge_reorders() {
-        // rd=0（默认）：cheap 在前；rd>0 且 cheap 失真率高：expensive 在前
-        let impls_cost = |name: &str, latency: i64| Impl {
-            name: name.into(),
-            cost: Cost {
-                latency,
-                risk: 0.0,
-                tokens: 0,
-                money: 0.0,
-            },
-            ..default_impl()
-        };
-        let a = impls_cost("cheap", 10);
-        let b = impls_cost("expensive", 100);
-        let impls = vec![&a, &b];
-        let mut recent = BTreeMap::new();
-        // cheap: 10 次运行, 200 tokens, est_loss 累计 5.0 → loss_rate = 5/200 = 0.025
-        recent.insert(
-            "cheap".into(),
-            RecentRuns {
-                window: 10,
-                fails: 0,
-                consec_fail: 0,
-                n: 10,
-                sum_tokens: 200,
-                sum_loss: 5.0,
-            },
-        );
-        // expensive: 10 次运行, 2000 tokens, est_loss 累计 2.0 → loss_rate = 2/2000 = 0.001
-        recent.insert(
-            "expensive".into(),
-            RecentRuns {
-                window: 10,
-                fails: 0,
-                consec_fail: 0,
-                n: 10,
-                sum_tokens: 2000,
-                sum_loss: 2.0,
-            },
-        );
-        // rd=0: 纯 cost 排序
-        let w0 = Weights::default();
-        assert_eq!(w0.rd, 0.0);
-        let ranked0 = rank_impls(&w0, &recent, &impls, "cost");
-        assert_eq!(ranked0[0].name, "cheap");
-        // rd=10000: cheap surcharge = 10000×0.025 = 250 ≫ cost 差; expensive = 10000×0.001 = 10
-        let w1 = Weights {
-            rd: 10000.0,
-            ..Weights::default()
-        };
-        let ranked1 = rank_impls(&w1, &recent, &impls, "cost");
-        assert_eq!(ranked1[0].name, "expensive");
-    }
-
     fn default_impl() -> Impl {
         Impl {
             name: String::new(),
@@ -2393,7 +2399,7 @@ mod tests {
             }],
         };
         let params = BTreeMap::new();
-        let result = exec_pipeline("test", &params, &pl);
+        let result = exec_pipeline("test", &params, &pl, None);
         match result {
             ExecResult::Success(map) => {
                 assert!(map.contains_key("p"));

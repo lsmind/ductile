@@ -52,6 +52,7 @@ Pipeline("name", "optional description")
         .tags(#tag3, #tag4)
     )
     .check(result => predicate, "error message")
+    .when(@upstream_judge.score < 80)
     .foreach(source=@upstream_proc, var=item_name)
     .deliver(@upstream_proc)
 ```
@@ -66,6 +67,10 @@ Pipeline("name", "optional description")
 - `.deliver()` 的 proc 不执行，仅标记终端输出
 - 标签用 `#` 前缀，标签集是 BTreeSet（有序、去重）
 - 依赖关系自动推导：body 中 `@proc_name` 引用即声明依赖
+- **`.when(cond)` 两种写法（v0.11.1）**：
+  - 内联（impl 级）：`name -> body.when(cond)` 只作用于该 impl
+  - 块级（proc 级）：`.when(cond)` 独立成行，下推到该 proc 全部未持有内联 when 的 impls；条件里的 `@ref` 并入 refs，egraph 据此建裁判→消费者边（保证裁判先执行）
+  - 块级语法错误（空条件/括号不平衡）= 解析期硬错误，不再静默丢弃
 
 ### 1.4 变量替换规则
 
@@ -308,6 +313,7 @@ ductile version diff <file.pipeline> <v1> <v2>
    - **R1 同构合并**：两 class 的 canonical 节点集一致 → union
    - **R2 merge 扁平化**：merge 节点的传递扁平子集相等 → union（涵盖交换律 `merge(@a,@b)≡merge(@b,@a)`、嵌套折叠 `merge(merge(a,b),c)≡merge(a,b,c)`、退化 `merge(@x)≡x`）
    - **R3 write/read 对消**：`read(from=P)` ≡ `write(to=P, content=@src)` 的 `src`（即 write→read 融合为 pass-through，路径精确匹配，`{topic}` 等占位符原样比较）
+   - **when-载体守卫（v0.11.1）**：挂 `.when()` 的 impl 投影为 when-载体节点，R1/R2/R3 一律不熔合含载体的 class——熔合会抹掉裁判依赖序（judge→consumer 边消失，deliver 抢跑、判决落空）。纯等价 proc 的 CSE 能力不受影响
 3. **提取器**：class 级 Kahn 拓扑（确定性）→ 逐 class 选最小静态 `cost_total` 的 enabled impl；对消 class 中 read 节点降级为缓存路径（class 内存在非 read 节点时不参与首选竞争）
 4. **CSE**：同 class 只执行代表 proc，其余成员共享结果（执行日志 `[egraph]` 行可见 classes/融合命中/别名表）
 
@@ -328,12 +334,12 @@ ductile version diff <file.pipeline> <v1> <v2>
 eligible = plan.filter(impl => when_condition_passes)
 ranked = eligible.sort_by(score)
 
-score(impl) = base_cost × (1 + penalty) + rd_surcharge
+score(impl) = base_cost × (1 + penalty) / pref
 ```
 
 - `base_cost = 0.001×latency + 10×risk + 0.0001×tokens + 1×money`
 - `penalty` 见下表
-- `rd_surcharge = weights.rd × (Σest_loss / max(Σrate_tokens, 1))`（见 3.6）
+- `pref` = 乘性学习权重（成功 ×1.1 / 失败 ÷1.5，clamp [0.05, 20]）
 
 ### 3.3 滑动窗口惩罚
 
@@ -347,35 +353,47 @@ score(impl) = base_cost × (1 + penalty) + rd_surcharge
 | 失败率 > 10% | `e^(7×rate) - 1` | 指数惩罚 |
 | 连续失败 ≥ 3 | `∞` | 永久 BLOCKED |
 
-**惩罚域与失真域分家（反双重计费）**：penalty 只管瞬时故障（可 retry 恢复的失败），est_loss 只管信息质量（重试也不会好的字段丢失）。同一次失败不会同时吃两种惩罚——est_loss 无结构化证据时恒为 0。
+**惩罚域**：penalty 只管瞬时故障（可 retry 恢复的失败）。
 
-### 3.6 RD 附加费（率失真感知排序）
+### 3.7 评价策略（.eval，v0.11「裁判分离」）
 
-每次成功执行自动测量并落库：
+评价与流程分离：`.pipeline` 只描述流程；权重与 cost 来源写在 `.eval` 策略文件，运行时挂载：
+
+```
+ductile run x.pipeline "topic" --policy strict.eval
+```
+
+`.eval` 行式格式（`#`/`//` 注释）：
+
+```
+weights latency=0.001 risk=10.0 tokens=0.0001 money=1.0
+fail_closed = true
+render.sdxl cost latency=measure("pipelines/bench_sdxl.sh {topic}") risk=0.05
+render.flux  cost latency=5000.0
+```
+
+- cost 值两形态：直接数值，或 `measure("命令")` 链接测试脚本——引擎执行脚本取 stdout 第一个浮点数（**latency 单位：毫秒**），按 `(proc, impl, field)` 缓存进 `cost_cache` 表，TTL 24h
+- 未挂载 `--policy` 时用引擎默认权重与 `.plan()` 顺序（不读 `.cost()`——v0.11 起 `.cost()/.check()/.ensure()` 均退役，解析期警告+忽略）
+- 幽灵 impl 防御：`.plan()` 内非 `name ->` 条目（如旧 SPEC 幻觉语法 `weights(rd=N)`）现在硬错误，不再静默生成 path_N 假成功
+- 未知函数 fail-closed：`<noop>` 假成功已删除，不可识别的函数体触发 Err 正常降级
+- 质量门槛新形态：独立 judge proc 输出 `##DSL_RESULT` 结构化字段 + `.when(@judge.score < 80)` 路由（`.when` fail-closed）
+
+### 3.6 运行测量（v0.11 接线）
+
+每次执行自动测量并落库：
 
 - `rate_tokens` = 输出字符数 / 4（token 代理）
-- `est_loss` = **v1 字段覆盖度**：上游字段集 `F_up`（body 中 `@dep` 引用的上游 DSL_RESULT 字段并集）与输出字段集 `F_out` 的保留度 `1 − |F_up ∩ F_out| / |F_up|`；**无结构化证据（上游无字段或输出无 DSL_RESULT）时 = 0.0，不用 check 二值兜底**
-
-排序时（窗口内聚合）：
-
-```
-rd_surcharge = weights.rd × (Σest_loss / max(Σrate_tokens, 1))
-```
-
-- `weights.rd`（λ_rd）默认 `0.0` = 完全关闭（行为同 v4.0）；可在 `.plan()` 内 `weights(rd = N)` 设置
-- 语义：同样 token 预算下单位信息损耗大的 impl 排后——"快但丢字段"不再无条件赢
-- 冷启动（无历史记录）不惩罚
+- `latency_ms` = Instant 实测（v0.10 恒 0，v0.11 起真实值）——"cost 从测量来"的地基
+- `est_loss` v1 字段覆盖度函数保留（`est_loss_field_coverage`），供 judge proc 评测用；排序公式不再使用 RD 附加费（`weights.rd` 已随 v0.11 移除）
 
 ### 3.4 retry
 
 `.retry(n=3)` 失败后等待 `2^(attempt+1)` 秒：2s → 4s → 8s。共尝试 n+1 次。
 
-### 3.5 check 流程
+### 3.5 check 流程（已退役）
 
-impl 执行成功后，运行 proc 级 `.check()` + impl 级 `.ensure()`：
-
-- 全部通过 → proc 成功
-- 任一失败 → 当前 impl 标记 Fail → 尝试下一个 impl
+v0.11 起谓词层退役（裁判与生产分离）：`.check()` / `.ensure()` 解析期降级为警告+忽略，不影响执行。
+质量门槛改用独立 judge proc + `.when` 路由，见 3.7。
 
 ---
 

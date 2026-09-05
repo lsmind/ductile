@@ -1,0 +1,13 @@
+Pipeline("decouple_probe", "验证评价机制与流程描述的耦合现状")
+
+  .proc("fetch")
+    .desc("两条路径，带手写 cost")
+    .plan(
+      a -> run("echo 'AAA result text'")
+        .tags(#run)
+        .cost(latency=100, risk=0.1, tokens=0, money=0),
+      b -> run("echo 'BBB fallback text'")
+        .tags(#run)
+        .cost(latency=500, risk=0.0, tokens=0, money=0)
+    )
+    .check(result => not_empty, "空结果")

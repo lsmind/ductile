@@ -1,0 +1,8 @@
+Pipeline("judge_route")
+
+.proc("gen")
+  .plan(low -> run("echo 'score=72'"), high -> run("echo 'score=85'"))
+
+.proc("deliver")
+  .plan(x -> run("echo DELIVERED"))
+  .when(@gen.score < 80)

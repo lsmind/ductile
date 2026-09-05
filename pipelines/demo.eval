@@ -1,0 +1,7 @@
+// v0.11 验收策略：fast 用测试方法（measure，毫秒），slow 用直接值（毫秒）。
+// 单位约定：latency 一律毫秒（与 runs 表 latency_ms 列一致）。
+// 预期：a 实测 ~200ms < b=5000ms → a 先跑。
+weights latency=0.001 risk=10.0 tokens=0.0001 money=1.0
+fail_closed = true
+pick.a cost latency=measure("pipelines/bench_slow_ms.sh {topic}")
+pick.b cost latency=5000.0

@@ -6,6 +6,7 @@
 pub mod ast;
 pub mod db;
 pub mod egraph;
+pub mod eval;
 pub mod executor;
 pub mod grow;
 pub mod harvest;
@@ -15,6 +16,7 @@ pub mod promote;
 pub mod registry;
 pub mod typecheck;
 pub mod version;
+pub mod when;
 
 pub mod cli;
 
@@ -23,9 +25,13 @@ pub use egraph::{
     build_egraph, critical_path, extract_plan, parallel_groups, EClass, EGraph, ENode,
     ExtractedPlan, UnionFind,
 };
+pub use eval::{cost_source, evaluator, CostCacheStore, CostSource, Evaluator};
 pub use executor::exec_pipeline;
-pub use parser::{parse_pipeline, parse_pipeline_file, ParseError};
+pub use parser::{
+    parse_pipeline, parse_pipeline_file, parse_policy, parse_policy_file, ParseError,
+};
 pub use typecheck::{check_pipeline, TypeError};
+pub use when::{eval_cond_str, parse_when, Cond, Operand};
 
 /// Char-boundary-safe truncation: never splits a multi-byte UTF-8 char.
 /// Byte-slicing (`&s[..n]`) panics when n lands inside a CJK/emoji char —
@@ -123,7 +129,7 @@ fn run(path: &str, topic: &str, params: Option<BTreeMap<String, String>>) -> PyR
         )));
     }
     let params = params.unwrap_or_default();
-    match exec_pipeline(topic, &params, &pl) {
+    match exec_pipeline(topic, &params, &pl, None) {
         ExecResult::Success(results) => {
             let mut out = format!("Pipeline executed successfully ({} procs)\n", results.len());
             for (k, v) in &results {

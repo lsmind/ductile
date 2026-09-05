@@ -77,7 +77,7 @@ web 路径失败 → 自动滑到 mcp → check 不过 → 触发降级。连续
 
 ### e-graph 等价类 + equality saturation（v0.10 新增）
 
-`.pick(egraph)` 一行开启。等价 proc 自动并入同一 e-class（同构合并、merge 交换/结合律、write→read 对消），执行时每 class 只跑一个代表，其余 CSE 共享结果。5 procs 的管线压成 3 classes、少跑 2 次重复计算——多路径选择的数学本体从"贪心排序"升级为"等价类提取"。
+`.pick(egraph)` 一行开启。等价 proc 自动并入同一 e-class（同构合并、merge 交换/结合律、write→read 对消），执行时每 class 只跑一个代表，其余 CSE 共享结果。5 procs 的管线压成 3 classes、少跑 2 次重复计算——多路径选择的数学本体从"贪心排序"升级为"等价类提取"。**when-载体守卫（v0.11.1）**：挂 `.when()` 裁判路由的 impl 不参与熔合——否则 judge→consumer 依赖边会被抹掉，deliver 抢跑、判决落空。
 
 ```bash
 ductile graph your.pipeline   # 看 e-class 明细 / 融合规则命中 / CSE 别名 / 静态提取计划
@@ -91,9 +91,11 @@ ductile graph your.pipeline   # 看 e-class 明细 / 融合规则命中 / CSE �
 
 每个路径保留最近 20 次记录。失败率 > 10% → 指数惩罚。连续失败 3 次 → 自动 BLOCKED。不需要手调参数。
 
-### 率失真感知排序（RD）
+### 评价与流程分离（裁判分离）
 
-快但有损的路径不再无条件赢。每次执行自动测量 token 消耗（rate）与字段保留度（est_loss），排序时按 `weights.rd × (Σest_loss / Σrate_tokens)` 加附加费——同样预算下信息损耗大的路径排后。默认关闭（`weights.rd = 0`），惩罚域（瞬时故障）与失真域（信息质量）分家计费，互不重复。
+**评价与流程分离（v0.11「裁判分离」）**：`.pipeline` 只描述流程；权重与 cost 来源写在 `.eval` 策略文件，`ductile run x.pipeline "topic" --policy p.eval` 挂载。cost 支持两形态：直接数值，或 `latency=measure("bench.sh {topic}")` 链接测试脚本实测取值（缓存 24h）。`.cost()/.check()/.ensure()` 已退役——质量门槛改用独立 judge proc（输出 `##DSL_RESULT score=N`）+ `.when(@judge.score < 80)` 路由；未知函数 fail-closed（`<noop>` 假成功已删除）。执行实测 latency_ms 落库。
+
+`.when(cond)` 支持两种写法（v0.11.1）：内联（`x -> body.when(cond)`，impl 级）与块级（`.when(cond)` 独立成行，下推到该 proc 全部 impls，内联优先）。块级条件里的 `@judge.field` 引用自动建 DAG 边保证裁判先执行；求值 fail-closed（坏条件/缺席裁判不放行）。实测：`score=72` → deliver 放行；`score=85` → `All paths failed for proc: deliver` + degraded 置位（exit 1）。
 
 ### Check 硬门槛
 

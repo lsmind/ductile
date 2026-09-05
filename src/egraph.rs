@@ -101,6 +101,10 @@ impl UnionFind {
 pub struct ENode {
     pub op: String,
     pub children: Vec<usize>,
+    /// v0.11.1 裁判路由载体标记：impl 挂 .when() 即 true。when-载体节点不参与
+    /// 任何熔合（同构/merge 扁平化/write-read 对消）——熔合会抹掉裁判依赖序，
+    /// 导致 deliver 抢在 gen 前执行、判决落空。
+    pub when_guard: bool,
 }
 
 /// E-class：等价 proc 的集合 + 其全部等价实现（e-nodes）+ 节点来源。
@@ -145,6 +149,7 @@ impl EGraph {
         ENode {
             op: node.op.clone(),
             children: node.children.iter().map(|c| self.uf.find_imm(*c)).collect(),
+            when_guard: node.when_guard,
         }
     }
 
@@ -295,7 +300,14 @@ pub fn build_egraph(pl: &Pipeline) -> EGraph {
     for proc in &pl.procs {
         let class_id = eg.proc_class[&proc.name];
         for (idx, impl_) in proc.plan.iter().enumerate() {
-            let refs = body_refs(&impl_.body_text);
+            // v0.11.1 重构：以 parser 计算的 refs 为准（含 .when() 裁判路由依赖），
+            // 并集 body 重提取——手工构造的测试 AST 可能 refs 为空。
+            let mut refs = impl_.refs.clone();
+            for r in body_refs(&impl_.body_text) {
+                if !refs.contains(&r) {
+                    refs.push(r);
+                }
+            }
             for r in &refs {
                 if pl.procs.iter().any(|p| &p.name == r) && r != &proc.name {
                     if edges_seen.insert((r.clone(), proc.name.clone())) {
@@ -310,6 +322,7 @@ pub fn build_egraph(pl: &Pipeline) -> EGraph {
             let node = ENode {
                 op: body_op(&impl_.body_text),
                 children,
+                when_guard: impl_.when.is_some(),
             };
             eg.add_node_raw(class_id, node.clone(), (proc.name.clone(), idx));
         }
@@ -336,6 +349,12 @@ fn saturate(eg: &mut EGraph, pl: &Pipeline) {
 
 // ── R1: 同构合并 ──
 
+/// v0.11.1：class 是否含裁判路由载体节点（.when 挂身的 impl 投影）。
+fn class_has_when_guard(eg: &EGraph, cid: usize) -> bool {
+    let canon = eg.uf.find_imm(cid);
+    eg.classes[canon].nodes.iter().any(|n| n.when_guard)
+}
+
 /// 两 canonical class 的节点集（canon 化、排序去重后）完全一致 → union。
 fn union_isomorphic_classes(eg: &mut EGraph) -> bool {
     let mut changed = false;
@@ -359,6 +378,10 @@ fn union_isomorphic_classes(eg: &mut EGraph) -> bool {
             }
             if let Some(&other) = sig_map.get(&sig) {
                 if eg.uf.find_imm(id) != eg.uf.find_imm(other) {
+                    // v0.11.1：任一侧含 when-载体 → 不熔合（裁判路由 impl 语义不等价）。
+                    if class_has_when_guard(eg, id) || class_has_when_guard(eg, other) {
+                        continue;
+                    }
                     eg.merge_classes(other, id);
                     *eg.fusion_hits.entry("isomorphic_union").or_insert(0) += 1;
                     changed = true;
@@ -464,6 +487,10 @@ fn flatten_merge_nodes(eg: &mut EGraph) -> bool {
             if sig.len() == 1 {
                 let only = *sig.iter().next().unwrap();
                 if eg.uf.find_imm(cid) != eg.uf.find_imm(only) {
+                    // v0.11.1：when-载体不参与退化合并。
+                    if class_has_when_guard(eg, cid) || class_has_when_guard(eg, only) {
+                        continue;
+                    }
                     eg.merge_classes(cid, only);
                     *eg.fusion_hits.entry("merge_flatten").or_insert(0) += 1;
                     changed = true;
@@ -475,6 +502,10 @@ fn flatten_merge_nodes(eg: &mut EGraph) -> bool {
             match groups.get(&sig) {
                 Some(&other) => {
                     if eg.uf.find_imm(cid) != eg.uf.find_imm(other) {
+                        // v0.11.1：when-载体不参与扁平化合并。
+                        if class_has_when_guard(eg, cid) || class_has_when_guard(eg, other) {
+                            continue;
+                        }
                         eg.merge_classes(other, cid);
                         *eg.fusion_hits.entry("merge_flatten").or_insert(0) += 1;
                         changed = true;
@@ -545,6 +576,13 @@ fn cancel_write_read(eg: &mut EGraph, pl: &Pipeline) -> bool {
                     if let Some(src) = wsrc {
                         let sc = eg.proc_class[src];
                         if eg.uf.find_imm(*rc) != eg.uf.find_imm(sc) {
+                            // v0.11.1：when-载体不参与 write-read 对消。
+                            if class_has_when_guard(eg, *rc)
+                                || class_has_when_guard(eg, *wc)
+                                || class_has_when_guard(eg, sc)
+                            {
+                                continue;
+                            }
                             eg.merge_classes(*rc, sc);
                             *eg.fusion_hits.entry("write_read_cancel").or_insert(0) += 1;
                             changed = true;
@@ -1010,6 +1048,62 @@ mod tests {
             mk_proc("reader", vec![mk_impl("r1", "read(from=\"out/b.md\")", 3)]),
         ]);
         let mut eg = build_egraph(&pl);
+        assert!(!eg.is_unified_pub(eg.proc_class["reader"], eg.proc_class["gen"]));
+    }
+
+    // ── v0.11.1 裁判路由守卫 ──
+
+    #[test]
+    fn when_carrier_blocks_isomorphic_fusion() {
+        // gen 与 deliver 的 impl 均为 echo 形态（同构），但 deliver 挂 .when(@gen.score<80)
+        // ——熔合会抹掉裁判依赖序，必须拒绝。
+        let mut deliver = mk_impl("x", "run(\"echo DELIVERED\")", 1);
+        deliver.when = Some("@gen.score < 80".into());
+        deliver.refs = vec!["gen".into()];
+        let pl = mk_pipeline(vec![
+            mk_proc("gen", vec![mk_impl("high", "run(\"echo 'score=85'\")", 1)]),
+            mk_proc("deliver", vec![deliver]),
+        ]);
+        let mut eg = build_egraph(&pl);
+        assert_eq!(eg.fusion_hits.get("isomorphic_union"), None);
+        assert!(!eg.is_unified_pub(eg.proc_class["gen"], eg.proc_class["deliver"]));
+        // 裁判边保留 → 分层正确：gen 先于 deliver
+        let groups = parallel_groups(&eg);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0], vec!["gen".to_string()]);
+        assert_eq!(groups[1], vec!["deliver".to_string()]);
+    }
+
+    #[test]
+    fn no_when_still_fuses_isomorphic() {
+        // 对照组：同构 impl 双方均无 when → 熔合照常（CSE 能力不受影响）。
+        let pl = mk_pipeline(vec![
+            mk_proc("a", vec![mk_impl("x", "run(\"echo SAME\")", 1)]),
+            mk_proc("b", vec![mk_impl("y", "run(\"echo SAME\")", 1)]),
+        ]);
+        let eg = build_egraph(&pl);
+        assert_eq!(eg.fusion_hits.get("isomorphic_union"), Some(&1));
+    }
+
+    #[test]
+    fn when_carrier_blocks_write_read_cancel() {
+        // write 侧挂 when → 对消被守卫拒绝（对消会隐式改写裁判消费者的数据源）。
+        let mut writer = mk_impl("w1", "write(to=\"out/{topic}.md\", content=@gen)", 5);
+        writer.when = Some("@gen.score < 80".into());
+        writer.refs = vec!["gen".into()];
+        let pl = mk_pipeline(vec![
+            mk_proc(
+                "gen",
+                vec![mk_impl("g1", "llm(template=\"write doc\")", 50)],
+            ),
+            mk_proc("writer", vec![writer]),
+            mk_proc(
+                "reader",
+                vec![mk_impl("r1", "read(from=\"out/{topic}.md\")", 3)],
+            ),
+        ]);
+        let mut eg = build_egraph(&pl);
+        assert_eq!(eg.fusion_hits.get("write_read_cancel"), None);
         assert!(!eg.is_unified_pub(eg.proc_class["reader"], eg.proc_class["gen"]));
     }
 

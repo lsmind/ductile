@@ -1,0 +1,8 @@
+Pipeline("policy_probe")
+
+.proc("pick")
+  .plan(
+    a -> run("echo fast-real"),
+    b -> run("echo slow-declared")
+  )
+  .pick(by=cost)

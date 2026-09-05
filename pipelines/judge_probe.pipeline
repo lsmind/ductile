@@ -1,0 +1,9 @@
+Pipeline("judge_probe", "裁判恒真漏洞：引擎不存在的谓词是否放行")
+
+  .proc("fetch")
+    .plan(
+      a -> run("echo 'garbage output, no score at all'")
+        .tags(#run)
+    )
+    .check(result => num_gt("score", 80), "分数必须超过80")
+    .check(result => field_eq("status", "ok"), "状态必须是ok")
