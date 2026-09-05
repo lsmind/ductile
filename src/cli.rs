@@ -134,8 +134,139 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             cmd_patch_set(&args[2], &args[3], &args[4], &args[5], &args[6])
         }
 
+        // v0.12 script contract line — 脚本即 API
+        "script" if args.len() >= 3 && args[2] == "attach" && args.len() >= 4 => {
+            cmd_script_attach(&args[3])
+        }
+        "script" if args.len() >= 3 && args[2] == "detach" && args.len() >= 4 => {
+            cmd_script_detach(&args[3])
+        }
+        "script" if args.len() >= 3 && args[2] == "list" => cmd_script_list(),
+        "script" if args.len() >= 3 && args[2] == "show" && args.len() >= 4 => {
+            cmd_script_show(&args[3])
+        }
+        "script" if args.len() >= 3 && args[2] == "call" && args.len() >= 5 => {
+            cmd_script_call(&args[3], &args[4])
+        }
+
         _ => {
             print_usage();
+            Ok(1)
+        }
+    }
+}
+
+// ── v0.12 script contract line — 脚本即 API ──
+
+fn cmd_script_attach(path: &str) -> Result<i32, String> {
+    let source =
+        std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {}", path, e))?;
+    let card = crate::script::parse_contract(&source, path)?;
+    crate::db::script_attach(&card)?;
+    println!(
+        "attached: {} (lang={}, pure={}, idempotent={}, concurrency={}, effects={})",
+        card.name,
+        card.lang,
+        card.pure,
+        card.idempotent,
+        card.concurrency.as_str(),
+        card.effects
+    );
+    Ok(0)
+}
+
+fn cmd_script_detach(name: &str) -> Result<i32, String> {
+    if crate::db::script_detach(name) {
+        println!("detached: {}", name);
+        Ok(0)
+    } else {
+        eprintln!("script '{}' not found", name);
+        Ok(1)
+    }
+}
+
+fn cmd_script_list() -> Result<i32, String> {
+    let scripts = crate::db::script_list();
+    if scripts.is_empty() {
+        println!("no scripts attached — ductile script attach <file>");
+        return Ok(0);
+    }
+    println!(
+        "{:<18} {:<8} {:<5} {:<11} {:<10} {}",
+        "NAME", "LANG", "PURE", "IDEMPOTENT", "CONCUR", "EFFECTS"
+    );
+    for c in &scripts {
+        println!(
+            "{:<18} {:<8} {:<5} {:<11} {:<10} {}",
+            c.name,
+            c.lang,
+            c.pure,
+            c.idempotent,
+            c.concurrency.as_str(),
+            c.effects
+        );
+    }
+    Ok(0)
+}
+
+fn cmd_script_show(name: &str) -> Result<i32, String> {
+    let c = match crate::db::script_get(name) {
+        Some(c) => c,
+        None => {
+            eprintln!("script '{}' not found", name);
+            return Ok(1);
+        }
+    };
+    println!("script: {}", c.name);
+    println!("  desc:         {}", c.desc);
+    println!("  path:         {}", c.path);
+    println!("  lang:         {}", c.lang);
+    println!(
+        "  params:       {}",
+        if c.params.is_empty() {
+            "(none)"
+        } else {
+            &c.params
+        }
+    );
+    println!("  output:       {}", c.output);
+    println!("  pure:         {}", c.pure);
+    println!("  idempotent:   {}", c.idempotent);
+    println!("  concurrency:  {}", c.concurrency.as_str());
+    println!("  effects:      {}", c.effects);
+    println!("  timeout:      {}s", c.timeout_secs);
+    println!("  retries:      {}", c.retries);
+    println!("  cse_safe:     {}", crate::script::cse_safe(&c));
+    Ok(0)
+}
+
+/// 单发调用（绕过 pipeline，调试用）：ductile script call <name> "k=v, k=v"
+fn cmd_script_call(name: &str, kv: &str) -> Result<i32, String> {
+    let body = if kv.trim().is_empty() {
+        format!("script({})", name)
+    } else {
+        format!("script({}, {})", name, kv)
+    };
+    let impl_ = Impl {
+        name: "cli_call".into(),
+        description: String::new(),
+        tags: BTreeSet::new(),
+        cost: Cost::default(),
+        enabled: true,
+        when: None,
+        refs: Vec::new(),
+        body_text: body.clone(),
+        stub: false,
+        retry: 0,
+        ensure: Vec::new(),
+    };
+    match crate::executor::exec_script_call(&impl_, "", &body, &BTreeMap::new()) {
+        Ok(v) => {
+            println!("{:?}", v);
+            Ok(0)
+        }
+        Err(e) => {
+            eprintln!("{}", e);
             Ok(1)
         }
     }
@@ -175,6 +306,13 @@ fn print_usage() {
     eprintln!("  patch <pipeline> <proc> <impl> <field> <value>");
     eprintln!("  patch list");
     eprintln!("  patch clear <pipeline>");
+    eprintln!();
+    eprintln!("Script contracts (v0.12 — 脚本即 API):");
+    eprintln!("  script attach <file>    Register script (parses # ductile: contract header)");
+    eprintln!("  script list             Show attached scripts");
+    eprintln!("  script show <name>      Show contract card (LLM reads this, not the script)");
+    eprintln!("  script call <name> \"k=v, k=v\"   One-off invoke (debug)");
+    eprintln!("  script detach <name>    Unregister");
 }
 
 // ── run ──

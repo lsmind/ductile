@@ -528,6 +528,8 @@ fn step_registry() -> BTreeMap<&'static str, StepFn> {
         "disk",
         Box::new(|i: &Impl, _t: &str, b: &str, _r: &BTreeMap<String, Value>| exec_disk(i, b)),
     );
+    // v0.12 脚本契约线：script(name, k=v...) — 脚本即 API
+    m.insert("script", Box::new(exec_script_call));
     m
 }
 
@@ -539,6 +541,235 @@ fn is_probe_stub(func: &str) -> bool {
 /// 已知函数清单（由注册表键自动生成——清单即表，不可能漂移）。
 pub fn known_functions() -> Vec<&'static str> {
     step_registry().keys().copied().collect()
+}
+
+// ── v0.12 脚本契约执行线 ──
+
+/// script(name, k=v...) 执行：
+/// 1. 契约卡从 scripts 表加载（fail-closed：未注册的脚本名硬错并列出已注册清单）
+/// 2. DSL 里的 k=v 覆盖契约 params 默认值；`@proc.field` 引用上游结果
+/// 3. 契约头里遗漏的必填参数硬错；未声明的幻觉参数也硬错（契约即接口）
+/// 4. 解释器由 lang 决定；timeout/retries 走契约
+/// 5. 输出复用 ##DSL_RESULT 协议（脚本自己 echo 结构化字段）
+pub fn exec_script_call(
+    _impl_: &Impl,
+    topic: &str,
+    body: &str,
+    results: &BTreeMap<String, Value>,
+) -> Result<Value, String> {
+    let (name, args) = crate::script::parse_script_body(body)?;
+
+    let card = crate::db::script_get(&name).ok_or_else(|| {
+        let known: Vec<String> = crate::db::script_list()
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
+        if known.is_empty() {
+            format!(
+                "script '{}' not attached — register first: ductile script attach <file>",
+                name
+            )
+        } else {
+            format!(
+                "script '{}' not attached. Attached scripts: {}",
+                name,
+                known.join(", ")
+            )
+        }
+    })?;
+
+    // 契约 params 解析：`name(spec)` 按括号分组（spec 内的逗号不切分），
+    // 再从 spec 里提取 required / default=X
+    let mut declared: BTreeMap<String, String> = BTreeMap::new(); // name -> default(""=无)
+    let mut required: Vec<String> = Vec::new();
+    {
+        let mut parts: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        let mut depth = 0i32;
+        for c in card.params.chars() {
+            match c {
+                '(' => {
+                    depth += 1;
+                    cur.push(c);
+                }
+                ')' => {
+                    depth -= 1;
+                    cur.push(c);
+                }
+                ',' if depth == 0 => {
+                    parts.push(cur.clone());
+                    cur.clear();
+                }
+                _ => cur.push(c),
+            }
+        }
+        if !cur.trim().is_empty() {
+            parts.push(cur);
+        }
+        for part_raw in parts {
+            let part = part_raw.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let pname = part.split('(').next().unwrap_or(part).trim().to_string();
+            if pname.is_empty() {
+                continue;
+            }
+            let spec = part
+                .find('(')
+                .map(|i| part[i + 1..].trim_end_matches(')').trim().to_string())
+                .unwrap_or_default();
+            if spec.split(',').any(|s| s.trim() == "required") {
+                required.push(pname.clone());
+            }
+            if let Some(di) = spec.find("default=") {
+                let dv = spec[di + "default=".len()..].trim().to_string();
+                declared.insert(pname.clone(), dv);
+            } else {
+                declared.entry(pname.clone()).or_default();
+            }
+        }
+    }
+
+    // 调用参数合并：`@proc.field` 引用上游结果，其余走变量解析
+    let mut call_args: BTreeMap<String, String> = BTreeMap::new();
+    for (k, v) in &args {
+        let resolved = if let Some(stripped) = v.strip_prefix('@') {
+            match results.get(stripped) {
+                Some(Value::Text(t)) => t.clone(),
+                Some(Value::File(f)) => f.clone(),
+                _ => String::new(),
+            }
+        } else {
+            resolve_vars(v, topic, results)
+        };
+        call_args.insert(k.clone(), resolved);
+    }
+
+    // 必填参数校验（fail-closed）
+    for req in &required {
+        match call_args.get(req) {
+            None => {
+                return Err(format!(
+                    "script '{}': missing required param '{}' (contract params: {})",
+                    name, req, card.params
+                ))
+            }
+            Some(v) if v.is_empty() => {
+                return Err(format!(
+                    "script '{}': required param '{}' is empty",
+                    name, req
+                ))
+            }
+            _ => {}
+        }
+    }
+    // 未在契约声明的参数 → 硬错（契约即接口，防止调用方幻觉传参）
+    for k in call_args.keys() {
+        if !declared.contains_key(k) {
+            return Err(format!(
+                "script '{}': param '{}' not in contract (declared: {})",
+                name, k, card.params
+            ));
+        }
+    }
+
+    // env 传参：DUCTILE_ARG_<NAME>、DUCTILE_TOPIC；脚本侧 getenv 取参
+    let interp = crate::script::lang_interpreter(&card.lang)?;
+    let mut command = Command::new(interp);
+    command.arg(&card.path);
+    for (k, v) in &call_args {
+        command.env(format!("DUCTILE_ARG_{}", k.to_uppercase()), v);
+    }
+    // 未给的参数也传空串（脚本侧可区分"给了空值"与"没这个参数"）
+    for (k, v) in &declared {
+        if !call_args.contains_key(k) {
+            command.env(format!("DUCTILE_ARG_{}", k.to_uppercase()), v.clone());
+        }
+    }
+    command.env("DUCTILE_TOPIC", topic);
+    let timeout_secs = card.timeout_secs.max(1);
+
+    eprintln!(
+        "    -> script: {} (lang={}, timeout={}s, retries={})",
+        name, card.lang, timeout_secs, card.retries
+    );
+
+    use std::process::Stdio;
+    let mut last_err = String::new();
+    for attempt in 0..=card.retries {
+        let mut child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("script '{}' launch failed: {}", name, e))?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        let status;
+        loop {
+            match child.try_wait() {
+                Ok(Some(s)) => {
+                    status = s;
+                    break;
+                }
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(format!(
+                            "script '{}' timed out after {}s",
+                            name, timeout_secs
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => return Err(format!("script '{}' wait failed: {}", name, e)),
+            }
+        }
+
+        // 先收全 stdout/stderr 再判断成功与否
+        let mut stdout_buf = Vec::new();
+        if let Some(mut io) = child.stdout.take() {
+            use std::io::Read;
+            let _ = io.read_to_end(&mut stdout_buf);
+        }
+        let mut stderr_buf = Vec::new();
+        if let Some(mut io) = child.stderr.take() {
+            use std::io::Read;
+            let _ = io.read_to_end(&mut stderr_buf);
+        }
+        let stdout_text = String::from_utf8_lossy(&stdout_buf).to_string();
+
+        if status.success() {
+            // ##DSL_RESULT 协议复用（脚本 echo 结构化字段）
+            if let Some(kvs) = parse_dsl_result_block(&stdout_text) {
+                if !kvs.is_empty() {
+                    eprintln!("    -> script result: {} fields", kvs.len());
+                    return Ok(Value::Text(encode_structured_result(&kvs, &stdout_text)));
+                }
+            }
+            let trimmed = if stdout_text.len() > 5000 {
+                format!("{}...[truncated]", crate::trunc_chars(&stdout_text, 5000))
+            } else {
+                stdout_text
+            };
+            return Ok(Value::Text(trimmed));
+        }
+
+        last_err = format!(
+            "script '{}' failed (exit {:?}): {}",
+            name,
+            status.code(),
+            String::from_utf8_lossy(&stderr_buf)
+                .chars()
+                .take(300)
+                .collect::<String>()
+        );
+        eprintln!("    -> retry {}/{} after 2s", attempt + 1, card.retries);
+        if attempt < card.retries {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    }
+    Err(last_err)
 }
 
 fn run_impl_steps(

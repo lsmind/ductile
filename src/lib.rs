@@ -14,6 +14,7 @@ pub mod learn;
 pub mod parser;
 pub mod promote;
 pub mod registry;
+pub mod script;
 pub mod typecheck;
 pub mod version;
 pub mod when;

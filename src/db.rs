@@ -95,6 +95,21 @@ pub fn init_db() {
             value       REAL NOT NULL,
             measured_at INTEGER NOT NULL,
             PRIMARY KEY (proc_name, impl_name, field)
+        );
+        CREATE TABLE IF NOT EXISTS scripts (
+            name        TEXT PRIMARY KEY,
+            path        TEXT NOT NULL,
+            lang        TEXT NOT NULL,
+            desc        TEXT NOT NULL,
+            params      TEXT NOT NULL DEFAULT '',
+            output      TEXT NOT NULL DEFAULT '',
+            pure        INTEGER NOT NULL DEFAULT 0,
+            idempotent  INTEGER NOT NULL DEFAULT 0,
+            concurrency TEXT NOT NULL DEFAULT 'serial',
+            effects     TEXT NOT NULL DEFAULT '',
+            timeout_secs INTEGER NOT NULL DEFAULT 300,
+            retries     INTEGER NOT NULL DEFAULT 0,
+            attached_at TEXT DEFAULT (datetime('now'))
         );",
     )
     .expect("init_db failed");
@@ -724,6 +739,108 @@ pub fn search_fts(query: &str, limit: usize) -> Vec<FtsRow> {
     .unwrap()
     .filter_map(|r| r.ok())
     .collect()
+}
+
+// ── v0.12 脚本契约库（脚本即 API） ──
+
+use crate::script::{Concurrency, ScriptCard};
+
+/// 注册（upsert）脚本契约。契约解析已在 script::parse_contract 完成。
+pub fn script_attach(card: &ScriptCard) -> Result<(), String> {
+    let conn = open();
+    conn.execute(
+        "INSERT INTO scripts (name, path, lang, desc, params, output, pure, idempotent,
+                              concurrency, effects, timeout_secs, retries)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+         ON CONFLICT(name) DO UPDATE SET
+            path=excluded.path, lang=excluded.lang, desc=excluded.desc,
+            params=excluded.params, output=excluded.output, pure=excluded.pure,
+            idempotent=excluded.idempotent, concurrency=excluded.concurrency,
+            effects=excluded.effects, timeout_secs=excluded.timeout_secs,
+            retries=excluded.retries, attached_at=datetime('now')",
+        rusqlite::params![
+            card.name,
+            card.path,
+            card.lang,
+            card.desc,
+            card.params,
+            card.output,
+            card.pure as i64,
+            card.idempotent as i64,
+            card.concurrency.as_str(),
+            card.effects,
+            card.timeout_secs as i64,
+            card.retries as i64,
+        ],
+    )
+    .map_err(|e| format!("script_attach failed: {}", e))?;
+    Ok(())
+}
+
+pub fn script_detach(name: &str) -> bool {
+    let conn = open();
+    conn.execute("DELETE FROM scripts WHERE name = ?1", [name])
+        .map(|n| n > 0)
+        .unwrap_or(false)
+}
+
+pub fn script_get(name: &str) -> Option<ScriptCard> {
+    let conn = open();
+    conn.query_row(
+        "SELECT name, path, lang, desc, params, output, pure, idempotent,
+                concurrency, effects, timeout_secs, retries
+         FROM scripts WHERE name = ?1",
+        [name],
+        |r| {
+            Ok(ScriptCard {
+                name: r.get(0)?,
+                path: r.get(1)?,
+                lang: r.get(2)?,
+                desc: r.get(3)?,
+                params: r.get(4)?,
+                output: r.get(5)?,
+                pure: r.get::<_, i64>(6)? != 0,
+                idempotent: r.get::<_, i64>(7)? != 0,
+                concurrency: Concurrency::parse(&r.get::<_, String>(8)?)
+                    .unwrap_or(Concurrency::Serial),
+                effects: r.get(9)?,
+                timeout_secs: r.get::<_, i64>(10)? as u64,
+                retries: r.get::<_, i64>(11)? as usize,
+            })
+        },
+    )
+    .ok()
+}
+
+pub fn script_list() -> Vec<ScriptCard> {
+    let conn = open();
+    let mut stmt = conn
+        .prepare(
+            "SELECT name, path, lang, desc, params, output, pure, idempotent,
+                    concurrency, effects, timeout_secs, retries
+             FROM scripts ORDER BY name",
+        )
+        .expect("script_list failed");
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(ScriptCard {
+                name: r.get(0)?,
+                path: r.get(1)?,
+                lang: r.get(2)?,
+                desc: r.get(3)?,
+                params: r.get(4)?,
+                output: r.get(5)?,
+                pure: r.get::<_, i64>(6)? != 0,
+                idempotent: r.get::<_, i64>(7)? != 0,
+                concurrency: Concurrency::parse(&r.get::<_, String>(8)?)
+                    .unwrap_or(Concurrency::Serial),
+                effects: r.get(9)?,
+                timeout_secs: r.get::<_, i64>(10)? as u64,
+                retries: r.get::<_, i64>(11)? as usize,
+            })
+        })
+        .expect("script_list query failed");
+    rows.filter_map(|r| r.ok()).collect()
 }
 
 // ── Tests ──

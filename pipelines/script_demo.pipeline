@@ -1,0 +1,19 @@
+Pipeline("script_api_demo", "v0.12 脚本契约线验收：word_stats → make_report")
+
+  .proc("analyze")
+    .desc("纯函数脚本：统计文本")
+    .plan(
+      py -> script(word_stats, text="{topic}")
+        .tags(#script, #python)
+    )
+
+  .proc("report")
+    .desc("副作用脚本：把统计结果写进报告（@analyze.words 引用上游）")
+    .plan(
+      sh -> script(make_report, dir="/tmp/dt-script-demo", title="stats-done words=@analyze.words")
+        .tags(#script, #bash)
+    )
+    .when(@analyze.words > 0)
+
+  .proc("deliver")
+    .deliver(@report)

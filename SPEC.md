@@ -650,3 +650,73 @@ key2=value2
 | `All paths failed for proc: X` | 所有 impl 都失败，检查 bridge 脚本路径 |
 | 路径总是不被选中 | 可能被 penalty 惩罚，检查 `ductile patch list` |
 | 结构化字段为空 | 检查脚本是否正确输出 `##DSL_RESULT` 块 |
+| `script 'X' not attached` | 先 `ductile script attach <file>` 注册 |
+| `param 'k' not in contract` | 调用传了契约未声明的参数，`ductile script show X` 查契约 |
+| `missing required param` | 必填参数缺失或为空 |
+
+---
+
+## 9. 脚本契约线（v0.12 — 脚本即 API）
+
+运行层脚本外挂机制：**脚本本体不写入 DSL，DSL 只留 `script(name, k=v...)` 链接**；
+元数据经结构化契约头自描述，LLM 调用时只读契约卡、不读脚本体。
+
+### 9.1 契约头（脚本写作结构）
+
+脚本文件头部用注释行声明（`#` 开头，sh/python/powershell 通用）：
+
+```
+# ductile: v1
+# name: word_stats                 ← 注册名（DSL 引用它）
+# desc: 一句话描述
+# lang: python                     ← bash | python | powershell（可扩展）
+# params: text(str, required), n(int, default=10)
+# output: words(int), lines(int)
+# pure: true                       ← 有无副作用（纯函数=true）
+# idempotent: true                 ← 重复执行结果是否不变
+# concurrency: safe                ← safe | exclusive（能否并发）
+# effects: none                    ← none | fs | net | system
+# timeout: 10                      ← 秒；# retries: N 可选
+```
+
+**语义标注的编排意义**（喂给引擎做自动并行/CSE 决策）：
+`pure=true && idempotent && concurrency=safe` → `cse_safe=true`（可安全 CSE/并行）；
+副作用脚本（`pure=false` 或 `concurrency=exclusive`）→ 不可熔合、不可并行，
+防止两个同构副作用节点被 CSE 熔成一个导致双执行变单执行。
+
+### 9.2 CLI
+
+```
+ductile script attach <file>            注册（解析契约头，upsert）
+ductile script list                     列出全部（NAME/LANG/PURE/IDEMPOTENT/CONCUR/EFFECTS）
+ductile script show <name>              契约卡（LLM 读这个，不读脚本）
+ductile script call <name> "k=v, k=v"   单发调用（调试）
+ductile script detach <name>            注销
+```
+
+### 9.3 DSL 调用与执行语义
+
+```
+.proc("analyze")
+  .plan(
+    py -> script(word_stats, text="{topic}")
+  )
+```
+
+- 契约卡从 scripts 表加载；未注册的脚本名 fail-closed 硬错（错误信息列出全部已注册脚本）
+- `k=v` 值支持 `{topic}`、`@proc.field` 上游引用、契约 `default=X` 兜底
+- **必填参数缺失/为空 → 硬错；契约未声明的幻觉参数 → 硬错**（契约即接口）
+- 传参经环境变量 `DUCTILE_ARG_<NAME>`、`DUCTILE_TOPIC`；脚本侧 `getenv` 取参
+- 输出复用 `##DSL_RESULT` 协议（见 §7）；无协议块时整体 stdout 作为结果（>5000 字符截断）
+- timeout/retries 走契约头
+
+### 9.4 脚本写作规范（LLM 生成脚本必读）
+
+1. **bash 必须 `set -euo pipefail`**——否则中间步骤失败被吞、最后的 echo 返回 0，
+   引擎收到 exit 0 → 静默半成功（实测踩过的坑）
+2. 输出机器可读结果一律走 `##DSL_RESULT` 块，人类可读信息走 stderr
+3. 契约头如实标注 pure/concurrency——标注撒谎会让编排优化破坏正确性
+4. 幂等脚本注明 `idempotent: true`，引擎可安全重试
+
+示例：`examples/scripts/word_stats.py`（纯函数）、`examples/scripts/make_report.sh`（fs 副作用）；
+验收链路：`pipelines/script_demo.pipeline`。
