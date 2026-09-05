@@ -218,3 +218,185 @@ pub fn short_hash(s: &str) -> String {
     }
     format!("{:08x}", hash)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── detect_func ──
+    #[test]
+    fn detect_func_known() {
+        assert_eq!(detect_func("read(\"file.txt\")"), "read");
+        assert_eq!(detect_func("web_search(query=\"AI\")"), "web_search");
+        assert_eq!(detect_func("write(to=\"out\")"), "write");
+        assert_eq!(detect_func("merge(@a, @b)"), "merge");
+        assert_eq!(detect_func("llm(input=\"x\")"), "llm");
+        assert_eq!(detect_func("sh(\"echo hi\")"), "sh");
+        assert_eq!(detect_func("run(\"script\")"), "run");
+    }
+
+    #[test]
+    fn detect_func_unknown() {
+        assert_eq!(detect_func("noop"), "");
+        assert_eq!(detect_func(""), "");
+        assert_eq!(detect_func("123"), "");
+    }
+
+    // ── resolve_vars ──
+    #[test]
+    fn resolve_topic_var() {
+        let results = BTreeMap::new();
+        let out = resolve_vars("search({topic})", "AI", &results);
+        assert_eq!(out, "search(AI)");
+    }
+
+    #[test]
+    fn resolve_proc_ref() {
+        let mut results = BTreeMap::new();
+        results.insert("source".into(), Value::Text("result data".into()));
+        let out = resolve_vars("process(@source)", "AI", &results);
+        assert_eq!(out, "process(result data)");
+    }
+
+    #[test]
+    fn resolve_unresolved_ref_left_as_is() {
+        let results = BTreeMap::new();
+        let out = resolve_vars("@nonexistent", "AI", &results);
+        assert_eq!(out, "@nonexistent");
+    }
+
+    #[test]
+    fn resolve_hash_topic() {
+        let results = BTreeMap::new();
+        let out = resolve_vars("{hash(topic)}", "test", &results);
+        // Should be replaced with a hash, not the original {hash(topic)}
+        assert_ne!(out, "{hash(topic)}");
+        assert!(!out.is_empty());
+    }
+
+    // ── extract_string_arg ──
+    #[test]
+    fn extract_string_arg_quoted() {
+        assert_eq!(extract_string_arg("query", r#"query="AI news""#), "AI news");
+        assert_eq!(
+            extract_string_arg("to", r#"to="/tmp/out.txt""#),
+            "/tmp/out.txt"
+        );
+    }
+
+    #[test]
+    fn extract_string_arg_unquoted() {
+        assert_eq!(extract_string_arg("n", "n=5"), "5");
+    }
+
+    #[test]
+    fn extract_string_arg_missing() {
+        assert_eq!(extract_string_arg("missing", "query=\"AI\""), "");
+    }
+
+    #[test]
+    fn extract_string_arg_no_partial_match() {
+        // "content" should not match partial "cont"
+        assert_eq!(extract_string_arg("cont", r#"content="hello""#), "");
+    }
+
+    // ── short_hash ──
+    #[test]
+    fn short_hash_deterministic() {
+        let h1 = short_hash("test");
+        let h2 = short_hash("test");
+        assert_eq!(h1, h2);
+        assert!(h1.len() >= 8); // at least 8 hex chars (djb2 can overflow 8)
+    }
+
+    #[test]
+    fn short_hash_different_inputs() {
+        assert_ne!(short_hash("a"), short_hash("b"));
+    }
+
+    // ── expand_tilde ──
+    #[test]
+    fn expand_tilde_with_slash() {
+        let expanded = expand_tilde("~/test");
+        assert!(!expanded.contains('~'));
+        assert!(expanded.ends_with("/test"));
+    }
+
+    #[test]
+    fn expand_tilde_no_tilde() {
+        assert_eq!(expand_tilde("/absolute/path"), "/absolute/path");
+    }
+
+
+    // ── 新增边界用例 ──
+
+    #[test]
+    fn detect_func_leading_space() {
+        assert_eq!(detect_func("  run(\"x\")"), "run");
+    }
+
+    #[test]
+    fn detect_func_paren_first() {
+        assert_eq!(detect_func("(\"x\")"), "");
+    }
+
+    #[test]
+    fn detect_func_word_then_space() {
+        assert_eq!(detect_func("echo hi ("), "");
+    }
+
+    #[test]
+    fn resolve_proc_field_from_structured() {
+        let encoded = crate::dslresult::encode_structured_result(
+            &[("score".into(), "85".into())],
+            "raw",
+        );
+        let mut results = BTreeMap::new();
+        results.insert("gate".into(), Value::Text(encoded));
+        assert_eq!(resolve_vars("@gate.score", "t", &results), "85");
+    }
+
+    #[test]
+    fn resolve_proc_field_missing_keeps_marker() {
+        let encoded = crate::dslresult::encode_structured_result(&[("x".into(), "1".into())], "r");
+        let mut results = BTreeMap::new();
+        results.insert("gate".into(), Value::Text(encoded));
+        let out = resolve_vars("@gate.score", "t", &results);
+        assert!(out.contains("<no field:gate.score>"), "{}", out);
+    }
+
+    #[test]
+    fn extract_first_string_escapes() {
+        // DSL 字符串内的 \" 转义：终止符不应被奇数反斜杠提前截断
+        let body = "sh(\"echo \\\"hi\\\"\")";
+        assert_eq!(extract_first_string(body), "echo \"hi\"");
+    }
+
+    #[test]
+    fn extract_first_string_no_quotes_returns_body() {
+        assert_eq!(extract_first_string("plain"), "plain");
+    }
+
+    #[test]
+    fn extract_string_arg_unquoted_stops_at_delims() {
+        assert_eq!(extract_string_arg("n", "n=5,x=2"), "5");
+        assert_eq!(extract_string_arg("n", "n=5)"), "5");
+    }
+
+    #[test]
+    fn extract_all_string_args_multiple() {
+        let body = r#"run("x", env="A=1", env="B=2")"#;
+        assert_eq!(extract_all_string_args("env", body), vec!["A=1", "B=2"]);
+    }
+
+    #[test]
+    fn extract_all_string_args_substring_guard() {
+        let body = r#"run("x", envx="A=1")"#;
+        assert!(extract_all_string_args("env", body).is_empty());
+    }
+
+    #[test]
+    fn expand_tilde_only_prefix() {
+        assert_eq!(expand_tilde("/a/~b"), "/a/~b");
+    }
+}

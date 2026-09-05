@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 // ── Function Registry（v0.11.1 重构：Registry + Adapter 模式）──
@@ -265,6 +266,21 @@ fn proc_table() -> &'static Mutex<StdHashMap<String, (u32, u64, String)>> {
     PROC_TABLE.get_or_init(|| Mutex::new(StdHashMap::new()))
 }
 
+
+/// 进程存活检查（僵尸感知）：/proc/pid/stat 第 3 字段为状态，
+/// Z = 僵尸（已退出待 reap）→ 视为不在运行。
+fn proc_alive(pid: u32) -> bool {
+    let stat = match std::fs::read_to_string(format!("/proc/{}/stat", pid)) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    // 格式：pid (comm) state ...；comm 可含空格，取最后一个 ')' 之后的首个非空字符
+    match stat.rfind(')') {
+        Some(i) => stat[i + 1..].trim_start().starts_with(|c: char| c != 'Z'),
+        None => false,
+    }
+}
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -305,6 +321,10 @@ fn exec_spawn(
         .arg(&cmd)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        // v0.12.1：子进程自立进程组。此前继承父组 → exec_kill 的
+        // kill -9 -pid（组杀）目标组不存在，静默无效；且孤孙子进程
+        // （cmd 里的 `&`）会在组杀时漏杀。
+        .process_group(0)
         .spawn()
         .map_err(|e| format!("spawn failed: {}", e))?;
     let pid = child.id();
@@ -333,8 +353,8 @@ fn exec_procs(
         if !filter.is_empty() && name != &filter {
             continue;
         }
-        // liveness check via /proc
-        let alive = Path::new(&format!("/proc/{}", pid)).exists();
+        // liveness check via /proc（僵尸感知）
+        let alive = proc_alive(*pid);
         lines.push(format!(
             "{}\t{}\t{}\t{}\t{}",
             name,
@@ -400,7 +420,7 @@ fn exec_wait(
     };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout.max(1));
     loop {
-        let alive = Path::new(&format!("/proc/{}", pid)).exists();
+        let alive = proc_alive(pid);
         if !alive {
             return Ok(Value::Text(format!("{} exited", name)));
         }
@@ -1027,4 +1047,163 @@ mod tests {
         // With dedup, should not contain duplicate
         assert_eq!(text.matches("same").count(), 1);
     }
+
+    // ── fs 七件套 ──
+
+    #[test]
+    fn fs_exists_true_false() {
+        let ok = exec_fs_exists(&default_impl(), r#"exists("/tmp")"#).unwrap();
+        assert_eq!(ok.as_text(), "true");
+        let no = exec_fs_exists(&default_impl(), r#"exists("/nonexistent-xyz-ductile")"#).unwrap();
+        assert_eq!(no.as_text(), "false");
+    }
+
+    #[test]
+    fn fs_stat_and_ls() {
+        let dir = std::env::temp_dir().join(format!("ductile-steps-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("a.txt"), "hello").unwrap();
+        std::fs::write(dir.join("b.txt"), "world").unwrap();
+        let st = exec_fs_stat(&default_impl(), &format!(r#"stat("{}")"#, dir.join("a.txt").display())).unwrap();
+        assert!(st.as_text().starts_with("file "), "{}", st.as_text());
+        let ls = exec_fs_ls(&default_impl(), &format!(r#"ls("{}")"#, dir.display())).unwrap();
+        assert_eq!(ls.as_text(), "a.txt\nb.txt");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs_mkdir_cp_rm_roundtrip() {
+        let base = std::env::temp_dir().join(format!("ductile-cp-{}", std::process::id()));
+        let src = base.join("src");
+        let dst = base.join("dst");
+        let _ = std::fs::create_dir_all(&src);
+        std::fs::write(src.join("f.txt"), "data").unwrap();
+        // mkdir dst（from/to 形态）
+        let m = exec_fs_mkdir(&default_impl(), &format!(r#"mkdir("{}")"#, dst.display())).unwrap();
+        assert_eq!(m.as_text(), dst.display().to_string());
+        // cp 目录树
+        let c = exec_fs_cp(&default_impl(), &format!(r#"cp(from="{}", to="{}")"#, src.display(), dst.join("src").display())).unwrap();
+        assert!(c.as_text().contains("copied"));
+        assert!(dst.join("src/f.txt").exists());
+        // rm 树
+        let r = exec_fs_rm(&default_impl(), &format!(r#"rm("{}")"#, base.display())).unwrap();
+        assert!(r.as_text().contains("removed"));
+        assert!(!base.exists());
+    }
+
+    #[test]
+    fn fs_rm_refuses_protected_roots() {
+        assert!(exec_fs_rm(&default_impl(), r#"rm("/")"#).is_err());
+        assert!(exec_fs_rm(&default_impl(), &format!(r#"rm("{}")"#, std::env::var("HOME").unwrap())).is_err());
+    }
+
+    #[test]
+    fn fs_rm_missing_is_noop_ok() {
+        let r = exec_fs_rm(&default_impl(), r#"rm("/nonexistent-ductile-xyz")"#).unwrap();
+        assert!(r.as_text().contains("noop"));
+    }
+
+    #[test]
+    fn fs_cp_missing_source_err() {
+        assert!(exec_fs_cp(&default_impl(), r#"cp(from="/no/such/src", to="/tmp/x")"#).is_err());
+    }
+
+    // ── run：DSL_RESULT 集成 + 超时 + env ──
+
+    #[test]
+    fn run_echo_returns_stdout() {
+        let r = exec_run(&default_impl(), "t", r#"run("echo hello-ductile")"#, &BTreeMap::new()).unwrap();
+        assert!(r.as_text().contains("hello-ductile"));
+    }
+
+    #[test]
+    fn run_dsl_result_block_structured() {
+        let cmd = "echo x; printf '##DSL_RESULT\nscore=85\n##DSL_END\n'";
+        let body = format!("run(\"{}\")", cmd);
+        let r = exec_run(&default_impl(), "t", &body, &BTreeMap::new()).unwrap();
+        let t = r.as_text();
+        assert!(t.starts_with("§§FIELDS§§"), "{}", &t[..40.min(t.len())]);
+        assert_eq!(crate::dslresult::extract_field("score", &t), Some("85".into()));
+    }
+
+    #[test]
+    fn run_failing_command_err() {
+        let r = exec_run(&default_impl(), "t", r#"run("exit 3")"#, &BTreeMap::new());
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("exit"));
+    }
+
+    #[test]
+    fn run_timeout_kills() {
+        let r = exec_run(&default_impl(), "t", r#"run("sleep 60", timeout=1)"#, &BTreeMap::new());
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("timed out"));
+    }
+
+    #[test]
+    fn run_env_vars_visible() {
+        let body = r#"run("echo $DUCTILE_TEST_V", env="DUCTILE_TEST_V=xyz123")"#;
+        let r = exec_run(&default_impl(), "t", &body, &BTreeMap::new()).unwrap();
+        assert!(r.as_text().contains("xyz123"));
+    }
+
+    #[test]
+    fn run_topic_resolution() {
+        let body = r#"run("echo {topic}")"#;
+        let r = exec_run(&default_impl(), "my-topic", body, &BTreeMap::new()).unwrap();
+        assert!(r.as_text().contains("my-topic"));
+    }
+
+    // ── 进程管理 ──
+
+    #[test]
+    fn spawn_wait_kill_cycle() {
+        let mut results = BTreeMap::new();
+        // spawn 一个 sleep 30 的后台进程
+        let sp = exec_spawn(&default_impl(), "t", r#"spawn(name="t30", cmd="setsid sleep 30")"#, &results).unwrap();
+        let pid_str = sp.as_text().to_string();
+        assert!(pid_str.parse::<u32>().is_ok(), "pid: {}", pid_str);
+        // procs 表里有它且 alive
+        let pl = exec_procs(&default_impl(), "t", r#"procs(name="t30")"#, &results).unwrap();
+        assert!(pl.as_text().contains("t30"));
+        assert!(pl.as_text().contains("alive"));
+        // kill
+        let k = exec_kill(&default_impl(), "t", r#"kill(name="t30")"#, &results).unwrap();
+        assert!(k.as_text().contains("killed"));
+        // kill 后短暂等待进程消失，wait 应立即返回 exited
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let w = exec_wait(&default_impl(), "t", r#"wait(name="t30", timeout=5)"#, &results).unwrap();
+        assert!(w.as_text().contains("exited"));
+    }
+
+    #[test]
+    fn spawn_missing_name_err() {
+        assert!(exec_spawn(&default_impl(), "t", r#"spawn("sleep 1")"#, &BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn kill_unknown_handle_err() {
+        assert!(exec_kill(&default_impl(), "t", r#"kill(name="no-such-handle")"#, &BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn wait_unknown_handle_err() {
+        assert!(exec_wait(&default_impl(), "t", r#"wait(name="ghost")"#, &BTreeMap::new()).is_err());
+    }
+
+    // ── write 边界 ──
+
+    #[test]
+    fn write_resolves_topic_and_creates_parents() {
+        let base = std::env::temp_dir().join(format!("ductile-w-{}", std::process::id()));
+        let path = format!("{}/deep/{}/out.txt", base.display(), "{hash(topic)}");
+        let body = format!(r#"write(to="{}", content="data-{{topic}}")"#, path);
+        let r = exec_write(&default_impl(), "topicX", &body, &BTreeMap::new()).unwrap();
+        let f = r.as_text().to_string();
+        assert!(std::path::Path::new(&f).exists(), "file missing: {}", f);
+        let content = std::fs::read_to_string(&f).unwrap();
+        assert_eq!(content, "data-topicX");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
 }
