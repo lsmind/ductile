@@ -15,6 +15,8 @@ pub mod parser;
 pub mod promote;
 pub mod registry;
 pub mod script;
+pub mod textargs;
+pub mod dslresult;
 pub mod typecheck;
 pub mod version;
 pub mod when;
