@@ -131,7 +131,6 @@ fn impl_penalty(recent: &BTreeMap<String, RecentRuns>, name: &str) -> f64 {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

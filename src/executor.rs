@@ -7,17 +7,22 @@
 use crate::ast::*;
 use crate::db;
 use crate::egraph;
+use crate::ranking::rank_impls_named;
+pub use crate::ranking::ImplPrefs;
+pub use crate::steps::exec_script_call;
+pub use crate::steps::known_functions;
+use crate::steps::{is_probe_stub, step_registry};
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
-use crate::ranking::rank_impls_named;
-use crate::steps::{is_probe_stub, step_registry};
-pub use crate::ranking::ImplPrefs;
-pub use crate::steps::known_functions;
-pub use crate::steps::exec_script_call;
 use std::time::Instant;
 
-pub use crate::textargs::{detect_func, resolve_vars, extract_string_arg, extract_first_string, expand_tilde, short_hash, extract_all_string_args};
-pub use crate::dslresult::{parse_dsl_result_block, encode_structured_result, extract_field, est_loss_field_coverage};
+pub use crate::dslresult::{
+    encode_structured_result, est_loss_field_coverage, extract_field, parse_dsl_result_block,
+};
+pub use crate::textargs::{
+    detect_func, expand_tilde, extract_all_string_args, extract_first_string, extract_string_arg,
+    resolve_vars, short_hash,
+};
 
 // ── Hot patches ──
 

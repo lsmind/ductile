@@ -12,9 +12,9 @@ use crate::textargs::{
 };
 use std::collections::BTreeMap;
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
-use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 // ── Function Registry（v0.11.1 重构：Registry + Adapter 模式）──
@@ -97,7 +97,6 @@ pub fn is_probe_stub(func: &str) -> bool {
 pub fn known_functions() -> Vec<&'static str> {
     step_registry().keys().copied().collect()
 }
-
 
 // ── Built-in executors ──
 
@@ -265,7 +264,6 @@ static PROC_TABLE: OnceLock<Mutex<StdHashMap<String, (u32, u64, String)>>> = Onc
 fn proc_table() -> &'static Mutex<StdHashMap<String, (u32, u64, String)>> {
     PROC_TABLE.get_or_init(|| Mutex::new(StdHashMap::new()))
 }
-
 
 /// 进程存活检查（僵尸感知）：/proc/pid/stat 第 3 字段为状态，
 /// Z = 僵尸（已退出待 reap）→ 视为不在运行。
@@ -692,7 +690,6 @@ fn exec_run(
     Ok(Value::Text(trimmed))
 }
 
-
 fn find_bridge(script: &str) -> String {
     // Search order: current dir, ~/.local/share/ductile/bridge/, project-local
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
@@ -710,7 +707,6 @@ fn find_bridge(script: &str) -> String {
     // Fallback: return the home path (will fail with a clear error)
     format!("{}/.local/share/ductile/bridge/{}", home, script)
 }
-
 
 // ── v0.12 脚本契约执行线 ──
 
@@ -941,7 +937,6 @@ pub fn exec_script_call(
     Err(last_err)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1064,7 +1059,11 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("a.txt"), "hello").unwrap();
         std::fs::write(dir.join("b.txt"), "world").unwrap();
-        let st = exec_fs_stat(&default_impl(), &format!(r#"stat("{}")"#, dir.join("a.txt").display())).unwrap();
+        let st = exec_fs_stat(
+            &default_impl(),
+            &format!(r#"stat("{}")"#, dir.join("a.txt").display()),
+        )
+        .unwrap();
         assert!(st.as_text().starts_with("file "), "{}", st.as_text());
         let ls = exec_fs_ls(&default_impl(), &format!(r#"ls("{}")"#, dir.display())).unwrap();
         assert_eq!(ls.as_text(), "a.txt\nb.txt");
@@ -1082,7 +1081,15 @@ mod tests {
         let m = exec_fs_mkdir(&default_impl(), &format!(r#"mkdir("{}")"#, dst.display())).unwrap();
         assert_eq!(m.as_text(), dst.display().to_string());
         // cp 目录树
-        let c = exec_fs_cp(&default_impl(), &format!(r#"cp(from="{}", to="{}")"#, src.display(), dst.join("src").display())).unwrap();
+        let c = exec_fs_cp(
+            &default_impl(),
+            &format!(
+                r#"cp(from="{}", to="{}")"#,
+                src.display(),
+                dst.join("src").display()
+            ),
+        )
+        .unwrap();
         assert!(c.as_text().contains("copied"));
         assert!(dst.join("src/f.txt").exists());
         // rm 树
@@ -1094,7 +1101,11 @@ mod tests {
     #[test]
     fn fs_rm_refuses_protected_roots() {
         assert!(exec_fs_rm(&default_impl(), r#"rm("/")"#).is_err());
-        assert!(exec_fs_rm(&default_impl(), &format!(r#"rm("{}")"#, std::env::var("HOME").unwrap())).is_err());
+        assert!(exec_fs_rm(
+            &default_impl(),
+            &format!(r#"rm("{}")"#, std::env::var("HOME").unwrap())
+        )
+        .is_err());
     }
 
     #[test]
@@ -1112,7 +1123,13 @@ mod tests {
 
     #[test]
     fn run_echo_returns_stdout() {
-        let r = exec_run(&default_impl(), "t", r#"run("echo hello-ductile")"#, &BTreeMap::new()).unwrap();
+        let r = exec_run(
+            &default_impl(),
+            "t",
+            r#"run("echo hello-ductile")"#,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         assert!(r.as_text().contains("hello-ductile"));
     }
 
@@ -1123,7 +1140,10 @@ mod tests {
         let r = exec_run(&default_impl(), "t", &body, &BTreeMap::new()).unwrap();
         let t = r.as_text();
         assert!(t.starts_with("§§FIELDS§§"), "{}", &t[..40.min(t.len())]);
-        assert_eq!(crate::dslresult::extract_field("score", &t), Some("85".into()));
+        assert_eq!(
+            crate::dslresult::extract_field("score", &t),
+            Some("85".into())
+        );
     }
 
     #[test]
@@ -1135,7 +1155,12 @@ mod tests {
 
     #[test]
     fn run_timeout_kills() {
-        let r = exec_run(&default_impl(), "t", r#"run("sleep 60", timeout=1)"#, &BTreeMap::new());
+        let r = exec_run(
+            &default_impl(),
+            "t",
+            r#"run("sleep 60", timeout=1)"#,
+            &BTreeMap::new(),
+        );
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("timed out"));
     }
@@ -1160,7 +1185,13 @@ mod tests {
     fn spawn_wait_kill_cycle() {
         let mut results = BTreeMap::new();
         // spawn 一个 sleep 30 的后台进程
-        let sp = exec_spawn(&default_impl(), "t", r#"spawn(name="t30", cmd="setsid sleep 30")"#, &results).unwrap();
+        let sp = exec_spawn(
+            &default_impl(),
+            "t",
+            r#"spawn(name="t30", cmd="setsid sleep 30")"#,
+            &results,
+        )
+        .unwrap();
         let pid_str = sp.as_text().to_string();
         assert!(pid_str.parse::<u32>().is_ok(), "pid: {}", pid_str);
         // procs 表里有它且 alive
@@ -1172,23 +1203,47 @@ mod tests {
         assert!(k.as_text().contains("killed"));
         // kill 后短暂等待进程消失，wait 应立即返回 exited
         std::thread::sleep(std::time::Duration::from_millis(300));
-        let w = exec_wait(&default_impl(), "t", r#"wait(name="t30", timeout=5)"#, &results).unwrap();
+        let w = exec_wait(
+            &default_impl(),
+            "t",
+            r#"wait(name="t30", timeout=5)"#,
+            &results,
+        )
+        .unwrap();
         assert!(w.as_text().contains("exited"));
     }
 
     #[test]
     fn spawn_missing_name_err() {
-        assert!(exec_spawn(&default_impl(), "t", r#"spawn("sleep 1")"#, &BTreeMap::new()).is_err());
+        assert!(exec_spawn(
+            &default_impl(),
+            "t",
+            r#"spawn("sleep 1")"#,
+            &BTreeMap::new()
+        )
+        .is_err());
     }
 
     #[test]
     fn kill_unknown_handle_err() {
-        assert!(exec_kill(&default_impl(), "t", r#"kill(name="no-such-handle")"#, &BTreeMap::new()).is_err());
+        assert!(exec_kill(
+            &default_impl(),
+            "t",
+            r#"kill(name="no-such-handle")"#,
+            &BTreeMap::new()
+        )
+        .is_err());
     }
 
     #[test]
     fn wait_unknown_handle_err() {
-        assert!(exec_wait(&default_impl(), "t", r#"wait(name="ghost")"#, &BTreeMap::new()).is_err());
+        assert!(exec_wait(
+            &default_impl(),
+            "t",
+            r#"wait(name="ghost")"#,
+            &BTreeMap::new()
+        )
+        .is_err());
     }
 
     // ── write 边界 ──
@@ -1205,5 +1260,4 @@ mod tests {
         assert_eq!(content, "data-topicX");
         let _ = std::fs::remove_dir_all(&base);
     }
-
 }

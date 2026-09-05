@@ -27,10 +27,8 @@ pub fn open() -> Connection {
     conn
 }
 
-pub fn init_db() {
-    let conn = open();
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS pipelines (
+/// 全部表结构 DDL（幂等 CREATE IF NOT EXISTS）。init_db 与测试内存库共用。
+pub const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS pipelines (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             name        TEXT UNIQUE NOT NULL,
             description TEXT DEFAULT '',
@@ -110,9 +108,11 @@ pub fn init_db() {
             timeout_secs INTEGER NOT NULL DEFAULT 300,
             retries     INTEGER NOT NULL DEFAULT 0,
             attached_at TEXT DEFAULT (datetime('now'))
-        );",
-    )
-    .expect("init_db failed");
+        );";
+
+pub fn init_db() {
+    let conn = open();
+    conn.execute_batch(SCHEMA_DDL).expect("init_db failed");
     // RD 扩展迁移：老库补列（新库 CREATE 已含；ALTER 幂等检测防重）
     let has_rate = conn
         .query_row(
@@ -178,9 +178,7 @@ pub struct RunRow {
 
 // ── Import pipeline ──
 
-pub fn import_pipeline(pl: &Pipeline, source_file: &str) {
-    init_db();
-    let conn = open();
+pub fn import_pipeline_conn(conn: &Connection, pl: &Pipeline, source_file: &str) {
     let ts = now_ts();
 
     // Upsert pipeline
@@ -229,6 +227,11 @@ pub fn import_pipeline(pl: &Pipeline, source_file: &str) {
     }
 }
 
+pub fn import_pipeline(pl: &Pipeline, source_file: &str) {
+    let conn = open();
+    import_pipeline_conn(&conn, pl, source_file)
+}
+
 pub fn import_pipeline_file(path: &str) -> Result<String, String> {
     let pl = crate::parser::parse_pipeline_file(path).map_err(|e| format!("{}", e))?;
     import_pipeline(&pl, path);
@@ -237,9 +240,7 @@ pub fn import_pipeline_file(path: &str) -> Result<String, String> {
 
 // ── Search procs ──
 
-pub fn search_procs(query: &str) -> Vec<ProcRow> {
-    init_db();
-    let conn = open();
+pub fn search_procs_conn(conn: &Connection, query: &str) -> Vec<ProcRow> {
     let pattern = format!("%{}%", query);
     let mut stmt = conn
         .prepare(
@@ -272,9 +273,12 @@ pub fn search_procs(query: &str) -> Vec<ProcRow> {
     .collect()
 }
 
-pub fn all_procs() -> Vec<ProcRow> {
-    init_db();
+pub fn search_procs(query: &str) -> Vec<ProcRow> {
     let conn = open();
+    search_procs_conn(&conn, query)
+}
+
+pub fn all_procs_conn(conn: &Connection) -> Vec<ProcRow> {
     let mut stmt = conn
         .prepare(
             "SELECT p.id, p.name, pl.name, p.description, p.tags, p.impl_count, p.is_deliver
@@ -305,6 +309,11 @@ pub fn all_procs() -> Vec<ProcRow> {
     .collect()
 }
 
+pub fn all_procs() -> Vec<ProcRow> {
+    let conn = open();
+    all_procs_conn(&conn)
+}
+
 // ── Run records ──
 
 pub fn record_run(
@@ -323,7 +332,8 @@ pub fn record_run(
 
 /// RD-aware run record: rate_tokens = impl 输出 token 数（rate 的操作代理），
 /// est_loss = 失真代理（v0: 下游 check 失败=1.0, 通过=0.0; 由 executor 填）。
-pub fn record_run_rd(
+pub fn record_run_rd_conn(
+    conn: &Connection,
     proc_name: &str,
     impl_name: &str,
     pipeline: &str,
@@ -334,8 +344,6 @@ pub fn record_run_rd(
     rate_tokens: i64,
     est_loss: f64,
 ) {
-    init_db();
-    let conn = open();
     let ts = now_ts();
     conn.execute(
         "INSERT INTO runs (proc_name, impl_name, pipeline, status, latency_ms, err_hash, err_at, recorded_at, rate_tokens, est_loss)
@@ -356,15 +364,40 @@ pub fn record_run_rd(
     .ok();
 }
 
+pub fn record_run_rd(
+    proc_name: &str,
+    impl_name: &str,
+    pipeline: &str,
+    status: &str,
+    latency_ms: i64,
+    err_hash: Option<&str>,
+    err_at: Option<&str>,
+    rate_tokens: i64,
+    est_loss: f64,
+) {
+    let conn = open();
+    record_run_rd_conn(
+        &conn,
+        proc_name,
+        impl_name,
+        pipeline,
+        status,
+        latency_ms,
+        err_hash,
+        err_at,
+        rate_tokens,
+        est_loss,
+    )
+}
+
 /// v0.11 cost 实测缓存：measure 测试脚本的最近一次取值（TTL 内直接复用）。
-pub fn cost_cache_get_fresh(
+pub fn cost_cache_get_fresh_conn(
+    conn: &Connection,
     proc_name: &str,
     impl_name: &str,
     field: &str,
     ttl_secs: i64,
 ) -> Option<f64> {
-    init_db();
-    let conn = open();
     let now = unix_now();
     conn.query_row(
         "SELECT value FROM cost_cache
@@ -375,9 +408,23 @@ pub fn cost_cache_get_fresh(
     .ok()
 }
 
-pub fn cost_cache_put(proc_name: &str, impl_name: &str, field: &str, value: f64) {
-    init_db();
+pub fn cost_cache_get_fresh(
+    proc_name: &str,
+    impl_name: &str,
+    field: &str,
+    ttl_secs: i64,
+) -> Option<f64> {
     let conn = open();
+    cost_cache_get_fresh_conn(&conn, proc_name, impl_name, field, ttl_secs)
+}
+
+pub fn cost_cache_put_conn(
+    conn: &Connection,
+    proc_name: &str,
+    impl_name: &str,
+    field: &str,
+    value: f64,
+) {
     conn.execute(
         "INSERT INTO cost_cache (proc_name, impl_name, field, value, measured_at)
          VALUES (?1, ?2, ?3, ?4, ?5)
@@ -388,6 +435,11 @@ pub fn cost_cache_put(proc_name: &str, impl_name: &str, field: &str, value: f64)
     .ok();
 }
 
+pub fn cost_cache_put(proc_name: &str, impl_name: &str, field: &str, value: f64) {
+    let conn = open();
+    cost_cache_put_conn(&conn, proc_name, impl_name, field, value)
+}
+
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -395,9 +447,7 @@ fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
-pub fn recent_runs(proc_name: &str) -> Vec<RunRow> {
-    init_db();
-    let conn = open();
+pub fn recent_runs_conn(conn: &Connection, proc_name: &str) -> Vec<RunRow> {
     let mut stmt = conn
         .prepare(
             "SELECT proc_name, impl_name, status, latency_ms, recorded_at, rate_tokens, est_loss
@@ -422,12 +472,15 @@ pub fn recent_runs(proc_name: &str) -> Vec<RunRow> {
     .collect()
 }
 
+pub fn recent_runs(proc_name: &str) -> Vec<RunRow> {
+    let conn = open();
+    recent_runs_conn(&conn, proc_name)
+}
+
 // ── Impl preferences (v0.8 LGuess-style multiplicative weights) ──
 
 /// Load all learned impl weights: (proc_name, impl_name) -> weight.
-pub fn load_impl_prefs() -> Vec<(String, String, f64)> {
-    init_db();
-    let conn = open();
+pub fn load_impl_prefs_conn(conn: &Connection) -> Vec<(String, String, f64)> {
     let mut stmt = conn
         .prepare("SELECT proc_name, impl_name, weight FROM impl_prefs")
         .unwrap();
@@ -443,10 +496,13 @@ pub fn load_impl_prefs() -> Vec<(String, String, f64)> {
     .collect()
 }
 
-/// Upsert one learned impl weight.
-pub fn upsert_impl_pref(proc_name: &str, impl_name: &str, weight: f64) {
-    init_db();
+pub fn load_impl_prefs() -> Vec<(String, String, f64)> {
     let conn = open();
+    load_impl_prefs_conn(&conn)
+}
+
+/// Upsert one learned impl weight.
+pub fn upsert_impl_pref_conn(conn: &Connection, proc_name: &str, impl_name: &str, weight: f64) {
     conn.execute(
         "INSERT INTO impl_prefs (proc_name, impl_name, weight, updated_at)
          VALUES (?1, ?2, ?3, ?4)
@@ -457,11 +513,14 @@ pub fn upsert_impl_pref(proc_name: &str, impl_name: &str, weight: f64) {
     .ok();
 }
 
+pub fn upsert_impl_pref(proc_name: &str, impl_name: &str, weight: f64) {
+    let conn = open();
+    upsert_impl_pref_conn(&conn, proc_name, impl_name, weight)
+}
+
 /// v0.8 preference bump — 单语句原子乘性更新（免读改写）。
 /// success: ×1.1；fail: ÷1.5；clamp [0.05, 20]；初值 1.0。
-pub fn record_pref(proc_name: &str, impl_name: &str, success: bool) {
-    init_db();
-    let conn = open();
+pub fn record_pref_conn(conn: &Connection, proc_name: &str, impl_name: &str, success: bool) {
     let factor = if success { 1.1f64 } else { 1.0 / 1.5 };
     conn.execute(
         "INSERT INTO impl_prefs (proc_name, impl_name, weight, updated_at)
@@ -473,11 +532,14 @@ pub fn record_pref(proc_name: &str, impl_name: &str, success: bool) {
     .ok();
 }
 
+pub fn record_pref(proc_name: &str, impl_name: &str, success: bool) {
+    let conn = open();
+    record_pref_conn(&conn, proc_name, impl_name, success)
+}
+
 // ── Composition ──
 
-pub fn save_composition(name: &str, desc: &str, proc_names: &[String]) {
-    init_db();
-    let conn = open();
+pub fn save_composition_conn(conn: &Connection, name: &str, desc: &str, proc_names: &[String]) {
     let ts = now_ts();
     let names = proc_names.join(",");
     conn.execute(
@@ -488,11 +550,14 @@ pub fn save_composition(name: &str, desc: &str, proc_names: &[String]) {
     .ok();
 }
 
+pub fn save_composition(name: &str, desc: &str, proc_names: &[String]) {
+    let conn = open();
+    save_composition_conn(&conn, name, desc, proc_names)
+}
+
 // ── Stats ──
 
-pub fn db_stats() -> (i64, i64, i64, i64) {
-    init_db();
-    let conn = open();
+pub fn db_stats_conn(conn: &Connection) -> (i64, i64, i64, i64) {
     let count = |table: &str| -> i64 {
         conn.query_row(&format!("SELECT COUNT(*) FROM {}", table), [], |row| {
             row.get(0)
@@ -505,6 +570,11 @@ pub fn db_stats() -> (i64, i64, i64, i64) {
         count("runs"),
         count("compositions"),
     )
+}
+
+pub fn db_stats() -> (i64, i64, i64, i64) {
+    let conn = open();
+    db_stats_conn(&conn)
 }
 
 // ── Isomorphic groups (tag-based, cross-pipeline) ──
@@ -554,9 +624,14 @@ pub struct PatchRow {
 }
 
 /// Upsert a patch: if (pipeline, proc, impl, field) already exists, update value.
-pub fn set_patch(pipeline: &str, proc_name: &str, impl_name: &str, field: &str, value: &str) {
-    init_db();
-    let conn = open();
+pub fn set_patch_conn(
+    conn: &Connection,
+    pipeline: &str,
+    proc_name: &str,
+    impl_name: &str,
+    field: &str,
+    value: &str,
+) {
     let ts = now_ts();
     conn.execute(
         "INSERT INTO patches (pipeline, proc_name, impl_name, field, value, created_at)
@@ -568,10 +643,19 @@ pub fn set_patch(pipeline: &str, proc_name: &str, impl_name: &str, field: &str, 
     .ok();
 }
 
-/// Remove a specific patch.
-pub fn remove_patch(pipeline: &str, proc_name: &str, impl_name: &str, field: &str) {
-    init_db();
+pub fn set_patch(pipeline: &str, proc_name: &str, impl_name: &str, field: &str, value: &str) {
     let conn = open();
+    set_patch_conn(&conn, pipeline, proc_name, impl_name, field, value)
+}
+
+/// Remove a specific patch.
+pub fn remove_patch_conn(
+    conn: &Connection,
+    pipeline: &str,
+    proc_name: &str,
+    impl_name: &str,
+    field: &str,
+) {
     conn.execute(
         "DELETE FROM patches WHERE pipeline=?1 AND proc_name=?2 AND impl_name=?3 AND field=?4",
         params![pipeline, proc_name, impl_name, field],
@@ -579,10 +663,13 @@ pub fn remove_patch(pipeline: &str, proc_name: &str, impl_name: &str, field: &st
     .ok();
 }
 
-/// Load all patches for a given pipeline.
-pub fn load_patches(pipeline: &str) -> Vec<PatchRow> {
-    init_db();
+pub fn remove_patch(pipeline: &str, proc_name: &str, impl_name: &str, field: &str) {
     let conn = open();
+    remove_patch_conn(&conn, pipeline, proc_name, impl_name, field)
+}
+
+/// Load all patches for a given pipeline.
+pub fn load_patches_conn(conn: &Connection, pipeline: &str) -> Vec<PatchRow> {
     let mut stmt = conn
         .prepare(
             "SELECT pipeline, proc_name, impl_name, field, value
@@ -604,10 +691,13 @@ pub fn load_patches(pipeline: &str) -> Vec<PatchRow> {
     .collect()
 }
 
-/// List all patches across all pipelines.
-pub fn all_patches() -> Vec<PatchRow> {
-    init_db();
+pub fn load_patches(pipeline: &str) -> Vec<PatchRow> {
     let conn = open();
+    load_patches_conn(&conn, pipeline)
+}
+
+/// List all patches across all pipelines.
+pub fn all_patches_conn(conn: &Connection) -> Vec<PatchRow> {
     let mut stmt = conn
         .prepare(
             "SELECT pipeline, proc_name, impl_name, field, value
@@ -626,6 +716,11 @@ pub fn all_patches() -> Vec<PatchRow> {
     .unwrap()
     .filter_map(|r| r.ok())
     .collect()
+}
+
+pub fn all_patches() -> Vec<PatchRow> {
+    let conn = open();
+    all_patches_conn(&conn)
 }
 
 // ── Full-text search (FTS5 + BM25) ──
@@ -679,20 +774,21 @@ fn ensure_fts(conn: &Connection) {
 }
 
 /// Rebuild FTS index from scratch (use after bulk import or migration).
-pub fn rebuild_fts() {
-    init_db();
-    let conn = open();
+pub fn rebuild_fts_conn(conn: &Connection) {
     conn.execute_batch("INSERT INTO procs_fts(procs_fts) VALUES('rebuild');")
         .expect("FTS rebuild failed — does your SQLite support FTS5?");
+}
+
+pub fn rebuild_fts() {
+    let conn = open();
+    rebuild_fts_conn(&conn)
 }
 
 /// BM25 full-text search over procs.
 ///
 /// Returns results ranked by BM25 relevance (lower score = better match,
 /// consistent with SQLite's negative BM25 convention).
-pub fn search_fts(query: &str, limit: usize) -> Vec<FtsRow> {
-    init_db();
-    let conn = open();
+pub fn search_fts_conn(conn: &Connection, query: &str, limit: usize) -> Vec<FtsRow> {
     ensure_fts(&conn);
 
     // Sanitize query for FTS5: wrap each token in double quotes to avoid
@@ -741,13 +837,17 @@ pub fn search_fts(query: &str, limit: usize) -> Vec<FtsRow> {
     .collect()
 }
 
+pub fn search_fts(query: &str, limit: usize) -> Vec<FtsRow> {
+    let conn = open();
+    search_fts_conn(&conn, query, limit)
+}
+
 // ── v0.12 脚本契约库（脚本即 API） ──
 
 use crate::script::{Concurrency, ScriptCard};
 
 /// 注册（upsert）脚本契约。契约解析已在 script::parse_contract 完成。
-pub fn script_attach(card: &ScriptCard) -> Result<(), String> {
-    let conn = open();
+pub fn script_attach_conn(conn: &Connection, card: &ScriptCard) -> Result<(), String> {
     conn.execute(
         "INSERT INTO scripts (name, path, lang, desc, params, output, pure, idempotent,
                               concurrency, effects, timeout_secs, retries)
@@ -777,15 +877,23 @@ pub fn script_attach(card: &ScriptCard) -> Result<(), String> {
     Ok(())
 }
 
-pub fn script_detach(name: &str) -> bool {
+pub fn script_attach(card: &ScriptCard) -> Result<(), String> {
     let conn = open();
+    script_attach_conn(&conn, card)
+}
+
+pub fn script_detach_conn(conn: &Connection, name: &str) -> bool {
     conn.execute("DELETE FROM scripts WHERE name = ?1", [name])
         .map(|n| n > 0)
         .unwrap_or(false)
 }
 
-pub fn script_get(name: &str) -> Option<ScriptCard> {
+pub fn script_detach(name: &str) -> bool {
     let conn = open();
+    script_detach_conn(&conn, name)
+}
+
+pub fn script_get_conn(conn: &Connection, name: &str) -> Option<ScriptCard> {
     conn.query_row(
         "SELECT name, path, lang, desc, params, output, pure, idempotent,
                 concurrency, effects, timeout_secs, retries
@@ -812,8 +920,12 @@ pub fn script_get(name: &str) -> Option<ScriptCard> {
     .ok()
 }
 
-pub fn script_list() -> Vec<ScriptCard> {
+pub fn script_get(name: &str) -> Option<ScriptCard> {
     let conn = open();
+    script_get_conn(&conn, name)
+}
+
+pub fn script_list_conn(conn: &Connection) -> Vec<ScriptCard> {
     let mut stmt = conn
         .prepare(
             "SELECT name, path, lang, desc, params, output, pure, idempotent,
@@ -841,6 +953,11 @@ pub fn script_list() -> Vec<ScriptCard> {
         })
         .expect("script_list query failed");
     rows.filter_map(|r| r.ok()).collect()
+}
+
+pub fn script_list() -> Vec<ScriptCard> {
+    let conn = open();
+    script_list_conn(&conn)
 }
 
 // ── Tests ──
@@ -923,5 +1040,221 @@ mod tests {
             .unwrap();
         assert_eq!(rt, 6);
         assert!((el - 0.0).abs() < 1e-12);
+    }
+}
+
+// ── v0.12.1 内存库单元测试（*_conn 内核 + Connection 注入，零真实库污染）──
+
+#[cfg(test)]
+mod conn_tests {
+    use super::*;
+
+    fn memdb() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_DDL).unwrap();
+        conn
+    }
+
+    // ── scripts 契约卡 CRUD ──
+
+    #[test]
+    fn script_card_roundtrip() {
+        let conn = memdb();
+        let card = ScriptCard {
+            name: "word_stats".into(),
+            path: "/tmp/word_stats.py".into(),
+            lang: "python".into(),
+            desc: "词数统计".into(),
+            params: "text(str, required), top(int, default=5)".into(),
+            output: "words=int".into(),
+            pure: true,
+            idempotent: true,
+            concurrency: crate::script::Concurrency::Safe,
+            effects: "none".into(),
+            timeout_secs: 60,
+            retries: 1,
+        };
+        assert!(script_attach_conn(&conn, &card).is_ok());
+        let got = script_get_conn(&conn, "word_stats").unwrap();
+        assert_eq!(got.params, card.params);
+        assert!(got.pure);
+        assert_eq!(got.timeout_secs, 60);
+        // upsert：同名重挂覆盖
+        let mut v2 = card.clone();
+        v2.desc = "v2 描述".into();
+        v2.timeout_secs = 120;
+        assert!(script_attach_conn(&conn, &v2).is_ok());
+        let got2 = script_get_conn(&conn, "word_stats").unwrap();
+        assert_eq!(got2.desc, "v2 描述");
+        assert_eq!(got2.timeout_secs, 120);
+        // list 含它
+        assert!(script_list_conn(&conn)
+            .iter()
+            .any(|c| c.name == "word_stats"));
+        // detach
+        assert!(script_detach_conn(&conn, "word_stats"));
+        assert!(script_get_conn(&conn, "word_stats").is_none());
+        assert!(!script_detach_conn(&conn, "word_stats")); // 二次 detach false
+    }
+
+    // ── cost_cache TTL 语义 ──
+
+    #[test]
+    fn cost_cache_ttl_freshness() {
+        let conn = memdb();
+        cost_cache_put_conn(&conn, "p", "i", "latency", 201.0);
+        // TTL 内命中
+        assert_eq!(
+            cost_cache_get_fresh_conn(&conn, "p", "i", "latency", 86400),
+            Some(201.0)
+        );
+        // TTL 0 → 永远过期
+        assert_eq!(
+            cost_cache_get_fresh_conn(&conn, "p", "i", "latency", 0),
+            None
+        );
+        // 不存在的 key
+        assert_eq!(
+            cost_cache_get_fresh_conn(&conn, "p", "i", "risk", 86400),
+            None
+        );
+        // 覆盖更新
+        cost_cache_put_conn(&conn, "p", "i", "latency", 300.0);
+        assert_eq!(
+            cost_cache_get_fresh_conn(&conn, "p", "i", "latency", 86400),
+            Some(300.0)
+        );
+    }
+
+    #[test]
+    fn cost_cache_backdated_entry_expired() {
+        let conn = memdb();
+        // 手工插入一条 25h 前的测量 → TTL 24h 应视为过期
+        conn.execute(
+            "INSERT INTO cost_cache (proc_name, impl_name, field, value, measured_at)
+             VALUES ('p','i','latency',999.0, ?1)",
+            [unix_now() - 90000],
+        )
+        .unwrap();
+        assert_eq!(
+            cost_cache_get_fresh_conn(&conn, "p", "i", "latency", 86400),
+            None
+        );
+    }
+
+    // ── impl_prefs 乘性学习回路 ──
+
+    #[test]
+    fn pref_multiplicative_roundtrip() {
+        let conn = memdb();
+        record_pref_conn(&conn, "p", "i", true); // 1.0 × 1.1
+        let w1 = load_impl_prefs_conn(&conn)
+            .into_iter()
+            .find(|(p, i, _)| p == "p" && i == "i")
+            .unwrap()
+            .2;
+        assert!((w1 - 1.1).abs() < 1e-9);
+        record_pref_conn(&conn, "p", "i", false); // 1.1 ÷ 1.5
+        let w2 = load_impl_prefs_conn(&conn)
+            .into_iter()
+            .find(|(p, i, _)| p == "p" && i == "i")
+            .unwrap()
+            .2;
+        assert!((w2 - 1.1 / 1.5).abs() < 1e-9);
+        // clamp：连败 100 次 → 0.05
+        for _ in 0..100 {
+            record_pref_conn(&conn, "p", "i", false);
+        }
+        let w3 = load_impl_prefs_conn(&conn)
+            .into_iter()
+            .find(|(p, i, _)| p == "p" && i == "i")
+            .unwrap()
+            .2;
+        assert!((w3 - 0.05).abs() < 1e-9);
+    }
+
+    // ── patches 回路 ──
+
+    #[test]
+    fn patch_set_load_remove() {
+        let conn = memdb();
+        set_patch_conn(&conn, "pl", "proc", "impl", "enabled", "false");
+        set_patch_conn(&conn, "pl", "proc", "impl", "cost.latency", "42");
+        let patches = load_patches_conn(&conn, "pl");
+        assert_eq!(patches.len(), 2);
+        // 同字段重设 = 覆盖非追加
+        set_patch_conn(&conn, "pl", "proc", "impl", "cost.latency", "99");
+        let patches = load_patches_conn(&conn, "pl");
+        assert_eq!(patches.len(), 2);
+        assert!(patches
+            .iter()
+            .any(|p| p.field == "cost.latency" && p.value == "99"));
+        // 移除
+        remove_patch_conn(&conn, "pl", "proc", "impl", "cost.latency");
+        let patches = load_patches_conn(&conn, "pl");
+        assert_eq!(patches.len(), 1);
+        // 别的 pipeline 不串
+        assert!(load_patches_conn(&conn, "other").is_empty());
+    }
+
+    // ── runs 记录 + recent_runs 窗口 ──
+
+    #[test]
+    fn runs_record_and_recent_window() {
+        let conn = memdb();
+        for k in 0..25 {
+            record_run_rd_conn(
+                &conn,
+                "p",
+                &format!("i{k}"),
+                "",
+                "Ok",
+                k,
+                None,
+                None,
+                10,
+                0.0,
+            );
+        }
+        let rows = recent_runs_conn(&conn, "p");
+        assert_eq!(rows.len(), 20, "recent window = 20");
+        assert_eq!(rows[0].impl_name, "i24", "ORDER BY id DESC");
+        assert_eq!(rows[0].latency_ms, 24);
+    }
+
+    #[test]
+    fn runs_status_mixing() {
+        let conn = memdb();
+        record_run_rd_conn(&conn, "p", "ok", "", "Ok", 5, None, None, 8, 0.0);
+        record_run_rd_conn(
+            &conn,
+            "p",
+            "bad",
+            "",
+            "Fail",
+            7,
+            Some("abc12345"),
+            Some("p.bad.step"),
+            0,
+            0.0,
+        );
+        let rows = recent_runs_conn(&conn, "p");
+        assert_eq!(rows.len(), 2);
+        let bad = rows.iter().find(|r| r.impl_name == "bad").unwrap();
+        assert_eq!(bad.status, "Fail");
+    }
+
+    // ── db_stats ──
+
+    #[test]
+    fn stats_counts_after_writes() {
+        let conn = memdb();
+        record_run_rd_conn(&conn, "p", "i", "", "Ok", 1, None, None, 0, 0.0);
+        save_composition_conn(&conn, "comp", "desc", &["p".to_string()]);
+        let (pipelines, procs, runs, compositions) = db_stats_conn(&conn);
+        assert_eq!(runs, 1);
+        assert_eq!(compositions, 1);
+        assert_eq!(pipelines, 0);
+        assert_eq!(procs, 0);
     }
 }

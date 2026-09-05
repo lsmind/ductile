@@ -5,6 +5,7 @@
 
 pub mod ast;
 pub mod db;
+pub mod dslresult;
 pub mod egraph;
 pub mod eval;
 pub mod executor;
@@ -18,7 +19,6 @@ pub mod registry;
 pub mod script;
 pub mod steps;
 pub mod textargs;
-pub mod dslresult;
 pub mod typecheck;
 pub mod version;
 pub mod when;

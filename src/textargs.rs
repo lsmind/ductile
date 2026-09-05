@@ -327,7 +327,6 @@ mod tests {
         assert_eq!(expand_tilde("/absolute/path"), "/absolute/path");
     }
 
-
     // ── 新增边界用例 ──
 
     #[test]
@@ -347,10 +346,8 @@ mod tests {
 
     #[test]
     fn resolve_proc_field_from_structured() {
-        let encoded = crate::dslresult::encode_structured_result(
-            &[("score".into(), "85".into())],
-            "raw",
-        );
+        let encoded =
+            crate::dslresult::encode_structured_result(&[("score".into(), "85".into())], "raw");
         let mut results = BTreeMap::new();
         results.insert("gate".into(), Value::Text(encoded));
         assert_eq!(resolve_vars("@gate.score", "t", &results), "85");
