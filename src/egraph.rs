@@ -192,7 +192,7 @@ impl EGraph {
 // ── 构造：从 Pipeline 建立 e-graph ──
 
 /// 从 impl.body_text 提取 op（与 executor::detect_func 同语义）。
-fn body_op(body: &str) -> String {
+pub(crate) fn body_op(body: &str) -> String {
     let body = body.trim();
     if let Some(pos) = body.find('(') {
         let head: String = body[..pos]
@@ -207,7 +207,7 @@ fn body_op(body: &str) -> String {
 }
 
 /// 提取 body 中全部 @name 引用（保序，不去重）。
-fn body_refs(body: &str) -> Vec<String> {
+pub(crate) fn body_refs(body: &str) -> Vec<String> {
     let mut refs = Vec::new();
     let chars: Vec<char> = body.chars().collect();
     let mut i = 0;
@@ -230,7 +230,7 @@ fn body_refs(body: &str) -> Vec<String> {
 }
 
 /// 提取 body 中 key="value" / key = 'value' 形式的引号参数值（容忍空白）。
-fn extract_quoted_arg(body: &str, key: &str) -> Option<String> {
+pub(crate) fn extract_quoted_arg(body: &str, key: &str) -> Option<String> {
     let mut search_from = 0;
     while let Some(rel) = body[search_from..].find(key) {
         let start = search_from + rel;
@@ -1249,5 +1249,75 @@ mod tests {
             Some("a b.md".to_string())
         );
         assert_eq!(extract_quoted_arg("read(from=\"x\")", "to"), None);
+    }
+}
+
+// ── v0.12.1 egraph 原语直接单测 ──
+
+#[cfg(test)]
+mod prim_tests {
+    use super::*;
+
+    // ── body_op ──
+
+    #[test]
+    fn op_head_extraction() {
+        assert_eq!(body_op(r#"run("echo hi")"#), "run");
+        assert_eq!(body_op(r#"web_search(query="AI")"#), "web_search");
+        // 前导空白
+        assert_eq!(body_op(r#"  llm(x=1)"#), "llm");
+    }
+
+    #[test]
+    fn op_fallbacks() {
+        // 无括号 → call；head 只有符号字符 → call
+        assert_eq!(body_op("just text"), "call");
+        assert_eq!(body_op("(x)"), "call");
+        assert_eq!(body_op(""), "call");
+    }
+
+    // ── body_refs ──
+
+    #[test]
+    fn refs_ordered_no_dedup() {
+        // 与 parser::extract_refs 不同：保序不去重（enode 子项需要重复子项）
+        assert_eq!(body_refs("f(@a, @b, @a)"), vec!["a", "b", "a"]);
+    }
+
+    #[test]
+    fn refs_requires_alnum_after_at() {
+        // @ 后非字母数字（如 @/ @空格）不构成引用
+        assert!(body_refs("email@ host @/x").is_empty());
+    }
+
+    #[test]
+    fn refs_charset_includes_dash_underscore() {
+        assert_eq!(body_refs("@a-b @c_d"), vec!["a-b", "c_d"]);
+    }
+
+    // ── extract_quoted_arg ──
+
+    #[test]
+    fn quoted_arg_double_and_single_quotes() {
+        assert_eq!(extract_quoted_arg(r#"to="out.txt""#, "to"), Some("out.txt".into()));
+        assert_eq!(extract_quoted_arg(r#"to = 'single'"#, "to"), Some("single".into()));
+    }
+
+    #[test]
+    fn quoted_arg_tolerates_spacing() {
+        assert_eq!(extract_quoted_arg(r#"key  =  "v""#, "key"), Some("v".into()));
+    }
+
+    #[test]
+    fn quoted_arg_word_boundary() {
+        // key 不能是更长标识符的后缀：搜 "to" 不得命中 "into"
+        assert_eq!(extract_quoted_arg(r#"into="x" to="y""#, "to"), Some("y".into()));
+    }
+
+    #[test]
+    fn quoted_arg_missing_or_unquoted() {
+        assert_eq!(extract_quoted_arg(r#"to=out"#, "to"), None);      // 无引号
+        assert_eq!(extract_quoted_arg(r#"other="x""#, "to"), None);   // 无此键
+        assert_eq!(extract_quoted_arg(r#"to="#, "to"), None);         // 等号后无值
     }
 }
