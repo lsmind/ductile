@@ -1,68 +1,66 @@
+// Ductile 自发布流水线（v0.11 语法，裁判分离版）
+//
+// 用法：
+//   export DUCTILE_PYPI_TOKEN=pypi-xxxx    # https://pypi.org/manage/account/token/
+//   ductile run examples/release.pipeline
+//
+// 链路：fmt → test → push → build → publish → verify → report → deliver
+// 每步用块级 .when(@上游.rc ...) 门控（fail-closed）：上一步不过，
+// 下一步 All paths failed + [degraded]，exit 1。
+//
+// 注意：需要 ductile v0.11.1+（块级 .when 行生效）。
+// 旧版二进制会静默丢弃 .when 行导致链路失控——发布前先 ductile --help 确认版本。
+// token 走环境变量，不落盘。
+
 Pipeline("release", "Ductile 自发布流水线")
 
   .proc("fmt")
-    .desc("代码格式化")
+    .desc("格式门槛：cargo fmt --check")
     .plan(
-      fmt -> run("cd ~/projects/ductile && cargo fmt")
-        .tags(#build, #rust)
-        .desc("cargo fmt")
+      check -> run("cd ~/projects/ductile && cargo fmt --check >/dev/null 2>&1; echo rc=$?")
     )
-    .check(result => no_error, "fmt 失败")
 
   .proc("test")
-    .desc("运行测试")
+    .desc("测试门槛：cargo test 全绿才放行")
     .plan(
-      t1 -> run("cd ~/projects/ductile && cargo test --lib 2>&1 | grep 'test result'")
-        .tags(#build, #rust)
-        .desc("cargo test")
+      run_tests -> run("cd ~/projects/ductile && cargo test --release >/tmp/dt-test.log 2>&1; rc=$?; fails=$(grep -cE 'test result: FAILED' /tmp/dt-test.log); if [ $rc -eq 0 ] && [ $fails -eq 0 ]; then echo rc=0; else echo rc=1; fi")
     )
-    .check(result => not_empty, "测试未通过")
+    .when(@fmt.rc == 0)
 
-  .proc("check_dirty")
-    .desc("检查是否有未提交的改动")
+  .proc("push")
+    .desc("提交并推送（仅当有未提交改动时才 commit）")
     .plan(
-      c1 -> run("cd ~/projects/ductile && git diff --quiet HEAD 2>&1; echo EXIT_$?")
-        .tags(#git, #check)
-        .desc("git diff check")
+      commit_push -> run("cd ~/projects/ductile && git add -A && (git diff --cached --quiet || git commit -m 'release: pipeline-driven') && git push origin main >/dev/null 2>&1; rc=$?; echo rc=$rc; exit $rc").retry(n=2)
     )
+    .when(@test.rc == 0)
 
-  .proc("commit_push")
-    .desc("提交并推送")
+  .proc("build")
+    .desc("构建 wheel 并确认 0.11.0 产物存在")
     .plan(
-      p1 -> run("cd ~/projects/ductile && git add -A && git commit -m 'release: pipeline-driven' && git push origin main 2>&1")
-        .tags(#git, #push)
-        .desc("commit + push")
-        .retry(n=2),
-      p2 -> run("bash -c 'chmod 600 ~/.ssh/id_ed25519 2>/dev/null; eval $(ssh-agent -s) >/dev/null 2>&1; ssh-add ~/.ssh/id_ed25519 2>/dev/null; cd ~/projects/ductile && git push origin main' 2>&1")
-        .tags(#git, #fix)
-        .desc("修 SSH 后重试")
+      maturin_build -> run("cd ~/projects/ductile && .venv/bin/maturin build --release >/tmp/dt-build.log 2>&1 && ls target/wheels/ductile-0.11.0-*.whl >/dev/null 2>&1; rc=$?; echo rc=$rc; exit $rc")
     )
+    .when(@push.rc == 0)
 
   .proc("publish")
-    .desc("发布到 PyPI")
+    .desc("发布到 PyPI（maturin publish，token 走 DUCTILE_PYPI_TOKEN）")
     .plan(
-      pub1 -> run("cd ~/projects/ductile && maturin publish --username __token__ --password $DUCTILE_PYPI_TOKEN 2>&1 | tail -5")
-        .tags(#publish, #pypi)
-        .desc("maturin publish")
-        .retry(n=2)
+      maturin_publish -> run("cd ~/projects/ductile && .venv/bin/maturin publish --username __token__ --password \"$DUCTILE_PYPI_TOKEN\" >/tmp/dt-publish.log 2>&1; rc=$?; echo rc=$rc; exit $rc").retry(n=2)
     )
+    .when(@build.rc == 0)
 
   .proc("verify")
-    .desc("验证 PyPI 版本")
+    .desc("验证 PyPI 可拉取（等索引生效后 pip download）")
     .plan(
-      v1 -> run("pipx upgrade ductile 2>&1 | tail -3")
-        .tags(#verify, #pip)
-        .desc("pipx upgrade check")
+      pip_fetch -> run("sleep 30; python3 -m pip download ductile==0.11.0 --no-deps -d /tmp/dt-verify >/dev/null 2>&1; rc=$?; echo rc=$rc; exit $rc").retry(n=2)
     )
-    .check(result => no_error, "升级失败")
+    .when(@publish.rc == 0)
 
   .proc("report")
     .desc("生成发布报告")
     .plan(
-      r1 -> write(to="~/output/release_report.md", content="Release pipeline completed.\n\n- fmt: ok\n- test: 98 passed\n- push: ok\n- publish: ok\n- verify: ok\n")
-        .tags(#write, #file)
-        .desc("写报告")
+      write_report -> write(to="/home/beef/projects/ductile/target/release_report.md", content="Release 0.11.0 published.\n- fmt/test/push/build/publish/verify: all passed\n- wheel: target/wheels/ductile-0.11.0-cp311-*.whl\n- logs: /tmp/dt-test.log, /tmp/dt-build.log, /tmp/dt-publish.log\n")
     )
+    .when(@verify.rc == 0)
 
   .proc("deliver")
     .deliver(@report)
