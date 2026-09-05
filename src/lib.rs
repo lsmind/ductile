@@ -13,6 +13,7 @@ pub mod harvest;
 pub mod learn;
 pub mod parser;
 pub mod promote;
+pub mod ranking;
 pub mod registry;
 pub mod script;
 pub mod steps;
