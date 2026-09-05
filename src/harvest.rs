@@ -402,6 +402,7 @@ pub fn harvest_full_counts(
 
 // ── Minimal exact JSON extraction (v0.9.2): tool_calls 是合法 JSON ──
 
+#[derive(Debug, PartialEq)]
 enum Jv {
     S(String),
     A(Vec<Jv>),
@@ -415,7 +416,7 @@ fn jskip_ws(s: &str, i: &mut usize) {
     }
 }
 
-fn jparse(s: &str, i: &mut usize) -> Option<Jv> {
+pub(crate) fn jparse(s: &str, i: &mut usize) -> Option<Jv> {
     jskip_ws(s, i);
     let b = s.as_bytes();
     if *i >= s.len() {
@@ -479,7 +480,7 @@ fn jparse(s: &str, i: &mut usize) -> Option<Jv> {
     }
 }
 
-fn jparse_str(s: &str, i: &mut usize) -> Option<String> {
+pub(crate) fn jparse_str(s: &str, i: &mut usize) -> Option<String> {
     let b = s.as_bytes();
     if *i >= s.len() || b[*i] != b'"' {
         return None;
@@ -527,8 +528,11 @@ fn jparse_str(s: &str, i: &mut usize) -> Option<String> {
                                     let c = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
                                     if let Some(ch) = char::from_u32(c) {
                                         out.push(ch);
+                                        // 第二个 \uXXXX 跨 7 字节（含起始反斜杠）；
+                                        // 外层 escape 收尾还有一次 +=1，此处只推进 6。
+                                        // 旧代码 +6+1 与外层重复计数 → 索引冲过闭引号：
+                                        // 代理对在串尾返回 None；后随字符被静默丢弃。
                                         *i += 6;
-                                        *i += 1; // advance past escape start handled below
                                     }
                                 }
                             }
@@ -552,7 +556,7 @@ fn jparse_str(s: &str, i: &mut usize) -> Option<String> {
 
 /// 精确提取: tool_calls JSON → function.arguments(JSON字符串) → command.
 /// 失败时回退旧启发式.
-fn extract_commands_exact(tool_calls: &str) -> Vec<String> {
+pub(crate) fn extract_commands_exact(tool_calls: &str) -> Vec<String> {
     let mut i = 0usize;
     let Some(Jv::A(calls)) = jparse(tool_calls, &mut i) else {
         return extract_commands(tool_calls);
@@ -601,7 +605,7 @@ fn has_column(conn: &Connection, col: &str) -> bool {
 }
 
 /// crude but effective: pull "command":"..." JSON string values
-fn extract_commands(tool_calls: &str) -> Vec<String> {
+pub(crate) fn extract_commands(tool_calls: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = tool_calls;
     while let Some(i) = rest.find("command") {
@@ -631,7 +635,7 @@ fn extract_commands(tool_calls: &str) -> Vec<String> {
     out
 }
 
-fn find_json_string_end(s: &str) -> Option<usize> {
+pub(crate) fn find_json_string_end(s: &str) -> Option<usize> {
     let mut escaped = false;
     for (i, ch) in s.char_indices() {
         if escaped {
@@ -649,7 +653,7 @@ fn find_json_string_end(s: &str) -> Option<usize> {
 
 /// Normalize: first meaningful line; mark truncated invocations with …;
 /// canonicalize known temp paths so near-identical invocations merge.
-fn normalize(cmd: &str) -> String {
+pub(crate) fn normalize(cmd: &str) -> String {
     let c = cmd.trim();
     let mut line1 = c.lines().next().unwrap_or("").trim().to_string();
     if c.lines().count() > 1 || c.ends_with('\\') {
@@ -691,4 +695,203 @@ pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+// ── v0.12.1 JSON 解析器与命令提取单测（纯函数，零 I/O）──
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn jv(s: &str) -> Option<Jv> {
+        let mut i = 0usize;
+        jparse(s, &mut i)
+    }
+
+    // ── jparse 基础形态 ──
+
+    #[test]
+    fn jparse_scalar_and_other() {
+        assert_eq!(jv("\"hi\""), Some(Jv::S("hi".into())));
+        assert_eq!(jv("123"), Some(Jv::Other));       // number → Other
+        assert_eq!(jv("true"), Some(Jv::Other));
+        assert_eq!(jv("null"), Some(Jv::Other));
+        assert_eq!(jv(""), None);
+        assert_eq!(jv("   "), None);
+    }
+
+    #[test]
+    fn jparse_nested_containers() {
+        let v = jv("[1, {\"a\": [\"x\", \"y\"]}]").unwrap();
+        let Jv::A(items) = v else { panic!("array") };
+        assert_eq!(items.len(), 2);
+        let Jv::O(pairs) = &items[1] else { panic!("object") };
+        assert_eq!(pairs[0].0, "a");
+        let Jv::A(inner) = &pairs[0].1 else { panic!("inner array") };
+        assert_eq!(inner.len(), 2);
+    }
+
+    #[test]
+    fn jparse_trailing_garbage_tolerated() {
+        // jparse 只解析首个值——尾随垃圾不报错（调用方语义：提取即可）
+        assert_eq!(jv("\"cmd\" junk"), Some(Jv::S("cmd".into())));
+    }
+
+    #[test]
+    fn jparse_malformed_returns_none() {
+        assert_eq!(jv("[1,"), None);
+        assert_eq!(jv("{\"k\""), None);
+        assert_eq!(jv("{\"k\":"), None);
+    }
+
+    #[test]
+    fn jparse_empty_containers() {
+        assert_eq!(jv("[]"), Some(Jv::A(vec![])));
+        assert_eq!(jv("{}"), Some(Jv::O(vec![])));
+    }
+
+    // ── jparse_str 转义与 UTF-16 代理对 ──
+
+    #[test]
+    fn jparse_str_escapes() {
+        // JSON 文本: "a\nb\tc\"" = quote a \n b \t c \" quote
+        let s: String = vec!['"', 'a', '\\', 'n', 'b', '\\', 't', 'c', '\\', '"', '"']
+            .into_iter().collect();
+        let mut i = 0usize;
+        assert_eq!(jparse_str(&s, &mut i), Some("a\nb\tc\"".into()));
+        // JSON 文本: "\\/"
+        let s2: String = vec!['"', '\\', '\\', '/', '"'].into_iter().collect();
+        let mut i = 0usize;
+        assert_eq!(jparse_str(&s2, &mut i), Some("\\/".into()));
+        // unterminated
+        let mut i = 0usize;
+        assert_eq!(jparse_str("\"abc", &mut i), None);
+    }
+
+    #[test]
+    fn jparse_str_unicode_escape() {
+        // \u4e2d = 中
+        let mut i = 0usize;
+        assert_eq!(jparse_str("\"\\u4e2d\"", &mut i), Some("中".into()));
+    }
+
+    #[test]
+    fn jparse_str_surrogate_pair() {
+        // U+1F600 = \ud83d\ude00（UTF-16 代理对），代理对恰在串尾
+        let s: String = vec![
+            '"', '\\', 'u', 'd', '8', '3', 'd', '\\', 'u', 'd', 'e', '0', '0', '"',
+        ].into_iter().collect();
+        let mut i = 0usize;
+        assert_eq!(jparse_str(&s, &mut i), Some("\u{1F600}".into()));
+    }
+    #[test]
+    fn jparse_str_surrogate_pair_followed_by_char() {
+        // 回归：代理对后跟普通字符不得被吞（旧 off-by-one 会静默丢 x）
+        let s: String = vec![
+            '"', '\\', 'u', 'd', '8', '3', 'd', '\\', 'u', 'd', 'e', '0', '0', 'x', '"',
+        ].into_iter().collect();
+        let mut i = 0usize;
+        assert_eq!(jparse_str(&s, &mut i), Some("\u{1F600}x".into()));
+    }
+
+
+    #[test]
+    fn jparse_str_raw_utf8_multibyte() {
+        let mut i = 0usize;
+        assert_eq!(jparse_str("\"你好\"", &mut i), Some("你好".into()));
+    }
+
+    // ── extract_commands_exact：tool_calls → command 链 ──
+
+    #[test]
+    fn exact_simple_tool_call() {
+        let tc = r#"[{"function":{"name":"terminal","arguments":"{\"command\":\"echo hi\"}"}}]"#;
+        assert_eq!(extract_commands_exact(tc), vec!["echo hi"]);
+    }
+
+    #[test]
+    fn exact_multiple_calls() {
+        let tc = r#"[
+            {"function":{"name":"t","arguments":"{\"command\":\"ls -la\"}"}},
+            {"function":{"name":"t","arguments":"{\"command\":\"pwd\"}"}}
+        ]"#;
+        assert_eq!(extract_commands_exact(tc), vec!["ls -la", "pwd"]);
+    }
+
+    #[test]
+    fn exact_nested_escapes() {
+        // arguments 的 JSON 文本: {"command":"echo \"hi\" \\"}
+        // 解码后 command = echo "hi" \（含真实引号与反斜杠）
+        let args_json: String = vec![
+            '{', '"', 'c', 'o', 'm', 'm', 'a', 'n', 'd', '"', ':', '"',
+            'e', 'c', 'h', 'o', ' ', '\\', '"', 'h', 'i', '\\', '"', ' ', '\\', '\\',
+            '"', '}',
+        ].into_iter().collect();
+        let expected: String = vec![
+            'e', 'c', 'h', 'o', ' ', '"', 'h', 'i', '"', ' ', '\\',
+        ].into_iter().collect();
+        // arguments 是字符串化的 JSON → 整体再转义一层：\ → \\\\，" → \\"
+        let args_lit: String = args_json.chars().flat_map(|c| match c {
+            '\\' => vec!['\\', '\\'],
+            '"' => vec!['\\', '"'],
+            other => vec![other],
+        }).collect();
+        let tc = format!("[{{\"function\":{{\"arguments\":\"{}\"}}}}]", args_lit);
+        assert_eq!(extract_commands_exact(&tc), vec![expected]);
+    }
+
+    #[test]
+    fn exact_falls_back_to_heuristic_on_garbage() {
+        // 非 JSON 输入 → 回退 extract_commands 启发式
+        let out = extract_commands_exact("total garbage \"command\":\"x\" tail");
+        assert!(!out.is_empty(), "heuristic fallback must find command");
+    }
+
+    #[test]
+    fn exact_empty_on_empty() {
+        assert!(extract_commands_exact("[]").is_empty());
+    }
+
+    // ── extract_commands 启发式 ──
+
+    #[test]
+    fn heuristic_raw_json() {
+        let s = r#"pre {"command": "cargo test"} post"#;
+        assert_eq!(extract_commands(s), vec!["cargo test"]);
+    }
+
+    #[test]
+    fn heuristic_finds_multiple() {
+        let s = r#"{"command":"a"} {"command":"b"}"#;
+        assert_eq!(extract_commands(s), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn heuristic_no_command_key() {
+        assert!(extract_commands("nothing here").is_empty());
+    }
+
+    // ── find_json_string_end ──
+
+    #[test]
+    fn json_string_end_escape_aware() {
+        // 内容: \"bX" —— 索引1 的转义引号不是终点，索引4 的引号才是
+        let s: String = r#"\"bX""#.chars().collect();
+        assert_eq!(find_json_string_end(&s), Some(4));
+        // 无终点
+        assert_eq!(find_json_string_end("ab"), None);
+    }
+
+    // ── normalize ──
+
+    #[test]
+    fn normalize_first_line_and_truncation_mark() {
+        assert_eq!(normalize("line1\nline2"), "line1…");
+        assert_eq!(normalize("  single  "), "single");
+    }
+
+    #[test]
+    fn normalize_strips_hash_comment() {
+        assert_eq!(normalize("cmd arg # comment"), "cmd arg");
+    }
 }
