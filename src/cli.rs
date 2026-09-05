@@ -32,27 +32,13 @@ pub fn run(args: &[String]) -> Result<i32, String> {
                 }
             }
         },
-        "run" if args.len() >= 3 => {
-            // v0.11: --policy <file.eval> 可出现在 run 子命令任意位置；其余 token 为 topic。
-            let mut policy_path: Option<String> = None;
-            let mut topic_parts: Vec<&str> = Vec::new();
-            let mut i = 3;
-            while i < args.len() {
-                if args[i] == "--policy" {
-                    if i + 1 >= args.len() {
-                        eprintln!("--policy requires a .eval file path");
-                        return Ok(1);
-                    }
-                    policy_path = Some(args[i + 1].clone());
-                    i += 2;
-                } else {
-                    topic_parts.push(&args[i]);
-                    i += 1;
-                }
+        "run" if args.len() >= 3 => match split_run_args(&args[2..]) {
+            Err(e) => {
+                eprintln!("{}", e);
+                Ok(1)
             }
-            let topic = topic_parts.join(" ");
-            cmd_run(&args[2], &topic, policy_path.as_deref())
-        }
+            Ok((topic, policy_path)) => cmd_run(&args[2], &topic, policy_path.as_deref()),
+        },
         "graph" if args.len() >= 3 => cmd_graph(&args[2]),
         "parse" if args.len() >= 3 => cmd_parse(&args[2]),
 
@@ -91,19 +77,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             cmd_scaffold(&q)
         }
         "promote" => {
-            // promote [days] [top] [--dry]
-            let mut days: u32 = 7;
-            let mut top: usize = 40;
-            let mut dry = false;
-            for a in args.iter().skip(2) {
-                if a == "--dry" {
-                    dry = true;
-                } else if let Ok(d) = a.parse::<u32>() {
-                    days = d;
-                } else if let Ok(t) = a.parse::<usize>() {
-                    top = t;
-                }
-            }
+            let (days, top, dry) = parse_promote_args(&args[2..]);
             cmd_promote(days, top, dry)
         }
         "degraded" if args.len() >= 3 && args[2] == "clear" && args.len() >= 4 => {
@@ -242,11 +216,7 @@ fn cmd_script_show(name: &str) -> Result<i32, String> {
 
 /// 单发调用（绕过 pipeline，调试用）：ductile script call <name> "k=v, k=v"
 fn cmd_script_call(name: &str, kv: &str) -> Result<i32, String> {
-    let body = if kv.trim().is_empty() {
-        format!("script({})", name)
-    } else {
-        format!("script({}, {})", name, kv)
-    };
+    let body = build_script_call_body(name, kv);
     let impl_ = Impl {
         name: "cli_call".into(),
         description: String::new(),
@@ -869,7 +839,65 @@ fn cmd_fts(query: &str) -> Result<i32, String> {
 
 // ── helpers ──
 
-fn parse_topic_params(input: &str) -> (String, BTreeMap<String, String>) {
+// ── 纯参数解析（无 I/O，可单测）──
+
+/// run 子命令参数：--policy <file> 任意位置，其余 token 拼 topic。
+pub fn split_run_args(args: &[String]) -> Result<(String, Option<String>), String> {
+    let mut policy_path: Option<String> = None;
+    let mut topic_parts: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--policy" {
+            if i + 1 >= args.len() {
+                return Err("--policy requires a .eval file path".into());
+            }
+            policy_path = Some(args[i + 1].clone());
+            i += 2;
+        } else {
+            topic_parts.push(&args[i]);
+            i += 1;
+        }
+    }
+    Ok((topic_parts.join(" "), policy_path))
+}
+
+/// promote 参数：[days] [top] [--dry]，按**位置**区分（1st→days, 2nd→top）。
+/// 原实现按类型分支派发——但任何 u32 都能 parse 成 usize，第二个数字
+/// 永远命中 days 分支覆盖之，top 从未生效（promote 30 10 实为 days=10
+/// top=40 默认）。位置语义修复，单测 promote_positional_and_flag 钉死。
+pub fn parse_promote_args(args: &[String]) -> (u32, usize, bool) {
+    let mut days: u32 = 7;
+    let mut top: usize = 40;
+    let mut dry = false;
+    let mut positional = 0usize;
+    for a in args {
+        if a == "--dry" {
+            dry = true;
+        } else if positional == 0 {
+            if let Ok(d) = a.parse::<u32>() {
+                days = d;
+                positional += 1;
+            }
+        } else if positional == 1 {
+            if let Ok(t) = a.parse::<usize>() {
+                top = t;
+                positional += 1;
+            }
+        }
+    }
+    (days, top, dry)
+}
+
+/// script call 的 DSL body：空 kv → script(name)，否则 script(name, kv)。
+pub fn build_script_call_body(name: &str, kv: &str) -> String {
+    if kv.trim().is_empty() {
+        format!("script({})", name)
+    } else {
+        format!("script({}, {})", name, kv)
+    }
+}
+
+pub fn parse_topic_params(input: &str) -> (String, BTreeMap<String, String>) {
     let parts: Vec<&str> = input.split("--").collect();
     let topic = parts[0].trim().to_string();
     let topic = if topic.is_empty() { "AI".into() } else { topic };
@@ -1005,5 +1033,129 @@ fn cmd_harvest(days: u32) -> Result<i32, String> {
             }
             Ok(0)
         }
+    }
+}
+
+// ── v0.12.1 参数解析与分发单测 ──
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    // ── split_run_args ──
+
+    #[test]
+    fn run_args_policy_extracted() {
+        let (topic, policy) = split_run_args(&s(&["my", "topic", "--policy", "p.eval"])).unwrap();
+        assert_eq!(topic, "my topic");
+        assert_eq!(policy.as_deref(), Some("p.eval"));
+    }
+
+    #[test]
+    fn run_args_policy_first() {
+        let (topic, policy) = split_run_args(&s(&["--policy", "p.eval", "hello"])).unwrap();
+        assert_eq!(topic, "hello");
+        assert_eq!(policy.as_deref(), Some("p.eval"));
+    }
+
+    #[test]
+    fn run_args_no_policy() {
+        let (topic, policy) = split_run_args(&s(&["just", "topic"])).unwrap();
+        assert_eq!(topic, "just topic");
+        assert!(policy.is_none());
+    }
+
+    #[test]
+    fn run_args_policy_missing_value_err() {
+        assert!(split_run_args(&s(&["t", "--policy"])).is_err());
+    }
+
+    #[test]
+    fn run_args_policy_consumes_next_token() {
+        // --policy 后跟的 token 不会被误当 topic
+        let (topic, _) =
+            split_run_args(&s(&["--policy", "a.eval", "x", "--policy", "b.eval"])).unwrap();
+        assert_eq!(topic, "x");
+    }
+
+    // ── parse_promote_args ──
+
+    #[test]
+    fn promote_defaults() {
+        assert_eq!(parse_promote_args(&[]), (7, 40, false));
+    }
+
+    #[test]
+    fn promote_positional_and_flag() {
+        assert_eq!(
+            parse_promote_args(&s(&["30", "10", "--dry"])),
+            (30, 10, true)
+        );
+    }
+
+    #[test]
+    fn promote_only_flag() {
+        assert_eq!(parse_promote_args(&s(&["--dry"])), (7, 40, true));
+    }
+
+    // ── build_script_call_body ──
+
+    #[test]
+    fn script_call_body_empty_kv() {
+        assert_eq!(build_script_call_body("report", ""), "script(report)");
+        assert_eq!(build_script_call_body("report", "   "), "script(report)");
+    }
+
+    #[test]
+    fn script_call_body_with_kv() {
+        assert_eq!(
+            build_script_call_body("report", "topic=x"),
+            "script(report, topic=x)"
+        );
+    }
+
+    // ── parse_topic_params ──
+
+    #[test]
+    fn topic_params_split() {
+        let (topic, params) = parse_topic_params("量子计算 --mode=fast --n=3");
+        assert_eq!(topic, "量子计算");
+        assert_eq!(params.get("mode").unwrap(), "fast");
+        assert_eq!(params.get("n").unwrap(), "3");
+        assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn topic_params_empty_topic_defaults_ai() {
+        let (topic, params) = parse_topic_params("--mode=deep");
+        assert_eq!(topic, "AI");
+        assert_eq!(params.get("mode").unwrap(), "deep");
+    }
+
+    #[test]
+    fn topic_params_no_eq_skipped() {
+        let (_, params) = parse_topic_params("t --flag --k=v");
+        assert_eq!(params.len(), 1);
+        assert!(params.contains_key("k"));
+    }
+
+    #[test]
+    fn topic_params_empty_key_skipped() {
+        let (_, params) = parse_topic_params("t -- =v");
+        assert!(params.is_empty());
+    }
+
+    // ── 分发冒烟：usage 退出码 ──
+
+    #[test]
+    fn dispatch_no_args_usage() {
+        let args: Vec<String> = vec![];
+        assert_eq!(run(&args).unwrap(), 1);
+        assert_eq!(run(&s(&["ductile"])).unwrap(), 1);
+        assert_eq!(run(&s(&["ductile", "no-such-cmd"])).unwrap(), 1);
     }
 }
