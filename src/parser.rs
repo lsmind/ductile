@@ -32,7 +32,7 @@ impl std::fmt::Display for ParseError {
 }
 
 // Check if line is blank or comment
-fn is_skippable(line: &str) -> bool {
+pub(crate) fn is_skippable(line: &str) -> bool {
     let trimmed = line.trim();
     trimmed.is_empty() || trimmed.starts_with("//")
 }
@@ -117,7 +117,7 @@ fn parse_header(line: &str, line_num: usize) -> Result<(String, String), ParseEr
     Ok((name, description))
 }
 
-fn extract_all_quoted(s: &str) -> Vec<String> {
+pub(crate) fn extract_all_quoted(s: &str) -> Vec<String> {
     let mut result = Vec::new();
     let bytes: Vec<char> = s.chars().collect();
     let mut i = 0;
@@ -139,7 +139,7 @@ fn extract_all_quoted(s: &str) -> Vec<String> {
     result
 }
 
-fn find_matching_paren(s: &str) -> Option<usize> {
+pub(crate) fn find_matching_paren(s: &str) -> Option<usize> {
     let mut depth = 0i32;
     for (i, c) in s.chars().enumerate() {
         match c {
@@ -156,7 +156,7 @@ fn find_matching_paren(s: &str) -> Option<usize> {
     None
 }
 
-fn extract_quoted(s: &str) -> Option<String> {
+pub(crate) fn extract_quoted(s: &str) -> Option<String> {
     let bytes: Vec<char> = s.chars().collect();
     let mut i = 0;
     while i < bytes.len() {
@@ -453,11 +453,11 @@ fn parse_impl_entries(text: &str, proc_name: &str) -> Result<Vec<Impl>, ParseErr
     Ok(impls)
 }
 
-fn find_arrow(s: &str) -> Option<usize> {
+pub(crate) fn find_arrow(s: &str) -> Option<usize> {
     s.find(" -> ").or_else(|| s.find("->"))
 }
 
-fn split_impl_entries(text: &str) -> Vec<String> {
+pub(crate) fn split_impl_entries(text: &str) -> Vec<String> {
     let mut entries = Vec::new();
     let mut depth = 0i32;
     let mut current = String::new();
@@ -613,7 +613,7 @@ fn extract_cost_and_modifiers(
     )
 }
 
-fn extract_refs(body: &str) -> Vec<String> {
+pub(crate) fn extract_refs(body: &str) -> Vec<String> {
     let mut refs = Vec::new();
     let chars: Vec<char> = body.chars().collect();
     let mut i = 0;
@@ -680,7 +680,7 @@ fn parse_foreach_line(line: &str) -> Result<(String, String), ParseError> {
     Ok((src, var))
 }
 
-fn extract_last_quoted(s: &str) -> Option<String> {
+pub(crate) fn extract_last_quoted(s: &str) -> Option<String> {
     let mut result = None;
     let chars: Vec<char> = s.chars().collect();
     let mut i = 0;
@@ -721,7 +721,7 @@ pub fn parse_pipeline_file(path: &str) -> Result<Pipeline, ParseError> {
 //   <proc>.<impl> cost latency=measure("/abs/bench.sh {topic}") risk=0.05
 // 值语法：纯数字 → Direct(f64)；measure("命令") → Measure(cmd)。
 
-fn parse_policy_value(raw: &str) -> Result<CostValue, String> {
+pub(crate) fn parse_policy_value(raw: &str) -> Result<CostValue, String> {
     let raw = raw.trim();
     if let Some(open) = raw.find("measure(") {
         let rest = &raw[open + "measure(".len()..];
@@ -743,7 +743,7 @@ fn parse_policy_value(raw: &str) -> Result<CostValue, String> {
     })
 }
 
-fn apply_policy_field(spec: &mut CostSpec, field: &str, val_raw: &str) -> Result<(), String> {
+pub(crate) fn apply_policy_field(spec: &mut CostSpec, field: &str, val_raw: &str) -> Result<(), String> {
     let v = parse_policy_value(val_raw)?;
     match field {
         "latency" => spec.latency = Some(v),
@@ -856,7 +856,7 @@ pub fn parse_policy(input: &str) -> Result<Policy, String> {
 
 /// cost 行参数的引号感知分词：`latency=measure("a b") risk=0.05` →
 /// [("latency", `measure("a b")`), ("risk", "0.05")]。
-fn parse_cost_args(args: &str) -> Result<Vec<(String, String)>, String> {
+pub(crate) fn parse_cost_args(args: &str) -> Result<Vec<(String, String)>, String> {
     let chars: Vec<char> = args.chars().collect();
     let mut out = Vec::new();
     let mut i = 0;
@@ -1336,5 +1336,152 @@ Pipeline("t")
         assert!(tags.contains("search"));
         assert!(tags.contains("network"));
         assert!(tags.contains("file"));
+    }
+}
+
+// ── v0.12.1 解析原语直接单测（纯函数，此前仅经集成路径间接覆盖）──
+
+#[cfg(test)]
+mod prim_tests {
+    use super::*;
+
+    // ── is_skippable ──
+
+    #[test]
+    fn skippable_blank_and_comment() {
+        assert!(is_skippable(""));
+        assert!(is_skippable("   "));
+        assert!(is_skippable("  // comment"));
+        assert!(!is_skippable(".proc(\"x\")"));
+    }
+
+    // ── extract_quoted / extract_all_quoted / extract_last_quoted ──
+
+    #[test]
+    fn quoted_first_and_last() {
+        assert_eq!(extract_quoted(r#"a "first" b"#), Some("first".into()));
+        assert_eq!(extract_quoted("no quotes"), None);
+        assert_eq!(extract_last_quoted(r#""a" mid "b""#), Some("b".into()));
+        assert_eq!(extract_last_quoted("none"), None);
+    }
+
+    #[test]
+    fn all_quoted_multiple_and_unterminated() {
+        assert_eq!(extract_all_quoted(r#"x="1" y="2""#), vec!["1", "2"]);
+        // 未闭合引号：取到串尾
+        let out = extract_all_quoted(r#""abc"#);
+        assert_eq!(out, vec!["abc"]);
+    }
+
+    #[test]
+    fn quoted_multibyte_safe() {
+        // 中文按字符收集，不按字节错切
+        assert_eq!(extract_quoted(r#"k="你好""#), Some("你好".into()));
+    }
+
+    // ── find_matching_paren ──
+
+    #[test]
+    fn matching_paren_nested() {
+        assert_eq!(find_matching_paren("fn(a, g(b)) tail"), Some(10));
+        assert_eq!(find_matching_paren("(outer (inner))"), Some(14));
+        assert_eq!(find_matching_paren("no paren"), None);
+        assert_eq!(find_matching_paren("((unbalanced"), None);
+    }
+
+    // ── find_arrow / split_impl_entries ──
+
+    #[test]
+    fn arrow_spaced_and_tight() {
+        assert_eq!(find_arrow("a -> b"), Some(1)); // " -> " 模式含前导空格，始于 1
+        assert_eq!(find_arrow("a ->b"), Some(2));  // 紧凑回退 "->" 始于 2
+        assert_eq!(find_arrow("a-> b"), Some(1)); // 紧凑形态 "->" 在索引 1
+        assert_eq!(find_arrow("no arrow"), None);
+    }
+
+    #[test]
+    fn split_entries_depth_aware() {
+        // 括号内的逗号不切分；换行折叠为空格
+        let text = "run(\"a, b\"),\n llm(x=1)";
+        let out = split_impl_entries(text);
+        assert_eq!(out.len(), 2, "{:?}", out);
+        assert!(out[0].contains("a, b"));
+        assert!(out[1].contains("llm"));
+    }
+
+    #[test]
+    fn split_entries_trailing_empty_dropped() {
+        let out = split_impl_entries("a, b,");
+        assert_eq!(out.len(), 2, "trailing comma must not yield empty entry: {:?}", out);
+    }
+
+    // ── extract_refs ──
+
+    #[test]
+    fn refs_dedup_and_charset() {
+        let body = "merge(@a, @b, @a-x) then @a again";
+        let refs = extract_refs(body);
+        assert_eq!(refs, vec!["a", "b", "a-x"]);
+        // @a-x 后的 @a 不重复（a 已在首位）
+    }
+
+    #[test]
+    fn refs_none_when_no_at() {
+        assert!(extract_refs("plain body").is_empty());
+    }
+
+    // ── parse_policy_value / apply_policy_field ──
+
+    #[test]
+    fn policy_value_direct_number() {
+        assert_eq!(parse_policy_value("5000.0"), Ok(CostValue::Direct(5000.0)));
+        assert_eq!(parse_policy_value(" 42 "), Ok(CostValue::Direct(42.0)));
+    }
+
+    #[test]
+    fn policy_value_measure_forms() {
+        match parse_policy_value("measure(\"bench.sh {topic}\")").unwrap() {
+            CostValue::Measure(cmd) => assert_eq!(cmd, "bench.sh {topic}"),
+            other => panic!("{:?}" , other),
+        }
+        // 尾随垃圾：rfind(')') 取最后一个 —— measure("a(b)")
+        match parse_policy_value("measure(\"echo (x) 1.0\")").unwrap() {
+            CostValue::Measure(cmd) => assert!(cmd.contains("(x)"), "{}", cmd),
+            other => panic!("{:?}", other),
+        }
+    }
+
+    #[test]
+    fn policy_value_errors() {
+        // measure 缺右括号
+        assert!(parse_policy_value("measure(\"cmd").is_err());
+        // measure 命令为空
+        assert!(parse_policy_value("measure(\"  \")").is_err());
+        // 非数字非 measure
+        assert!(parse_policy_value("fast").is_err());
+    }
+
+    #[test]
+    fn policy_field_routing_and_unknown() {
+        let mut spec = CostSpec::default();
+        assert!(apply_policy_field(&mut spec, "latency", "100").is_ok());
+        assert_eq!(spec.latency, Some(CostValue::Direct(100.0)));
+        assert!(apply_policy_field(&mut spec, "risk", "0.5").is_ok());
+        assert!(apply_policy_field(&mut spec, "money", "0.01").is_ok());
+        // 未知字段
+        assert!(apply_policy_field(&mut spec, "rd", "1.0").is_err());
+        // 坏值
+        assert!(apply_policy_field(&mut spec, "latency", "x").is_err());
+    }
+
+    // ── parse_cost_args ──
+
+    #[test]
+    fn cost_args_pairs_and_errors() {
+        // 语义确认：value 段按空白/逗号截断 —— "10," 的逗号归入 value
+        let out = parse_cost_args("latency=10, risk=0.5").unwrap();
+        assert_eq!(out[0].0, "latency");
+        assert_eq!(out[1], ("risk".to_string(), "0.5".to_string()));
+        assert!(parse_cost_args("bogus").is_err());
     }
 }
