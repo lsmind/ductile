@@ -111,10 +111,15 @@ fn check(path: &str) -> PyResult<String> {
     }
 }
 
-/// Run a pipeline file with a topic and optional params.
+/// Run a pipeline file with a topic and optional params + .eval policy.
 #[pyfunction]
-#[pyo3(signature = (path, topic="", params=None))]
-fn run(path: &str, topic: &str, params: Option<BTreeMap<String, String>>) -> PyResult<String> {
+#[pyo3(signature = (path, topic="", params=None, policy=None))]
+fn run(
+    path: &str,
+    topic: &str,
+    params: Option<BTreeMap<String, String>>,
+    policy: Option<&str>,
+) -> PyResult<String> {
     let pl = parse_pipeline_file(path).map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
     let errs = check_pipeline(&pl);
     if !errs.is_empty() {
@@ -128,8 +133,15 @@ fn run(path: &str, topic: &str, params: Option<BTreeMap<String, String>>) -> PyR
             msg
         )));
     }
+    // v0.11: .eval 策略挂载（路径或 None = 引擎默认评价）。
+    let policy_opt = match policy {
+        Some(p) => {
+            Some(parse_policy_file(p).map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?)
+        }
+        None => None,
+    };
     let params = params.unwrap_or_default();
-    match exec_pipeline(topic, &params, &pl, None) {
+    match exec_pipeline(topic, &params, &pl, policy_opt.as_ref()) {
         ExecResult::Success(results) => {
             let mut out = format!("Pipeline executed successfully ({} procs)\n", results.len());
             for (k, v) in &results {
