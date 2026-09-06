@@ -43,19 +43,21 @@ Pipeline("name", "optional description")
         .tags(#tag1, #tag2)
         .desc("optional")
         .retry(n=3)
-        .when(mode == "deep")
+        .when(mode == "deep")          // 内联 when（impl 级）
         .disabled
-        .stub
-        .cost(latency=100, risk=0.1, tokens=500, money=0.01)
-        .ensure(result => predicate, "error message"),
+        .stub,
       fallback_name -> body_function(args)
         .tags(#tag3, #tag4)
     )
-    .check(result => predicate, "error message")
-    .when(@upstream_judge.score < 80)
+    .when(@upstream_judge.score < 80)  // 块级 when（下推到全部 impls，内联优先）
     .foreach(source=@upstream_proc, var=item_name)
     .deliver(@upstream_proc)
 ```
+
+> **v0.11 退役语法**（仍可解析但警告+忽略，不入 AST）：`.cost(latency=..., ...)`、
+> `.ensure(result => ..., "...")`、`.check(result => ..., "...")`。
+> cost/权重 → `.eval` 策略文件 + `--policy` 挂载（§2/§3）；质量门槛 → 独立 judge proc +
+> 块级 `.when` 路由。**不要在新管线中使用。**
 
 ### 1.3 语法约定
 
@@ -720,3 +722,71 @@ ductile script detach <name>            注销
 
 示例：`examples/scripts/word_stats.py`（纯函数）、`examples/scripts/make_report.sh`（fs 副作用）；
 验收链路：`pipelines/script_demo.pipeline`。
+
+---
+
+## 10. 模块结构与测试架构（v0.12.1 — 全系统解耦）
+
+### 10.1 模块地图
+
+```
+src/
+├── parser.rs     # DSL 解析（.pipeline 主体 + .eval 策略文件）
+├── ast.rs        # 类型（Impl/Proc/Pipeline/Policy/CostSpec/CostValue）
+├── typecheck.rs  # 类型检查
+├── executor.rs   # 编排主干（exec_pipeline/exec_proc/foreach/retry/patches）— 697 行
+├── steps.rs      # step_registry 注册表（清单即表）+ 21 个内置执行器
+│                 #   进程：spawn/procs/kill/wait（PROC_TABLE + process_group(0) 自立进程组）
+│                 #   文件：exists/stat/ls/rm/cp/mkdir/disk（rm 拒绝 / 与 $HOME）
+│                 #   读写：read/write/run/sh + search/llm/merge + script(name,...)
+├── textargs.rs   # 纯文本解析原语：detect_func/resolve_vars(@proc.field)/extract_*
+├── dslresult.rs  # ##DSL_RESULT 协议：parse_dsl_result_block/encode/extract_field/est_loss
+├── ranking.rs    # 偏好学习（ImplPrefs 乘性权重 ×1.1/÷1.5 clamp[0.05,20]）+ 排序 + 失败惩罚
+├── eval.rs       # 裁判分离运行时：Evaluator/CostSource(measure 实测)/CostCacheStore
+├── egraph.rs     # e-graph 等价类 + CSE + when-载体熔合守卫
+├── db.rs         # SQLite 层：22 个 *_conn(conn) 注入内核 + 全局薄壳；SCHEMA_DDL 单一事实源
+├── script.rs     # v0.12 脚本契约：契约头解析/lang 解释器/cse_safe 判定
+└── cli.rs        # 命令分发 + 纯参数解析（split_run_args/parse_promote_args）
+```
+
+兼容性：executor 对拆出符号保留 re-export（`executor::detect_func` 等旧路径不变）。
+
+### 10.2 测试架构（262 个，三层）
+
+| 层 | 对象 | 手法 |
+|----|------|------|
+| 纯函数直测 | 解析原语/JSON 解析器/协议编解码/参数解析 | 无 I/O 断言输入输出 |
+| 内存库回路 | db 层 22 函数 | `Connection::open_in_memory` + SCHEMA_DDL，零真实库污染 |
+| 真实子进程集成 | run/spawn/kill/wait/fs 算子 | 临时目录 + setsid 进程组隔离 |
+
+测试演进：v0.12.0 的 162 → 262（+100）。解耦过程暴露并修复 6 个潜伏 bug：
+
+1. `exec_spawn` 未自立进程组 → `kill -9 -pid` 组杀目标组不存在、静默无效
+2. `exec_wait`/`exec_procs` 以 `/proc` 存在性判活 → 僵尸进程死等超时
+3. `dslresult::extract_field` RAW 终止符死分支（`starts_with("RAW§§")` 在 `split("§§")` 后永假）→ 字段提取越界进原始 stdout
+4. executor 残留 v0.11 迁移死代码岛 ~135 行（apply_policy/resolve_cost_value/first_f64）
+5. `parse_promote_args` 按类型分支派发 → 第二位置参数从未生效（任何 u32 都可 parse 成 usize）
+6. `harvest::jparse_str` UTF-16 代理对 off-by-one（`+6+1` 重复计数）→ 串尾代理对返回 None、后随字符被吞
+
+### 10.3 db 层注入模式
+
+数据函数双形态：
+
+```rust
+// 内核：测试注入内存连接
+pub fn record_run_rd_conn(conn: &Connection, proc_name: &str, ...) { ... }
+
+// 薄壳：生产路径（全局库）
+pub fn record_run_rd(proc_name: &str, ...) {
+    let conn = open();
+    record_run_rd_conn(&conn, proc_name, ...)
+}
+```
+
+新增数据函数一律遵循此模式；表结构改动改 `SCHEMA_DDL` 常量（init_db 与测试共用）。
+
+### 10.4 脚本写作的测试纪律
+
+- 测试数据含引号/反斜杠/代理对时，用**字符字面量数组**构造（`vec!['"', '\\', 'n', ...]`），
+  不用 raw string（`"#` 定界符与 `\"` 序列撞车）与双层转义
+- 覆盖率工具（tarpaulin）与 pyo3 不兼容（debug 链接缺 libpython）——以测试面清单为准

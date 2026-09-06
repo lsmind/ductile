@@ -4,8 +4,8 @@
 
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-129%20passed-brightgreen.svg)](#测试)
-[![PyPI](https://img.shields.io/badge/PyPI-0.5.0-blue.svg)](https://pypi.org/project/ductile/)
+[![Tests](https://img.shields.io/badge/Tests-262%20passed-brightgreen.svg)](#测试)
+[![PyPI](https://img.shields.io/badge/PyPI-0.6.1-blue.svg)](https://pypi.org/project/ductile/)
 
 ---
 
@@ -53,9 +53,15 @@ Pipeline("research")
       mcp -> mcp_search(query="{topic}")
         .tags(#search, #mcp)
     )
-    .check(result => has_results, "搜索无结果")
+
+  .proc("gate")
+    .plan(
+      g -> run("judge.sh {topic}")   # 裁判独立：stdout 末尾输出 ##DSL_RESULT score=85
+        .tags(#judge)
+    )
 
   .proc("write_report")
+    .when(@gate.score < 80)          # 分数不达标 → 走返工路径，废品不进门
     .plan(
       w -> write(to="~/output/report.md", content=@search)
         .tags(#write, #file)
@@ -71,7 +77,7 @@ Pipeline("research")
 ductile run research.pipeline "RISC-V 架构"
 ```
 
-web 路径失败 → 自动滑到 mcp → check 不过 → 触发降级。连续失败 3 次 → 永久跳过。**你只管声明，引擎自己学。**
+web 路径失败 → 自动滑到 mcp；裁判打分 < 80 → deliver 被门住（fail-closed）。连续失败 3 次 → 永久跳过。**你只管声明，引擎自己学。**
 
 ## 核心能力
 
@@ -97,9 +103,9 @@ ductile graph your.pipeline   # 看 e-class 明细 / 融合规则命中 / CSE �
 
 `.when(cond)` 支持两种写法（v0.11.1）：内联（`x -> body.when(cond)`，impl 级）与块级（`.when(cond)` 独立成行，下推到该 proc 全部 impls，内联优先）。块级条件里的 `@judge.field` 引用自动建 DAG 边保证裁判先执行；求值 fail-closed（坏条件/缺席裁判不放行）。实测：`score=72` → deliver 放行；`score=85` → `All paths failed for proc: deliver` + degraded 置位（exit 1）。
 
-### Check 硬门槛
+### 裁判分离的质量门槛（v0.11）
 
-结果不达标 = 当前路径失败 = 触发降级。废品不进门。
+`.cost()/.check()/.ensure()` 已退役。质量门槛 = 独立 judge proc（输出 `##DSL_RESULT score=N`）+ 下游 `.when(@judge.score < 80)` 路由——产出者不自证清白，裁判缺席/坏条件一律不放行（fail-closed）。
 
 ### 热补丁
 
@@ -153,6 +159,27 @@ AI 会自动生成正确的 `.pipeline` 文件和 CLI 命令。
 
 ---
 
+## 代码结构
+
+```
+src/
+├── parser.rs     # DSL 解析（.pipeline / .eval 策略）
+├── ast.rs        # 类型（Impl/Proc/Pipeline/Policy/CostValue）
+├── typecheck.rs  # 类型检查
+├── executor.rs   # 编排主干（pipeline/proc/foreach/retry）
+├── steps.rs      # step_registry + 21 个内置执行器（fs/进程/读写/run/llm/search/script）
+├── textargs.rs   # 纯文本解析原语（detect_func/resolve_vars/extract_*）
+├── dslresult.rs  # ##DSL_RESULT 协议编解码
+├── ranking.rs    # 偏好学习/排序/失败惩罚
+├── eval.rs       # Evaluator/CostSource/CostCache（裁判分离运行时）
+├── egraph.rs     # e-graph 等价类 + CSE + when-载体守卫
+├── db.rs         # SQLite（*_conn 注入内核，测试用内存库）
+├── script.rs     # v0.12 脚本契约（脚本即 API）
+└── cli.rs        # 命令分发 + 纯参数解析
+```
+
+17 模块各带单元测试；总 262 个测试（纯函数直测 + 内存库回路 + 真子进程集成），`cargo test --lib` 一条命令全跑。
+
 ## 设计哲学
 
 - **声明意图，不声明猜测值** — 不需要手写 cost 数字，引擎自己学
@@ -165,7 +192,7 @@ AI 会自动生成正确的 `.pipeline` 文件和 CLI 命令。
 cargo test --lib
 ```
 
-102 个测试，全部通过（含 RD 排序、est_loss v1 字段覆盖度、反双重计费回归门禁）。
+262 个测试，全部通过。覆盖：解析原语、##DSL_RESULT 协议、内存库 CRUD/TTL 回路、偏好学习收敛、e-graph 熔合守卫、fs/进程算子（真子进程）、JSON 解析器（含 UTF-16 代理对）。
 
 ## License
 
