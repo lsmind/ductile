@@ -175,16 +175,6 @@ agent = create_react_agent(llm, tools, prompt)   # 或任何 LangChain Agent
 - **失败是数据不是异常**：执行失败返回 `{"ok":false,"error":...}`，agent 可按 JSON 路由；创作错误（解析/类型检查）才抛异常
 - 脚本 attach 后重新调用 `langchain_tools()` 即时刷新工具集
 
-## Web 控制台（v0.13）
-
-```bash
-ductile serve [addr]        # 默认 127.0.0.1:7878
-```
-
-暗色蓝金控制台（零依赖，std-only HTTP + 单文件前端）：库统计、执行面板（topic/policy/params）、最近执行记录、流水线结构视图（procs/impls/when/refs/并行组/关键路径）、**脚本契约卡——PURE/SAFE/CSE-SAFE 标志 + 参数输入框 + 一键调用**。
-
-HTTP API 同源开放：`GET /api/{stats,scripts,procs,pipeline,runs}` + `POST /api/{run,script_call}`。
-
 ## 代码结构
 
 ```
@@ -201,8 +191,7 @@ src/
 ├── egraph.rs     # e-graph 等价类 + CSE + when-载体守卫
 ├── db.rs         # SQLite（*_conn 注入内核，测试用内存库）
 ├── script.rs     # v0.12 脚本契约（脚本即 API）
-├── api.rs        # v0.13 富 API 层（core+pyo3 薄壳双形态，LangChain/serve 共用）
-├── serve.rs      # v0.13 HTTP 控制台（std-only，内嵌前端）
+├── api.rs        # v0.13 富 API 层（core+pyo3 薄壳双形态，LangChain 共用）
 └── cli.rs        # 命令分发 + 纯参数解析
 ```
 

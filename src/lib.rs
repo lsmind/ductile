@@ -18,7 +18,6 @@ pub mod promote;
 pub mod ranking;
 pub mod registry;
 pub mod script;
-pub mod serve;
 pub mod steps;
 pub mod textargs;
 pub mod typecheck;

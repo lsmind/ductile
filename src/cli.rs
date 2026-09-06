@@ -56,8 +56,6 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         "learn" => cmd_learn(""),
 
         // v0.8.1 harvest line
-        "serve" if args.len() >= 3 => cmd_serve(&args[2]),
-        "serve" => cmd_serve("127.0.0.1:7878"),
         "doctor" => cmd_doctor(),
         "wrap" if args.len() >= 5 => {
             // ductile wrap <tag> -- <cmd...>
@@ -917,13 +915,6 @@ pub fn parse_topic_params(input: &str) -> (String, BTreeMap<String, String>) {
 }
 
 // ── v0.8.1: doctor / wrap / harvest ──
-
-fn cmd_serve(addr: &str) -> Result<i32, String> {
-    match crate::serve::serve(addr) {
-        Ok(()) => Ok(0),
-        Err(e) => Err(format!("serve failed: {}", e)),
-    }
-}
 
 fn cmd_doctor() -> Result<i32, String> {
     let report = harvest::doctor();

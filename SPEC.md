@@ -793,12 +793,12 @@ pub fn record_run_rd(proc_name: &str, ...) {
 
 ---
 
-## 11. API 层与集成面（v0.13）
+## 11. API 层与 LangChain 集成（v0.13）
 
 ### 11.1 架构：core + 薄壳双形态
 
 所有对外 API 函数是双形态：`*_core` 纯 Rust（返回 `String` / `Result<String,String>`），
-pyo3 `#[pyfunction]` 薄壳只做包装。**serve/CLI 必须调 `*_core`**——`#[pyfunction]`
+pyo3 `#[pyfunction]` 薄壳只做包装。**bin/test 内部代码必须调 `*_core`**——`#[pyfunction]`
 符号会把 pyo3 运行时拉进 bin/test 链接图，而 `extension-module` feature 不链
 libpython（实测：rust-lld `undefined symbol: _Py_Dealloc`）。core 路径下 pyo3
 代码被 `--gc-sections` 丢弃，bin 与 wheel 各自干净。
@@ -829,18 +829,3 @@ schema 从契约卡生成）。已知坑（实测）：
 1. Pydantic v2 保留参数名 `args` 会被别名化（`v__args`）→ invoke TypeError——工具参数命名避开 `args`
 2. `@tool` 装饰时函数必须已有 docstring（先赋 `__doc__` 再装饰）
 3. `**kwargs` 无法被 Pydantic 内省成 schema → 用 `inspect.Signature` 注入契约参数
-
-### 11.4 HTTP 控制台（ductile serve）
-
-std-only 单线程 HTTP，本地操作台定位（非公网服务）。路由：
-
-| 方法 | 路径 | 语义 |
-|------|------|------|
-| GET | `/` | 内嵌 web/index.html（DUCTILE_WEB_DIR 可覆盖） |
-| GET | `/api/stats` | 库统计 |
-| GET | `/api/scripts` | 脚本契约卡 |
-| GET | `/api/procs?query=` | proc 库（空=全部） |
-| GET | `/api/pipeline?path=` | 结构 JSON（procs/impls/when/refs/并行组/关键路径） |
-| GET | `/api/runs?proc=&limit=` | 最近执行 |
-| POST | `/api/run` | `{"path","topic","params":{},"policy"}` |
-| POST | `/api/script_call` | `{"name","args":{}}` |
