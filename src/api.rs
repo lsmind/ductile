@@ -7,16 +7,16 @@
 //!   *execution* failure returns `{"ok":false,"error":...}` so agents can route on it.
 //! - All JSON building goes through small pure functions (unit-tested below).
 
+use crate::ast::ExecResult;
 use crate::ast::Pipeline;
 use crate::db::{self, ProcRow, RunRow};
 use crate::egraph::{build_egraph, critical_path, parallel_groups};
-use crate::ast::ExecResult;
 use crate::executor::exec_pipeline;
 use crate::parser::{parse_pipeline_file, parse_policy_file};
 use crate::script::{cse_safe, ScriptCard};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn pyerr<E: ToString>(e: E) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
@@ -162,6 +162,26 @@ pub fn output_json(decl: &str) -> String {
         })
         .collect();
     format!("[{}]", items.join(","))
+}
+
+/// Decode the internal `§§FIELDS§§k=v§§...§§RAW§§...` encoding into pairs.
+/// Non-encoded text → None.
+pub fn decode_internal_fields(text: &str) -> Option<Vec<(String, String)>> {
+    let rest = text.strip_prefix("§§FIELDS§§")?;
+    let mut out = Vec::new();
+    for part in rest.split("§§") {
+        if part == "RAW" {
+            break;
+        }
+        if let Some(eq) = part.find('=') {
+            out.push((part[..eq].to_string(), part[eq + 1..].to_string()));
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 pub fn script_card_json(c: &ScriptCard) -> String {
@@ -372,6 +392,87 @@ pub fn run_json(
     Ok(exec_result_json(&result))
 }
 
+/// One-off script invoke. Unregistered name / authoring errors return
+/// {"ok":false,"error":...} (agents route on it); only internal panics raise.
+#[pyfunction]
+#[pyo3(signature = (name, args=None))]
+pub fn script_call_json(name: &str, args: Option<BTreeMap<String, String>>) -> PyResult<String> {
+    if db::script_get(name).is_none() {
+        let known: Vec<String> = db::script_list().iter().map(|c| c.name.clone()).collect();
+        let hint = if known.is_empty() {
+            format!(
+                "script '{}' not attached — register first: ductile script attach <file>",
+                name
+            )
+        } else {
+            format!(
+                "script '{}' not attached. Attached: {}",
+                name,
+                known.join(", ")
+            )
+        };
+        return Ok(format!(
+            "{{\"ok\":false,\"error\":\"{}\"}}",
+            escape_json(&hint)
+        ));
+    }
+    let kv: Vec<String> = args
+        .unwrap_or_default()
+        .iter()
+        .map(|(k, v)| format!("{}=\"{}\"", k, v))
+        .collect();
+    let body = format!(
+        "script({}{})",
+        name,
+        if kv.is_empty() {
+            String::new()
+        } else {
+            format!(", {}", kv.join(", "))
+        }
+    );
+    let impl_ = crate::ast::Impl {
+        name: "api_call".into(),
+        description: String::new(),
+        tags: BTreeSet::new(),
+        cost: crate::ast::Cost::default(),
+        enabled: true,
+        when: None,
+        refs: Vec::new(),
+        body_text: body.clone(),
+        stub: false,
+        retry: 0,
+        ensure: Vec::new(),
+    };
+    match crate::steps::exec_script_call(&impl_, "", &body, &BTreeMap::new()) {
+        Ok(v) => {
+            // ##DSL_RESULT 块解码为干净字段（agent/前端不读 §§FIELDS§§ 内部编码）
+            let text = match &v {
+                crate::ast::Value::Text(t) => t.as_str(),
+                _ => "",
+            };
+            match decode_internal_fields(text)
+                .or_else(|| crate::dslresult::parse_dsl_result_block(text))
+            {
+                Some(fields) => {
+                    let items: Vec<String> = fields
+                        .iter()
+                        .map(|(k, val)| format!("\"{}\":\"{}\"", escape_json(k), escape_json(val)))
+                        .collect();
+                    Ok(format!(
+                        "{{\"ok\":true,\"fields\":{{{}}}}}",
+                        items.join(",")
+                    ))
+                }
+                None => Ok(format!("{{\"ok\":true,\"result\":{}}}", value_json(&v))),
+            }
+        }
+        Err(e) => Ok(format!(
+            "{{\"ok\":false,\"error\":\"{}\"}}",
+            escape_json(&e)
+        )),
+    }
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(scripts_json, m)?)?;
     m.add_function(wrap_pyfunction!(procs_json, m)?)?;
@@ -379,6 +480,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(db_stats_json, m)?)?;
     m.add_function(wrap_pyfunction!(pipeline_json, m)?)?;
     m.add_function(wrap_pyfunction!(run_json, m)?)?;
+    m.add_function(wrap_pyfunction!(script_call_json, m)?)?;
     Ok(())
 }
 
@@ -391,6 +493,7 @@ mod tests {
     use super::*;
     use crate::ast::Value;
     use crate::script::{Concurrency, ScriptCard};
+    use std::collections::BTreeSet;
 
     fn card(name: &str, params: &str, pure: bool, conc: Concurrency) -> ScriptCard {
         ScriptCard {
@@ -407,6 +510,23 @@ mod tests {
             timeout_secs: 10,
             retries: 0,
         }
+    }
+
+    #[test]
+    fn decode_internal_fields_pairs_and_raw_boundary() {
+        let enc = "§§FIELDS§§words=3§§lines=1§§RAW§§##DSL_RESULT\nwords=3";
+        let f = decode_internal_fields(enc).unwrap();
+        assert_eq!(
+            f,
+            vec![("words".into(), "3".into()), ("lines".into(), "1".into())]
+        );
+        // RAW 段里的 k=v 不得混入字段
+        assert_eq!(
+            decode_internal_fields("§§FIELDS§§a=1§§RAW§§b=2"),
+            Some(vec![("a".into(), "1".into())])
+        );
+        assert_eq!(decode_internal_fields("plain text"), None);
+        assert_eq!(decode_internal_fields("§§FIELDS§§§§RAW§§x"), None);
     }
 
     #[test]

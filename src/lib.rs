@@ -234,7 +234,7 @@ fn cli_main(py: Python) -> PyResult<i32> {
 }
 
 #[pymodule]
-fn ductile(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _ductile(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(check, m)?)?;
     m.add_function(wrap_pyfunction!(run, m)?)?;
     m.add_function(wrap_pyfunction!(parse, m)?)?;

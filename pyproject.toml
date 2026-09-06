@@ -19,4 +19,5 @@ classifiers = [
 ductile = "ductile:cli_main"
 
 [tool.maturin]
-module-name = "ductile"
+python-source = "python"
+module-name = "ductile._ductile"
