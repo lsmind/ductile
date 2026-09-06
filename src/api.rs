@@ -318,53 +318,102 @@ pub fn pipeline_json_of(pl: &Pipeline) -> String {
 // ─────────────────────────────────────────────────────────────
 
 /// All registered script contract cards as JSON (agents read this, not script bodies).
-#[pyfunction]
-pub fn scripts_json() -> PyResult<String> {
+pub fn scripts_json_core() -> String {
     let cards = db::script_list();
     let items: Vec<String> = cards.iter().map(script_card_json).collect();
-    Ok(format!("[{}]", items.join(",")))
+    format!("[{}]", items.join(","))
+}
+
+#[pyfunction]
+pub fn scripts_json() -> PyResult<String> {
+    Ok(scripts_json_core())
 }
 
 /// Proc library as JSON. `query=""` lists all; otherwise FTS-ish search.
-#[pyfunction]
-pub fn procs_json(query: &str) -> PyResult<String> {
+pub fn procs_json_core(query: &str) -> String {
     let rows = if query.trim().is_empty() {
         db::all_procs()
     } else {
         db::search_procs(query)
     };
     let items: Vec<String> = rows.iter().map(proc_row_json).collect();
-    Ok(format!("[{}]", items.join(",")))
+    format!("[{}]", items.join(","))
+}
+
+#[pyfunction]
+pub fn procs_json(query: &str) -> PyResult<String> {
+    Ok(procs_json_core(query))
 }
 
 /// Recent runs of one proc as JSON (newest first), at most `limit`.
-#[pyfunction]
-pub fn runs_json(proc_name: &str, limit: usize) -> PyResult<String> {
+pub fn runs_json_core(proc_name: &str, limit: usize) -> String {
     let rows = db::recent_runs_limit(proc_name, limit);
     let items: Vec<String> = rows.iter().map(run_row_json).collect();
-    Ok(format!("[{}]", items.join(",")))
+    format!("[{}]", items.join(","))
+}
+
+#[pyfunction]
+pub fn runs_json(proc_name: &str, limit: usize) -> PyResult<String> {
+    Ok(runs_json_core(proc_name, limit))
 }
 
 /// Library stats as JSON: {"pipelines":N,"procs":N,"runs":N,"compositions":N}.
-#[pyfunction]
-pub fn db_stats_json() -> PyResult<String> {
+pub fn db_stats_json_core() -> String {
     let (pipelines, procs, runs, compositions) = db::db_stats();
-    Ok(format!(
+    format!(
         "{{\"pipelines\":{},\"procs\":{},\"runs\":{},\"compositions\":{}}}",
         pipelines, procs, runs, compositions
-    ))
+    )
+}
+
+#[pyfunction]
+pub fn db_stats_json() -> PyResult<String> {
+    Ok(db_stats_json_core())
 }
 
 /// Parse a .pipeline file into structural JSON (procs/impls/when/refs + egraph plan).
+/// Pure-Rust core (serve/CLI call this; the pyo3 wrapper below is gc-droppable
+/// outside Python — extension-module must not leak into bin/test link graphs).
+pub fn pipeline_json_core(path: &str) -> Result<String, String> {
+    let pl = parse_pipeline_file(path).map_err(|e| e.to_string())?;
+    Ok(pipeline_json_of(&pl))
+}
+
 #[pyfunction]
 pub fn pipeline_json(path: &str) -> PyResult<String> {
-    let pl = parse_pipeline_file(path).map_err(pyerr)?;
-    Ok(pipeline_json_of(&pl))
+    pipeline_json_core(path).map_err(pyerr)
 }
 
 /// Run a pipeline; returns structured JSON.
 /// Raises on authoring errors (parse/typecheck/policy); execution failure
 /// is reported as `{"ok":false,"error":...}` for the caller to route on.
+/// Pure-Rust core: authoring errors → Err(String); execution failure is
+/// encoded as {"ok":false} in the Ok payload (failure is data, not exception).
+pub fn run_json_core(
+    path: &str,
+    topic: &str,
+    params: Option<BTreeMap<String, String>>,
+    policy: Option<&str>,
+) -> Result<String, String> {
+    let pl = parse_pipeline_file(path).map_err(|e| e.to_string())?;
+    let errs = crate::typecheck::check_pipeline(&pl);
+    if !errs.is_empty() {
+        let msg = errs
+            .iter()
+            .map(|e| format!("  {}", e))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(format!("Type check errors:\n{}", msg));
+    }
+    let policy_opt = match policy {
+        Some(p) => Some(parse_policy_file(p).map_err(|e| e.to_string())?),
+        None => None,
+    };
+    let params = params.unwrap_or_default();
+    let result = exec_pipeline(topic, &params, &pl, policy_opt.as_ref());
+    Ok(exec_result_json(&result))
+}
+
 #[pyfunction]
 #[pyo3(signature = (path, topic="", params=None, policy=None))]
 pub fn run_json(
@@ -373,30 +422,15 @@ pub fn run_json(
     params: Option<BTreeMap<String, String>>,
     policy: Option<&str>,
 ) -> PyResult<String> {
-    let pl = parse_pipeline_file(path).map_err(pyerr)?;
-    let errs = crate::typecheck::check_pipeline(&pl);
-    if !errs.is_empty() {
-        let msg = errs
-            .iter()
-            .map(|e| format!("  {}", e))
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Err(pyerr(format!("Type check errors:\n{}", msg)));
-    }
-    let policy_opt = match policy {
-        Some(p) => Some(parse_policy_file(p).map_err(pyerr)?),
-        None => None,
-    };
-    let params = params.unwrap_or_default();
-    let result = exec_pipeline(topic, &params, &pl, policy_opt.as_ref());
-    Ok(exec_result_json(&result))
+    run_json_core(path, topic, params, policy).map_err(pyerr)
 }
 
 /// One-off script invoke. Unregistered name / authoring errors return
 /// {"ok":false,"error":...} (agents route on it); only internal panics raise.
-#[pyfunction]
-#[pyo3(signature = (name, args=None))]
-pub fn script_call_json(name: &str, args: Option<BTreeMap<String, String>>) -> PyResult<String> {
+pub fn script_call_json_core(
+    name: &str,
+    args: Option<BTreeMap<String, String>>,
+) -> Result<String, String> {
     if db::script_get(name).is_none() {
         let known: Vec<String> = db::script_list().iter().map(|c| c.name.clone()).collect();
         let hint = if known.is_empty() {
@@ -471,6 +505,12 @@ pub fn script_call_json(name: &str, args: Option<BTreeMap<String, String>>) -> P
             escape_json(&e)
         )),
     }
+}
+
+#[pyfunction]
+#[pyo3(signature = (name, args=None))]
+pub fn script_call_json(name: &str, args: Option<BTreeMap<String, String>>) -> PyResult<String> {
+    script_call_json_core(name, args).map_err(pyerr)
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
