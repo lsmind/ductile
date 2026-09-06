@@ -1299,25 +1299,37 @@ mod prim_tests {
 
     #[test]
     fn quoted_arg_double_and_single_quotes() {
-        assert_eq!(extract_quoted_arg(r#"to="out.txt""#, "to"), Some("out.txt".into()));
-        assert_eq!(extract_quoted_arg(r#"to = 'single'"#, "to"), Some("single".into()));
+        assert_eq!(
+            extract_quoted_arg(r#"to="out.txt""#, "to"),
+            Some("out.txt".into())
+        );
+        assert_eq!(
+            extract_quoted_arg(r#"to = 'single'"#, "to"),
+            Some("single".into())
+        );
     }
 
     #[test]
     fn quoted_arg_tolerates_spacing() {
-        assert_eq!(extract_quoted_arg(r#"key  =  "v""#, "key"), Some("v".into()));
+        assert_eq!(
+            extract_quoted_arg(r#"key  =  "v""#, "key"),
+            Some("v".into())
+        );
     }
 
     #[test]
     fn quoted_arg_word_boundary() {
         // key 不能是更长标识符的后缀：搜 "to" 不得命中 "into"
-        assert_eq!(extract_quoted_arg(r#"into="x" to="y""#, "to"), Some("y".into()));
+        assert_eq!(
+            extract_quoted_arg(r#"into="x" to="y""#, "to"),
+            Some("y".into())
+        );
     }
 
     #[test]
     fn quoted_arg_missing_or_unquoted() {
-        assert_eq!(extract_quoted_arg(r#"to=out"#, "to"), None);      // 无引号
-        assert_eq!(extract_quoted_arg(r#"other="x""#, "to"), None);   // 无此键
-        assert_eq!(extract_quoted_arg(r#"to="#, "to"), None);         // 等号后无值
+        assert_eq!(extract_quoted_arg(r#"to=out"#, "to"), None); // 无引号
+        assert_eq!(extract_quoted_arg(r#"other="x""#, "to"), None); // 无此键
+        assert_eq!(extract_quoted_arg(r#"to="#, "to"), None); // 等号后无值
     }
 }

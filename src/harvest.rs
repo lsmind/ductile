@@ -713,7 +713,7 @@ mod tests {
     #[test]
     fn jparse_scalar_and_other() {
         assert_eq!(jv("\"hi\""), Some(Jv::S("hi".into())));
-        assert_eq!(jv("123"), Some(Jv::Other));       // number → Other
+        assert_eq!(jv("123"), Some(Jv::Other)); // number → Other
         assert_eq!(jv("true"), Some(Jv::Other));
         assert_eq!(jv("null"), Some(Jv::Other));
         assert_eq!(jv(""), None);
@@ -725,9 +725,13 @@ mod tests {
         let v = jv("[1, {\"a\": [\"x\", \"y\"]}]").unwrap();
         let Jv::A(items) = v else { panic!("array") };
         assert_eq!(items.len(), 2);
-        let Jv::O(pairs) = &items[1] else { panic!("object") };
+        let Jv::O(pairs) = &items[1] else {
+            panic!("object")
+        };
         assert_eq!(pairs[0].0, "a");
-        let Jv::A(inner) = &pairs[0].1 else { panic!("inner array") };
+        let Jv::A(inner) = &pairs[0].1 else {
+            panic!("inner array")
+        };
         assert_eq!(inner.len(), 2);
     }
 
@@ -756,7 +760,8 @@ mod tests {
     fn jparse_str_escapes() {
         // JSON 文本: "a\nb\tc\"" = quote a \n b \t c \" quote
         let s: String = vec!['"', 'a', '\\', 'n', 'b', '\\', 't', 'c', '\\', '"', '"']
-            .into_iter().collect();
+            .into_iter()
+            .collect();
         let mut i = 0usize;
         assert_eq!(jparse_str(&s, &mut i), Some("a\nb\tc\"".into()));
         // JSON 文本: "\\/"
@@ -780,7 +785,9 @@ mod tests {
         // U+1F600 = \ud83d\ude00（UTF-16 代理对），代理对恰在串尾
         let s: String = vec![
             '"', '\\', 'u', 'd', '8', '3', 'd', '\\', 'u', 'd', 'e', '0', '0', '"',
-        ].into_iter().collect();
+        ]
+        .into_iter()
+        .collect();
         let mut i = 0usize;
         assert_eq!(jparse_str(&s, &mut i), Some("\u{1F600}".into()));
     }
@@ -789,11 +796,12 @@ mod tests {
         // 回归：代理对后跟普通字符不得被吞（旧 off-by-one 会静默丢 x）
         let s: String = vec![
             '"', '\\', 'u', 'd', '8', '3', 'd', '\\', 'u', 'd', 'e', '0', '0', 'x', '"',
-        ].into_iter().collect();
+        ]
+        .into_iter()
+        .collect();
         let mut i = 0usize;
         assert_eq!(jparse_str(&s, &mut i), Some("\u{1F600}x".into()));
     }
-
 
     #[test]
     fn jparse_str_raw_utf8_multibyte() {
@@ -823,19 +831,23 @@ mod tests {
         // arguments 的 JSON 文本: {"command":"echo \"hi\" \\"}
         // 解码后 command = echo "hi" \（含真实引号与反斜杠）
         let args_json: String = vec![
-            '{', '"', 'c', 'o', 'm', 'm', 'a', 'n', 'd', '"', ':', '"',
-            'e', 'c', 'h', 'o', ' ', '\\', '"', 'h', 'i', '\\', '"', ' ', '\\', '\\',
-            '"', '}',
-        ].into_iter().collect();
-        let expected: String = vec![
-            'e', 'c', 'h', 'o', ' ', '"', 'h', 'i', '"', ' ', '\\',
-        ].into_iter().collect();
+            '{', '"', 'c', 'o', 'm', 'm', 'a', 'n', 'd', '"', ':', '"', 'e', 'c', 'h', 'o', ' ',
+            '\\', '"', 'h', 'i', '\\', '"', ' ', '\\', '\\', '"', '}',
+        ]
+        .into_iter()
+        .collect();
+        let expected: String = vec!['e', 'c', 'h', 'o', ' ', '"', 'h', 'i', '"', ' ', '\\']
+            .into_iter()
+            .collect();
         // arguments 是字符串化的 JSON → 整体再转义一层：\ → \\\\，" → \\"
-        let args_lit: String = args_json.chars().flat_map(|c| match c {
-            '\\' => vec!['\\', '\\'],
-            '"' => vec!['\\', '"'],
-            other => vec![other],
-        }).collect();
+        let args_lit: String = args_json
+            .chars()
+            .flat_map(|c| match c {
+                '\\' => vec!['\\', '\\'],
+                '"' => vec!['\\', '"'],
+                other => vec![other],
+            })
+            .collect();
         let tc = format!("[{{\"function\":{{\"arguments\":\"{}\"}}}}]", args_lit);
         assert_eq!(extract_commands_exact(&tc), vec![expected]);
     }

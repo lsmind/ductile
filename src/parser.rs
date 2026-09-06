@@ -743,7 +743,11 @@ pub(crate) fn parse_policy_value(raw: &str) -> Result<CostValue, String> {
     })
 }
 
-pub(crate) fn apply_policy_field(spec: &mut CostSpec, field: &str, val_raw: &str) -> Result<(), String> {
+pub(crate) fn apply_policy_field(
+    spec: &mut CostSpec,
+    field: &str,
+    val_raw: &str,
+) -> Result<(), String> {
     let v = parse_policy_value(val_raw)?;
     match field {
         "latency" => spec.latency = Some(v),
@@ -1394,7 +1398,7 @@ mod prim_tests {
     #[test]
     fn arrow_spaced_and_tight() {
         assert_eq!(find_arrow("a -> b"), Some(1)); // " -> " 模式含前导空格，始于 1
-        assert_eq!(find_arrow("a ->b"), Some(2));  // 紧凑回退 "->" 始于 2
+        assert_eq!(find_arrow("a ->b"), Some(2)); // 紧凑回退 "->" 始于 2
         assert_eq!(find_arrow("a-> b"), Some(1)); // 紧凑形态 "->" 在索引 1
         assert_eq!(find_arrow("no arrow"), None);
     }
@@ -1412,7 +1416,12 @@ mod prim_tests {
     #[test]
     fn split_entries_trailing_empty_dropped() {
         let out = split_impl_entries("a, b,");
-        assert_eq!(out.len(), 2, "trailing comma must not yield empty entry: {:?}", out);
+        assert_eq!(
+            out.len(),
+            2,
+            "trailing comma must not yield empty entry: {:?}",
+            out
+        );
     }
 
     // ── extract_refs ──
@@ -1442,7 +1451,7 @@ mod prim_tests {
     fn policy_value_measure_forms() {
         match parse_policy_value("measure(\"bench.sh {topic}\")").unwrap() {
             CostValue::Measure(cmd) => assert_eq!(cmd, "bench.sh {topic}"),
-            other => panic!("{:?}" , other),
+            other => panic!("{:?}", other),
         }
         // 尾随垃圾：rfind(')') 取最后一个 —— measure("a(b)")
         match parse_policy_value("measure(\"echo (x) 1.0\")").unwrap() {

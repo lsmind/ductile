@@ -3,6 +3,7 @@
 //! Core library: parse, typecheck, execute .pipeline files.
 //! Python bindings via pyo3.
 
+pub mod api;
 pub mod ast;
 pub mod db;
 pub mod dslresult;
@@ -239,6 +240,7 @@ fn ductile(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse, m)?)?;
     m.add_function(wrap_pyfunction!(graph, m)?)?;
     m.add_function(wrap_pyfunction!(cli_main, m)?)?;
+    crate::api::register(m)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

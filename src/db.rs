@@ -477,6 +477,36 @@ pub fn recent_runs(proc_name: &str) -> Vec<RunRow> {
     recent_runs_conn(&conn, proc_name)
 }
 
+/// Recent runs with a caller-chosen limit (API/frontend layer; default 20 elsewhere).
+pub fn recent_runs_limit(proc_name: &str, limit: usize) -> Vec<RunRow> {
+    let conn = open();
+    recent_runs_limit_conn(&conn, proc_name, limit)
+}
+
+pub fn recent_runs_limit_conn(conn: &Connection, proc_name: &str, limit: usize) -> Vec<RunRow> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT proc_name, impl_name, status, latency_ms, recorded_at, rate_tokens, est_loss
+             FROM runs WHERE proc_name = ?1
+             ORDER BY id DESC LIMIT ?2",
+        )
+        .unwrap();
+    stmt.query_map(params![proc_name, limit as i64], |row| {
+        Ok(RunRow {
+            proc_name: row.get(0)?,
+            impl_name: row.get(1)?,
+            status: row.get(2)?,
+            latency_ms: row.get(3).unwrap_or(0),
+            recorded_at: row.get(4)?,
+            rate_tokens: row.get(5).unwrap_or(0),
+            est_loss: row.get(6).unwrap_or(0.0),
+        })
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
+}
+
 // ── Impl preferences (v0.8 LGuess-style multiplicative weights) ──
 
 /// Load all learned impl weights: (proc_name, impl_name) -> weight.
