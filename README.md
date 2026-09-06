@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-262%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/Tests-277%20passed-brightgreen.svg)](#测试)
 [![PyPI](https://img.shields.io/badge/PyPI-0.6.1-blue.svg)](https://pypi.org/project/ductile/)
 
 ---
@@ -159,6 +159,32 @@ AI 会自动生成正确的 `.pipeline` 文件和 CLI 命令。
 
 ---
 
+## LangChain 插件接口（v0.13）
+
+Python 混合包（Rust 核心 + Python 适配层），`ductile.langchain_tools()` 一行接入：
+
+```python
+import ductile
+
+tools = ductile.langchain_tools()   # 6 个内省/执行工具 + 每个脚本契约一个类型化工具
+agent = create_react_agent(llm, tools, prompt)   # 或任何 LangChain Agent
+```
+
+- **6 个基础工具**：`ductile_list_scripts` / `ductile_list_procs` / `ductile_pipeline_info` / `ductile_stats` / `ductile_recent_runs` / `ductile_run` / `ductile_call_script`
+- **每脚本契约一个类型化工具**：从契约卡自动生成 docstring + 参数 schema（`ductile_script_word_stats(text: str)`），LLM 不读脚本体
+- **失败是数据不是异常**：执行失败返回 `{"ok":false,"error":...}`，agent 可按 JSON 路由；创作错误（解析/类型检查）才抛异常
+- 脚本 attach 后重新调用 `langchain_tools()` 即时刷新工具集
+
+## Web 控制台（v0.13）
+
+```bash
+ductile serve [addr]        # 默认 127.0.0.1:7878
+```
+
+暗色蓝金控制台（零依赖，std-only HTTP + 单文件前端）：库统计、执行面板（topic/policy/params）、最近执行记录、流水线结构视图（procs/impls/when/refs/并行组/关键路径）、**脚本契约卡——PURE/SAFE/CSE-SAFE 标志 + 参数输入框 + 一键调用**。
+
+HTTP API 同源开放：`GET /api/{stats,scripts,procs,pipeline,runs}` + `POST /api/{run,script_call}`。
+
 ## 代码结构
 
 ```
@@ -175,6 +201,8 @@ src/
 ├── egraph.rs     # e-graph 等价类 + CSE + when-载体守卫
 ├── db.rs         # SQLite（*_conn 注入内核，测试用内存库）
 ├── script.rs     # v0.12 脚本契约（脚本即 API）
+├── api.rs        # v0.13 富 API 层（core+pyo3 薄壳双形态，LangChain/serve 共用）
+├── serve.rs      # v0.13 HTTP 控制台（std-only，内嵌前端）
 └── cli.rs        # 命令分发 + 纯参数解析
 ```
 
@@ -192,7 +220,7 @@ src/
 cargo test --lib
 ```
 
-262 个测试，全部通过。覆盖：解析原语、##DSL_RESULT 协议、内存库 CRUD/TTL 回路、偏好学习收敛、e-graph 熔合守卫、fs/进程算子（真子进程）、JSON 解析器（含 UTF-16 代理对）。
+277 个测试，全部通过。覆盖：解析原语、##DSL_RESULT 协议、内存库 CRUD/TTL 回路、偏好学习收敛、e-graph 熔合守卫、fs/进程算子（真子进程）、JSON 解析器（含 UTF-16 代理对）。
 
 ## License
 

@@ -790,3 +790,57 @@ pub fn record_run_rd(proc_name: &str, ...) {
 - 测试数据含引号/反斜杠/代理对时，用**字符字面量数组**构造（`vec!['"', '\\', 'n', ...]`），
   不用 raw string（`"#` 定界符与 `\"` 序列撞车）与双层转义
 - 覆盖率工具（tarpaulin）与 pyo3 不兼容（debug 链接缺 libpython）——以测试面清单为准
+
+---
+
+## 11. API 层与集成面（v0.13）
+
+### 11.1 架构：core + 薄壳双形态
+
+所有对外 API 函数是双形态：`*_core` 纯 Rust（返回 `String` / `Result<String,String>`），
+pyo3 `#[pyfunction]` 薄壳只做包装。**serve/CLI 必须调 `*_core`**——`#[pyfunction]`
+符号会把 pyo3 运行时拉进 bin/test 链接图，而 `extension-module` feature 不链
+libpython（实测：rust-lld `undefined symbol: _Py_Dealloc`）。core 路径下 pyo3
+代码被 `--gc-sections` 丢弃，bin 与 wheel 各自干净。
+
+```
+run_json / script_call_json / pipeline_json → Result<String,String>（core）
+scripts_json / procs_json / runs_json / db_stats_json → String（core，永不失败）
+```
+
+### 11.2 语义约定：失败是数据
+
+- **创作错误**（文件不存在/解析/类型检查/策略非法）→ `Err` / Python 异常
+- **执行失败**（所有路径失败/degraded）→ `Ok({"ok":false,"error":...})`
+  —— agent 与前端按 JSON 路由，不靠异常捕获
+- `script_call_json` 未注册脚本名 → `{"ok":false}` + 已注册清单（不抛）
+- 输出字段解码：`§§FIELDS§§` 内部编码 → 干净 `fields` 对象（RAW 边界防泄漏）
+
+### 11.3 LangChain 适配（python/ductile 混合包）
+
+```
+pip install ductile && pip install langchain-core
+ductile.langchain_tools() → [BaseTool]
+```
+
+工具集 = 6 内省/执行工具 + 每个已注册脚本契约一个类型化工具（docstring/参数
+schema 从契约卡生成）。已知坑（实测）：
+
+1. Pydantic v2 保留参数名 `args` 会被别名化（`v__args`）→ invoke TypeError——工具参数命名避开 `args`
+2. `@tool` 装饰时函数必须已有 docstring（先赋 `__doc__` 再装饰）
+3. `**kwargs` 无法被 Pydantic 内省成 schema → 用 `inspect.Signature` 注入契约参数
+
+### 11.4 HTTP 控制台（ductile serve）
+
+std-only 单线程 HTTP，本地操作台定位（非公网服务）。路由：
+
+| 方法 | 路径 | 语义 |
+|------|------|------|
+| GET | `/` | 内嵌 web/index.html（DUCTILE_WEB_DIR 可覆盖） |
+| GET | `/api/stats` | 库统计 |
+| GET | `/api/scripts` | 脚本契约卡 |
+| GET | `/api/procs?query=` | proc 库（空=全部） |
+| GET | `/api/pipeline?path=` | 结构 JSON（procs/impls/when/refs/并行组/关键路径） |
+| GET | `/api/runs?proc=&limit=` | 最近执行 |
+| POST | `/api/run` | `{"path","topic","params":{},"policy"}` |
+| POST | `/api/script_call` | `{"name","args":{}}` |
