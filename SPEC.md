@@ -829,3 +829,49 @@ schema 从契约卡生成）。已知坑（实测）：
 1. Pydantic v2 保留参数名 `args` 会被别名化（`v__args`）→ invoke TypeError——工具参数命名避开 `args`
 2. `@tool` 装饰时函数必须已有 docstring（先赋 `__doc__` 再装饰）
 3. `**kwargs` 无法被 Pydantic 内省成 schema → 用 `inspect.Signature` 注入契约参数
+
+---
+
+## 12. 全自动错误处理（v0.14 — errflow.rs 统一模块）
+
+错误处理零 DSL 面、零配置面（用户裁定）：分类→策略→响应全部引擎内建。
+
+### 12.1 错误分类（classify）
+
+六类，先具体后兜底（contract→timeout→permission→resource→data→crash）：
+
+| code | 锚点示例 |
+|------|---------|
+| `timeout` | `run timed out after Ns`、`ReadTimeout` |
+| `resource` | `file not found`、`spawn failed`、`ConnectionError`、`ENOSPC` |
+| `permission` | `Permission denied`、`EACCES`、`EPERM` |
+| `data` | `TypeError`、`ValueError`、`JSONDecodeError`、`UnicodeDecodeError` |
+| `contract` | `script not attached`、`param not in contract`、保护根拒绝 |
+| `crash` | 其余一切（segfault、OOM-kill、panic）兜底 |
+
+### 12.2 失败节点策略（strategy）
+
+| code | action | 理由 |
+|------|--------|------|
+| timeout | `Retry{budget:2, linear}` | 瞬时资源紧张常自愈 |
+| resource | `Retry{budget:1, linear}` | 一轮抖动缓冲 |
+| data | `Reroute` | 同输入必再错，立即换 impl（impl.retry 剩余预算直接跳过） |
+| permission | `Escalate` | 重试无意义 |
+| contract | `Escalate` | 创作错误 fail-fast |
+| crash | `Escalate` | 未知根因不瞎猜 |
+
+### 12.3 正常节点响应（respond，按错误进程的判断进行）
+
+| code | response | 行为 |
+|------|----------|------|
+| timeout/resource | `Wait` | 上游吃满 Retry 预算（分层顺序天然提供）后按传播处理 |
+| data | `Switch` | 只封锁引用死源的 impl，未引用备选接管（方法切换） |
+| permission/crash | `Ignore` | 无关 proc 照跑；引用者落传播 Left |
+| contract | `Exit` | 立即退出整个流程（partial 保留） |
+
+### 12.4 失败是值（Either 内部语义）
+
+- proc 失败不中止管线：`results[p] = §§FIELDS§§err=1§§err_code=…§§ 编码`（Left）
+- 下游引用死源且无可切换方法 → 传播 Left（`err_msg=propagated from X`，err_code 继承）
+- 任何 Left → `run` exit 1；`run_json` 输出 `{"ok":false,"err_code":…,"partial":{…}}`
+- partial 中 Left 解码为干净对象，Right 原样——debug/agent 不丢现场
