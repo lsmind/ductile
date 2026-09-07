@@ -879,7 +879,8 @@ cancelled→contract→ratelimit→auth→timeout→memory→dependency→permis
 |------|----------|------|
 | cancelled | `Exit` | 用户已表态，整流立即停 |
 | timeout/ratelimit/memory/network/resource | `Wait` | 上游吃满 Retry 预算（分层顺序天然提供）后按传播处理 |
-| auth/data | `Switch` | 只封锁引用死源的 impl，未引用备选接管（auth=换供应商，data=换路径） |
+| auth/data/format/schema | `Switch` | 封锁引用死源的 impl，备选接管（auth=换供应商，data/format/schema=换路径） |
+| truncation | `Wait` | 重采样期间下游等预算耗尽 |
 | dependency/permission/crash | `Ignore` | 无关 proc 照跑；引用者落传播 Left |
 | contract | `Exit` | 立即退出整个流程（partial 保留） |
 
