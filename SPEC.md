@@ -836,26 +836,39 @@ schema 从契约卡生成）。已知坑（实测）：
 
 错误处理零 DSL 面、零配置面（用户裁定）：分类→策略→响应全部引擎内建。
 
-### 12.1 错误分类（classify）
+### 12.1 错误分类（classify，v0.14c 十二类）
 
-六类，先具体后兜底（contract→timeout→permission→resource→data→crash）：
+判定链先具体后兜底：
+cancelled→contract→ratelimit→auth→timeout→memory→dependency→permission→network→resource→data→crash
 
-| code | 锚点示例 |
-|------|---------|
-| `timeout` | `run timed out after Ns`、`ReadTimeout` |
-| `resource` | `file not found`、`spawn failed`、`ConnectionError`、`ENOSPC` |
-| `permission` | `Permission denied`、`EACCES`、`EPERM` |
-| `data` | `TypeError`、`ValueError`、`JSONDecodeError`、`UnicodeDecodeError` |
-| `contract` | `script not attached`、`param not in contract`、保护根拒绝 |
-| `crash` | 其余一切（segfault、OOM-kill、panic）兜底 |
+| code | 锚点示例 | 划界理由 |
+|------|---------|---------|
+| `cancelled` | `KeyboardInterrupt`、`SIGINT` | 用户意图，禁自动重试 |
+| `timeout` | `run timed out after Ns`、`ReadTimeout` | 慢 |
+| `ratelimit` | `429`、`rate limit`、`quota exceeded` | 限流窗口，退避后有效 |
+| `auth` | `401`、`403`、`invalid api key`、`token expired` | 凭证坏，换供应商 |
+| `memory` | `CUDA out of memory`、`exit 137`、`MemoryError` | 显存/内存瞬时占用 |
+| `dependency` | `ModuleNotFoundError`、`command not found`、`shared libraries` | 环境确定性坏 |
+| `network` | `Connection refused`、`getaddrinfo failed`、`502/503/504` | 网络抖动（与本地缺失分离） |
+| `resource` | `file not found`、`spawn failed`、`ENOSPC` | 本地确定性缺失 |
+| `permission` | `Permission denied`、`EACCES`、`EPERM` | 权限 |
+| `data` | `TypeError`、`ValueError`、`JSONDecodeError` | 数据错，换路径 |
+| `contract` | `script not attached`、`param not in contract` | 创作错误 |
+| `crash` | 其余一切（segfault、panic） | 兜底 |
 
 ### 12.2 失败节点策略（strategy）
 
 | code | action | 理由 |
 |------|--------|------|
-| timeout | `Retry{budget:2, linear}` | 瞬时资源紧张常自愈 |
-| resource | `Retry{budget:1, linear}` | 一轮抖动缓冲 |
+| cancelled | `Escalate` | 用户意图，禁止任何自动重试 |
+| timeout | `Retry{2, linear}` | 瞬时资源紧张常自愈 |
+| ratelimit | `Retry{2, linear}` | 限流窗口退避 |
+| auth | `Escalate` | 凭证坏重试无意义（换供应商走 Switch 响应） |
+| memory | `Retry{1, linear}` | 等显存释放一轮 |
+| network | `Retry{2, linear}` | 抖动自愈概率高 |
+| resource | `Retry{1, linear}` | 一轮竞态缓冲 |
 | data | `Reroute` | 同输入必再错，立即换 impl（impl.retry 剩余预算直接跳过） |
+| dependency | `Escalate` | 环境确定性坏 |
 | permission | `Escalate` | 重试无意义 |
 | contract | `Escalate` | 创作错误 fail-fast |
 | crash | `Escalate` | 未知根因不瞎猜 |
@@ -864,9 +877,10 @@ schema 从契约卡生成）。已知坑（实测）：
 
 | code | response | 行为 |
 |------|----------|------|
-| timeout/resource | `Wait` | 上游吃满 Retry 预算（分层顺序天然提供）后按传播处理 |
-| data | `Switch` | 只封锁引用死源的 impl，未引用备选接管（方法切换） |
-| permission/crash | `Ignore` | 无关 proc 照跑；引用者落传播 Left |
+| cancelled | `Exit` | 用户已表态，整流立即停 |
+| timeout/ratelimit/memory/network/resource | `Wait` | 上游吃满 Retry 预算（分层顺序天然提供）后按传播处理 |
+| auth/data | `Switch` | 只封锁引用死源的 impl，未引用备选接管（auth=换供应商，data=换路径） |
+| dependency/permission/crash | `Ignore` | 无关 proc 照跑；引用者落传播 Left |
 | contract | `Exit` | 立即退出整个流程（partial 保留） |
 
 ### 12.4 失败是值（Either 内部语义）
