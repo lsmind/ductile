@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-277%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/Tests-271%20passed-brightgreen.svg)](#测试)
 [![PyPI](https://img.shields.io/badge/PyPI-0.6.1-blue.svg)](https://pypi.org/project/ductile/)
 
 ---
@@ -195,7 +195,7 @@ src/
 └── cli.rs        # 命令分发 + 纯参数解析
 ```
 
-17 模块各带单元测试；总 262 个测试（纯函数直测 + 内存库回路 + 真子进程集成），`cargo test --lib` 一条命令全跑。
+17 模块各带单元测试；总 271 个测试（纯函数直测 + 内存库回路 + 真子进程集成），`cargo test --lib` 一条命令全跑。
 
 ## 设计哲学
 
@@ -209,7 +209,7 @@ src/
 cargo test --lib
 ```
 
-277 个测试，全部通过。覆盖：解析原语、##DSL_RESULT 协议、内存库 CRUD/TTL 回路、偏好学习收敛、e-graph 熔合守卫、fs/进程算子（真子进程）、JSON 解析器（含 UTF-16 代理对）。
+271 个测试，全部通过。覆盖：解析原语、##DSL_RESULT 协议、内存库 CRUD/TTL 回路、偏好学习收敛、e-graph 熔合守卫、fs/进程算子（真子进程）、JSON 解析器（含 UTF-16 代理对）。
 
 ## License
 
