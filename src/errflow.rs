@@ -31,6 +31,12 @@ pub enum ErrCode {
     Memory,
     /// 依赖/环境缺失（ImportError/command not found/shared library）——环境确定性坏
     Dependency,
+    /// 输出截断（finish_reason=length/output truncated）——重采样可能更短，重试可救
+    Truncation,
+    /// 输入格式错（JSONDecodeError/UnicodeDecodeError/parse error）——输入确定性坏
+    Format,
+    /// 输出结构不合预期（KeyError/TypeError/validation）——模型输出幻觉/缺字段，换路径
+    Schema,
     Data,
     Contract,
     /// 用户中断（SIGINT/cancelled）——意图明确，禁止任何自动重试
@@ -50,6 +56,9 @@ impl ErrCode {
             "permission" => Some(ErrCode::Permission),
             "memory" => Some(ErrCode::Memory),
             "dependency" => Some(ErrCode::Dependency),
+            "truncation" => Some(ErrCode::Truncation),
+            "format" => Some(ErrCode::Format),
+            "schema" => Some(ErrCode::Schema),
             "data" => Some(ErrCode::Data),
             "contract" => Some(ErrCode::Contract),
             "cancelled" => Some(ErrCode::Cancelled),
@@ -68,6 +77,9 @@ impl ErrCode {
             ErrCode::Permission => "permission",
             ErrCode::Memory => "memory",
             ErrCode::Dependency => "dependency",
+            ErrCode::Truncation => "truncation",
+            ErrCode::Format => "format",
+            ErrCode::Schema => "schema",
             ErrCode::Data => "data",
             ErrCode::Contract => "contract",
             ErrCode::Cancelled => "cancelled",
@@ -223,30 +235,82 @@ const PAT_DEPENDENCY: &[&str] = &[
     "incompatible version",
 ];
 
-const PAT_DATA: &[&str] = &[
-    "typeerror",
-    "valueerror",
+/// 输出截断（v0.14d 从 data 拆出）：finish_reason=length / max tokens / truncated——
+/// 生成物被切断，重采样（更短输出）可能成功，重试可救。
+const PAT_TRUNCATION: &[&str] = &[
+    "finish_reason=length",
+    "finish reason: length",
+    "finish_reason: length",
+    "output truncated",
+    "truncated output",
+    "was truncated",
+    "response truncated",
+    "max_tokens",
+    "max tokens exceeded",
+    "context length exceeded",
+    "context window exceeded",
+    "maximum context length",
+    "too long",
+    "exceeds the maximum",
+];
+
+/// 输入格式错（v0.14d 从 data 拆出）：输入解析/解码失败——确定性坏，重试同错。
+const PAT_FORMAT: &[&str] = &[
     "jsondecodeerror",
-    "keyerror",
-    "indexerror",
     "unicodedecodeerror",
     "unicodeencodeerror",
+    "invalid utf",
+    "invalidutf",
+    "parse error",
+    "parseerror",
+    "parsing error",
+    "unexpected df output",
+    "unexpected end of input",
+    "unexpected token",
+    "invalid format",
+    "malformed",
+    "not well-formed",
+];
+
+/// 输出结构不合预期（v0.14d 从 data 拆出）：模型输出幻觉/缺字段/类型不合——
+/// 换路径（换模型/换 prompt 策略）可能好，同路径重试无意义。
+/// 注意：不用裸 "expected"/"got"（超宽，会误伤一切错误串）。
+const PAT_SCHEMA: &[&str] = &[
+    "keyerror",
+    "typeerror",
     "attributeerror",
     "validation",
-    "invalid utf",
-    "unexpected df output",
-    "parse error",
-    "syntaxerror",
+    "validationerror",
+    "missing field",
+    "missing key",
+    "expected one of",
+    "invalid response format",
+    "unrecognized response",
+    "field is required",
+    "null value",
+    "none value",
+];
+
+/// 值域错（data 收窄）：值本身不合法（除零/溢出/索引越界/断言）——输入×实现共同决定。
+const PAT_DATA: &[&str] = &[
+    "valueerror",
+    "indexerror",
     "overflow",
+    "zerodivisionerror",
+    "assertion",
+    "assertionerror",
+    "out of range",
+    "out of bounds",
+    "arithmetic",
 ];
 
 fn matches_any(lower: &str, pats: &[&str]) -> bool {
     pats.iter().any(|p| lower.contains(p))
 }
 
-/// 分类原始错误串。判定链（先具体后兜底，v0.14c 十二类）：
+/// 分类原始错误串。判定链（先具体后兜底，v0.14d 十五类）：
 /// cancelled → contract → ratelimit → auth → timeout → memory → dependency →
-/// permission → network → resource → data → crash
+/// permission → network → resource → truncation → format → schema → data → crash
 ///
 /// 顺序理由：
 /// - cancelled 最先：用户意图是最高优先级信号，任何自动处置都是违背意图
@@ -259,6 +323,8 @@ fn matches_any(lower: &str, pats: &[&str]) -> bool {
 ///   同时含 "no module"（依赖）与字面 "not found" 子串风险——依赖更强
 /// - permission 在 network/resource 前：io::Error 的权限是更强语义信号
 /// - network 在 resource 前：`connect refused` 若先撞 "not found" 弱词会误判
+/// - truncation/format/schema 在 data 前（v0.14d data 四分）：截断/格式/结构
+///   是更具体的语义信号，收窄后的 data 只兜值域错
 pub fn classify(raw: &str) -> ErrCode {
     let lower = raw.to_lowercase();
     if matches_any(&lower, PAT_CANCELLED) {
@@ -281,6 +347,12 @@ pub fn classify(raw: &str) -> ErrCode {
         ErrCode::Network
     } else if matches_any(&lower, PAT_RESOURCE) {
         ErrCode::Resource
+    } else if matches_any(&lower, PAT_TRUNCATION) {
+        ErrCode::Truncation
+    } else if matches_any(&lower, PAT_FORMAT) {
+        ErrCode::Format
+    } else if matches_any(&lower, PAT_SCHEMA) {
+        ErrCode::Schema
     } else if matches_any(&lower, PAT_DATA) {
         ErrCode::Data
     } else {
@@ -384,6 +456,9 @@ impl Backoff {
 /// | network | Retry{2, linear} | 网络抖动自愈概率高 |
 /// | resource | Retry{1, linear} | 文件迟到/竞态一轮缓冲 |
 /// | data | Reroute | 同输入同 impl 必再错，立即换路径 |
+/// | truncation | Retry{2, linear} | 重采样可能更短成功——截断是概率性失败 |
+/// | format | Reroute | 输入确定性坏，同 impl 重试必再错（换路径=换解析器） |
+/// | schema | Reroute | 输出幻觉/缺字段，换路径=换模型/prompt 策略 |
 /// | dependency | Escalate | 环境确定性坏（缺包/缺库），重试无意义 |
 /// | permission | Escalate | 权限重试无意义，直接上报 |
 /// | contract | Escalate | 创作错误（DSL/契约写错），fail-fast |
@@ -413,6 +488,12 @@ pub fn strategy(code: ErrCode) -> Action {
             backoff: Backoff::Linear,
         },
         ErrCode::Data => Action::Reroute,
+        ErrCode::Truncation => Action::Retry {
+            budget: 2,
+            backoff: Backoff::Linear,
+        },
+        ErrCode::Format => Action::Reroute,
+        ErrCode::Schema => Action::Reroute,
         ErrCode::Dependency => Action::Escalate,
         ErrCode::Permission => Action::Escalate,
         ErrCode::Contract => Action::Escalate,
@@ -441,8 +522,8 @@ pub enum Response {
 /// | cancelled | Exit | 用户已表态，整流立即停，尊重意图 |
 /// | timeout / ratelimit / memory | Wait→Switch | 瞬态：上游吃满预算再定生死，之后仅封引用者 |
 /// | network / resource | Wait→Switch | 同上（抖动类） |
-/// | auth | Switch | 凭证坏：立即封锁该供应商 impl，未引用的备选接管（换供应商） |
-/// | data | Switch | 数据错换路径：非引用 impl 立即接管 |
+/// | auth/data/format/schema | Switch | 凭证坏/数据错：封锁该 impl，未引用的备选接管（换供应商/换路径） |
+/// | truncation | Wait | 重采样期间下游等预算耗尽 |
 /// | dependency / permission / crash | Ignore+Switch | 局部死亡：无关者无视，引用者传播 Left |
 /// | contract | Exit | DSL/契约写错，运行期不可恢复，整流退出 |
 pub fn respond(code: ErrCode) -> Response {
@@ -453,7 +534,8 @@ pub fn respond(code: ErrCode) -> Response {
         | ErrCode::Memory
         | ErrCode::Network
         | ErrCode::Resource => Response::Wait,
-        ErrCode::Auth | ErrCode::Data => Response::Switch,
+        ErrCode::Auth | ErrCode::Data | ErrCode::Format | ErrCode::Schema => Response::Switch,
+        ErrCode::Truncation => Response::Wait,
         ErrCode::Dependency | ErrCode::Permission | ErrCode::Crash => Response::Ignore,
         ErrCode::Contract => Response::Exit,
     }
@@ -632,7 +714,7 @@ mod tests {
 
     #[test]
     fn engine_df_output() {
-        assert_eq!(classify("disk: unexpected df output"), ErrCode::Data);
+        assert_eq!(classify("disk: unexpected df output"), ErrCode::Format);
     }
 
     #[test]
@@ -665,7 +747,7 @@ mod tests {
     #[test]
     fn py_traceback_typeerror() {
         let tb = "Traceback (most recent call last):\n  File \"x.py\", line 3, in <module>\nTypeError: can only concatenate str (not \"int\") to str";
-        assert_eq!(classify(tb), ErrCode::Data);
+        assert_eq!(classify(tb), ErrCode::Schema);
     }
 
     #[test]
@@ -685,20 +767,20 @@ mod tests {
     fn py_json_decode() {
         assert_eq!(
             classify("json.decoder.JSONDecodeError: Expecting value: line 1 column 1"),
-            ErrCode::Data
+            ErrCode::Format
         );
     }
 
     #[test]
     fn py_keyerror() {
-        assert_eq!(classify("KeyError: 'width'"), ErrCode::Data);
+        assert_eq!(classify("KeyError: 'width'"), ErrCode::Schema);
     }
 
     #[test]
     fn py_unicode_decode() {
         assert_eq!(
             classify("UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff"),
-            ErrCode::Data
+            ErrCode::Format
         );
     }
 
@@ -921,6 +1003,93 @@ mod tests {
             }
         );
         assert_eq!(strategy(ErrCode::Dependency), Action::Escalate);
+    }
+
+    // ── v0.14d data 四分 ──
+
+    #[test]
+    fn data_split_truncation() {
+        assert_eq!(
+            classify("openai response: finish_reason=length, output was truncated"),
+            ErrCode::Truncation
+        );
+        assert_eq!(
+            classify("This model's maximum context length is 4096 tokens"),
+            ErrCode::Truncation
+        );
+        assert_eq!(
+            classify("output truncated: response cut off at max_tokens"),
+            ErrCode::Truncation
+        );
+    }
+
+    #[test]
+    fn data_split_format() {
+        assert_eq!(
+            classify("json.decoder.JSONDecodeError: Expecting value: line 1 column 1"),
+            ErrCode::Format
+        );
+        assert_eq!(
+            classify("UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff"),
+            ErrCode::Format
+        );
+        assert_eq!(
+            classify("yaml: mapping values are not allowed here — parse error"),
+            ErrCode::Format
+        );
+    }
+
+    #[test]
+    fn data_split_schema() {
+        assert_eq!(classify("KeyError: 'width'"), ErrCode::Schema);
+        assert_eq!(
+            classify("TypeError: can only concatenate str (not \"int\") to str"),
+            ErrCode::Schema
+        );
+        assert_eq!(
+            classify("pydantic ValidationError: field is required (missing field 'title')"),
+            ErrCode::Schema
+        );
+    }
+
+    #[test]
+    fn data_narrowed_to_value_domain() {
+        assert_eq!(
+            classify("ValueError: invalid literal for int()"),
+            ErrCode::Data
+        );
+        assert_eq!(
+            classify("IndexError: list index out of range"),
+            ErrCode::Data
+        );
+        assert_eq!(
+            classify("ZeroDivisionError: division by zero"),
+            ErrCode::Data
+        );
+        assert_eq!(classify("OverflowError: math range error"), ErrCode::Data);
+    }
+
+    #[test]
+    fn strategy_v14d() {
+        use crate::errflow::Action;
+        // 截断=概率性失败 → 重采样重试；格式/结构=确定性坏 → 换路径
+        assert_eq!(
+            strategy(ErrCode::Truncation),
+            Action::Retry {
+                budget: 2,
+                backoff: Backoff::Linear
+            }
+        );
+        assert_eq!(strategy(ErrCode::Format), Action::Reroute);
+        assert_eq!(strategy(ErrCode::Schema), Action::Reroute);
+    }
+
+    #[test]
+    fn respond_v14d() {
+        use crate::errflow::Response;
+        assert_eq!(respond(ErrCode::Truncation), Response::Wait);
+        assert_eq!(respond(ErrCode::Format), Response::Switch);
+        assert_eq!(respond(ErrCode::Schema), Response::Switch);
     }
 
     #[test]

@@ -660,7 +660,11 @@ fn run_impl_with_retry(
             Err(err) => {
                 // v0.14 Reroute（errflow 策略）：数据类错误同输入必再错，
                 // 立即放弃当前 impl 剩余重试预算，让位下一备选路径。
-                if errflow::classify(&err) == errflow::ErrCode::Data {
+                // v0.14d：format/schema 同属 Reroute 族（确定性坏换路径）。
+                if matches!(
+                    errflow::classify(&err),
+                    errflow::ErrCode::Data | errflow::ErrCode::Format | errflow::ErrCode::Schema
+                ) {
                     eprintln!(
                         "    -> errflow: data error → reroute (skip {} retries)",
                         impl_.retry - attempt
