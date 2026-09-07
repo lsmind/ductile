@@ -1,0 +1,23 @@
+#!/home/beef/.local/bin/ductile run
+// llm-ping.pipeline — LLM 桥接健康检查：探测 → 失败换路 → 结果落盘
+// 直跑：./llm-ping.pipeline
+Pipeline("llm_ping", "LLM 桥接健康检查：主路探测 + 失败自动换备选桥")
+  .proc("probe")
+    .desc("探测 LLM 桥")
+    .plan(
+      primary -> llm(prompt="回复一个字：好", model="gpt-4o-mini")
+        .tags(#llm, #probe)
+        .desc("主桥探测"),
+      backup -> llm(prompt="回复一个字：好", model="gpt-4o-mini")
+        .tags(#llm, #probe)
+        .desc("备桥（主桥死时接管）")
+    )
+  .proc("record")
+    .desc("结果落盘")
+    .plan(
+      w -> write(to="/tmp/llm_ping.txt", content="probe: @probe")
+        .tags(#write, #file)
+        .desc("写 /tmp/llm_ping.txt")
+    )
+  .proc("deliver")
+    .deliver(@record)

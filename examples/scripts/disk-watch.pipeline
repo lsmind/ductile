@@ -1,0 +1,27 @@
+#!/home/beef/.local/bin/ductile run
+// disk-watch.pipeline — 磁盘哨兵：根分区水位 + data 大目录 top5 → 报告
+// 直跑：./disk-watch.pipeline
+Pipeline("disk_watch", "磁盘哨兵：根分区使用率 + data 下大目录排行，报告落盘")
+  .proc("usage")
+    .desc("根分区水位")
+    .plan(
+      root -> run("df -h /home/beef | tail -1 | awk '{print $5}'")
+        .tags(#run, #shell)
+        .desc("使用率")
+    )
+  .proc("big")
+    .desc("大目录排行")
+    .plan(
+      top -> run("du -sh /home/beef/data/* 2>/dev/null | sort -rh | head -5")
+        .tags(#run, #shell)
+        .desc("top5")
+    )
+  .proc("report")
+    .desc("报告落盘")
+    .plan(
+      w -> write(to="/tmp/disk_watch.txt", content="root usage: @usage | top5: @big")
+        .tags(#write, #file)
+        .desc("写 /tmp/disk_watch.txt")
+    )
+  .proc("deliver")
+    .deliver(@report)

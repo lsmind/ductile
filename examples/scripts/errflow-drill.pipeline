@@ -1,0 +1,48 @@
+#!/home/beef/.local/bin/ductile run
+// errflow-drill.pipeline — 错误流演习：一次跑通 v0.14d 十五类里的高危四类
+// 直跑：./errflow-drill.pipeline
+// 观察：ratelimit 限流重试 / auth 换供应商 / format 跳撞墙 / truncation 重采样
+Pipeline("errflow_drill", "错误流演习：ratelimit→auth→format→truncation 四场景")
+  .proc("ratelimit")
+    .desc("429 限流")
+    .plan(
+      api -> run("echo 'HTTP 429 Too Many Requests: rate limit exceeded' >&2; exit 1")
+        .tags(#run, #drill)
+        .desc("触发 ratelimit → Retry 退避")
+    )
+  .proc("auth")
+    .desc("凭证失效")
+    .plan(
+      bad -> run("echo '401 Unauthorized: invalid api key' >&2; exit 1")
+        .tags(#run, #drill)
+        .desc("触发 auth → Switch"),
+      good -> run("echo AUTH_FALLBACK_OK")
+        .tags(#run, #drill)
+        .desc("备选接管")
+    )
+  .proc("format")
+    .desc("格式错误")
+    .plan(
+      strict -> run("echo 'JSONDecodeError: Expecting value' >&2; exit 1").retry(n=3)
+        .tags(#run, #drill)
+        .desc("触发 format → Reroute 跳剩余预算"),
+      lenient -> run("echo FORMAT_FALLBACK_OK")
+        .tags(#run, #drill)
+        .desc("宽松解析接管")
+    )
+  .proc("truncation")
+    .desc("输出截断")
+    .plan(
+      llm -> run("echo 'finish_reason=length, output was truncated' >&2; exit 1")
+        .tags(#run, #drill)
+        .desc("触发 truncation → 重采样")
+    )
+  .proc("report")
+    .desc("汇总")
+    .plan(
+      w -> write(to="/tmp/errflow_drill.txt", content="auth: @auth | format: @format")
+        .tags(#write, #file)
+        .desc("写 /tmp/errflow_drill.txt")
+    )
+  .proc("deliver")
+    .deliver(@report)

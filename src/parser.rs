@@ -31,10 +31,13 @@ impl std::fmt::Display for ParseError {
     }
 }
 
-// Check if line is blank or comment
+// Check if line is blank or comment. Shebang (`#!`) lines are skipped too —
+// they let a .pipeline be `chmod +x`'d and run directly via
+// `#!/path/to/ductile run` (Linux passes the script path as argv[2] of the
+// interpreter, landing exactly on the `run <file>` dispatch).
 pub(crate) fn is_skippable(line: &str) -> bool {
     let trimmed = line.trim();
-    trimmed.is_empty() || trimmed.starts_with("//")
+    trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("#!")
 }
 
 // ── Top-level parse ──

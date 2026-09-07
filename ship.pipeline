@@ -1,0 +1,42 @@
+#!/home/beef/.local/bin/ductile run
+// ship.pipeline — 仓库自动管理：测试门禁 → add → commit(信息=topic) → push → 验证
+// 用法：./ship.pipeline "feat: 提交信息"
+// 门禁：cargo test 不绿不 commit 不 push（echo '@test' 引用即依赖：test Left 则下游传播短路）
+Pipeline("ship", "git 自动管理：测试门禁 → add → commit → push → 验证干净")
+  .proc("test")
+    .desc("测试门禁（全绿才放行）")
+    .plan(
+      t -> run("cd /home/beef/projects/ductile && cargo test --release --lib 2>&1 | grep '^test result' | tail -1")
+        .tags(#run, #gate)
+        .desc("cargo test 摘要行")
+    )
+  .proc("add")
+    .desc("暂存全部变更")
+    .plan(
+      a -> run("cd /home/beef/projects/ductile && git add -A && echo staged: $(git diff --cached --numstat | wc -l) files")
+        .tags(#run, #git)
+        .desc("git add -A")
+    )
+  .proc("commit")
+    .desc("提交（信息=topic，测试不绿跳过）")
+    .plan(
+      c -> run("cd /home/beef/projects/ductile && echo '@test' | grep -q '; 0 failed' && git commit -m '{topic}' --quiet && git log --oneline -1 || echo 'skipped: tests not green'")
+        .tags(#run, #git)
+        .desc("门禁通过才 commit")
+    )
+  .proc("push")
+    .desc("推送（commit Left 则短路；网络错误 errflow 自动重试）")
+    .plan(
+      p -> run("cd /home/beef/projects/ductile && echo '@commit' | grep -qE '^[0-9a-f]{7} ' && git push origin main 2>&1 | tail -1 || echo 'no push: nothing committed'")
+        .tags(#run, #git)
+        .desc("git push origin main")
+    )
+  .proc("verify")
+    .desc("验证工作树干净")
+    .plan(
+      v -> run("cd /home/beef/projects/ductile && echo dirty: $(git status --short | wc -l) && git log --oneline -1 && git status -sb | head -1")
+        .tags(#run, #git)
+        .desc("收尾状态")
+    )
+  .proc("deliver")
+    .deliver(@verify)

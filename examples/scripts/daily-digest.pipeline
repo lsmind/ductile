@@ -1,0 +1,35 @@
+#!/home/beef/.local/bin/ductile run
+// daily-digest.pipeline — 每日素材盘点：扫描模型目录 → 计数 → 体积 → 落盘报告
+// 直跑：./daily-digest.pipeline
+// 注：write() 的 \n 是字面量不转义；多统计量拆独立 proc（@proc 只暴露获胜 impl）
+Pipeline("daily_digest", "扫描模型目录，统计模型文件数与磁盘占用，写日报")
+  .proc("scan")
+    .desc("列出模型目录")
+    .plan(
+      main -> ls(path="/home/beef/data/models/ai-video")
+        .tags(#fs, #scan)
+        .desc("模型目录清单")
+    )
+  .proc("count")
+    .desc("模型文件计数")
+    .plan(
+      n -> run("find /home/beef/data/models/ai-video -name '*.safetensors' -o -name '*.gguf' | wc -l")
+        .tags(#run, #shell)
+        .desc("模型文件总数（find|wc 永不非零退出，grep 空匹配会 exit 1）")
+    )
+  .proc("disk")
+    .desc("目录体积")
+    .plan(
+      d -> run("du -sh /home/beef/data/models/ai-video | cut -f1")
+        .tags(#run, #shell)
+        .desc("du 汇总")
+    )
+  .proc("report")
+    .desc("落盘日报")
+    .plan(
+      w -> write(to="/tmp/daily_digest.txt", content="model files: @count | disk: @disk")
+        .tags(#write, #file)
+        .desc("写 /tmp/daily_digest.txt")
+    )
+  .proc("deliver")
+    .deliver(@report)
