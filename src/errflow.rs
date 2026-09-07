@@ -318,6 +318,70 @@ pub fn code_of(encoded: &str) -> ErrCode {
         .unwrap_or(ErrCode::Crash)
 }
 
+/// 关键节点集（v0.14b：判断关键过程/关键节点并调整行为）。
+/// 定义：deliver proc 的引用闭包——`.deliver(@report)` → report → 其 impl refs
+/// 逐层 BFS 回溯，凡是主产出链上的 proc 都是关键节点；不在链上的 = 旁路
+/// （日志/通知/监控类）。无 deliver proc 的管线 = 全部关键（保守默认，v0.9 兼容）。
+pub fn critical_set(pl: &crate::ast::Pipeline) -> std::collections::BTreeSet<String> {
+    use std::collections::{BTreeSet, VecDeque};
+    let mut critical: BTreeSet<String> = BTreeSet::new();
+    let deliverers: Vec<&crate::ast::Proc> = pl.procs.iter().filter(|p| p.deliver).collect();
+    if deliverers.is_empty() {
+        for p in &pl.procs {
+            critical.insert(p.name.clone());
+        }
+        return critical;
+    }
+    let mut queue: VecDeque<String> = VecDeque::new();
+    for d in &deliverers {
+        critical.insert(d.name.clone());
+        // v0.14b：deliver 的主产出引用在 deliver_refs（deliver proc 无 impl），
+        // 此字段由 parser 从 .deliver(@x) 参数解析（旧版被丢弃的实测 bug）
+        for r in &d.deliver_refs {
+            queue.push_back(r.clone());
+        }
+    }
+    while let Some(name) = queue.pop_front() {
+        if critical.contains(&name) {
+            continue;
+        }
+        if let Some(p) = pl.procs.iter().find(|p| p.name == name) {
+            critical.insert(name.clone());
+            for imp in &p.plan {
+                for r in &imp.refs {
+                    queue.push_back(r.clone());
+                }
+            }
+        }
+    }
+    critical
+}
+
+/// 终局裁决：关键 proc 上存在 Left → 致命（返回该 proc 名）。
+/// 旁路 Left 不致命——主产出不受旁路失败牵连（调整行为：容忍+标记）。
+pub fn fatal_left(
+    pl: &crate::ast::Pipeline,
+    partial: &BTreeMap<String, crate::ast::Value>,
+) -> Option<String> {
+    let critical = critical_set(pl);
+    partial
+        .iter()
+        .find(|(name, v)| critical.contains(*name) && is_error_value(v))
+        .map(|(name, _)| name.clone())
+}
+
+/// 关键性放大的失败策略（v0.14b）：关键节点重试预算 ×2——主链值得更努力；
+/// 旁路节点用基础预算。其余 action 不变。
+pub fn strategy_for(code: ErrCode, critical: bool) -> Action {
+    match strategy(code) {
+        Action::Retry { budget, backoff } => Action::Retry {
+            budget: if critical { budget * 2 } else { budget },
+            backoff,
+        },
+        other => other,
+    }
+}
+
 /// 隐式传播（v0.14，无 DSL 面）：下游执行前检查上游引用，任一 Left → 本 proc
 /// 落 Left（err_code 继承上游根因，err_msg 标记传播来源）。返回 true = 应短路。
 pub fn upstream_left(
@@ -655,5 +719,71 @@ mod tests {
         assert_eq!(classify("missing parameter: width"), ErrCode::Contract);
         assert_eq!(classify("missing required param: text"), ErrCode::Contract);
         assert_eq!(classify("unknown parameter passed"), ErrCode::Crash);
+    }
+
+    // ── 关键节点判定（v0.14b） ──
+
+    fn mini_pipeline() -> crate::ast::Pipeline {
+        // gen → report → deliver 主链；notify 旁路
+        crate::parser::parse_pipeline(
+            "Pipeline(\"x\")\n  .proc(\"gen\")\n    .plan(a -> run(\"echo @seed\"))\n  .proc(\"report\")\n    .plan(r -> run(\"echo @gen\"))\n  .proc(\"notify\")\n    .plan(n -> run(\"echo side\"))\n  .proc(\"deliver\")\n    .deliver(@report)\n",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn critical_set_follows_deliver_closure() {
+        let pl = mini_pipeline();
+        let cs = critical_set(&pl);
+        assert!(cs.contains("deliver"));
+        assert!(cs.contains("report"));
+        assert!(cs.contains("gen")); // BFS 回溯：deliver→report→gen
+        assert!(!cs.contains("notify")); // 旁路不在链上
+    }
+
+    #[test]
+    fn fatal_left_only_on_critical() {
+        let pl = mini_pipeline();
+        let mut partial = BTreeMap::new();
+        // 旁路死 → 不致命
+        let side = ErrorRecord::new("notify", "n", "Connection refused", 1).encode();
+        partial.insert("notify".to_string(), crate::ast::Value::Text(side));
+        partial.insert("gen".to_string(), crate::ast::Value::Text("ok".into()));
+        assert_eq!(fatal_left(&pl, &partial), None);
+        // 主链死 → 致命
+        let main = ErrorRecord::new("gen", "a", "Connection refused", 1).encode();
+        partial.insert("gen".to_string(), crate::ast::Value::Text(main));
+        assert_eq!(fatal_left(&pl, &partial), Some("gen".to_string()));
+    }
+
+    #[test]
+    fn strategy_for_doubles_retry_on_critical() {
+        assert_eq!(
+            strategy_for(ErrCode::Timeout, true),
+            Action::Retry {
+                budget: 4,
+                backoff: Backoff::Linear
+            }
+        );
+        assert_eq!(
+            strategy_for(ErrCode::Timeout, false),
+            Action::Retry {
+                budget: 2,
+                backoff: Backoff::Linear
+            }
+        );
+        // 非 Retry 类不受关键性影响
+        assert_eq!(strategy_for(ErrCode::Permission, true), Action::Escalate);
+    }
+
+    #[test]
+    fn no_deliver_means_all_critical() {
+        // 无 deliver proc → 全部关键（v0.9 兼容）
+        let pl = crate::parser::parse_pipeline(
+            "Pipeline(\"x\")\n  .proc(\"a\")\n    .plan(x -> run(\"echo 1\"))\n  .proc(\"b\")\n    .plan(y -> run(\"echo 2\"))\n",
+        )
+        .unwrap();
+        let cs = critical_set(&pl);
+        assert!(cs.contains("a") && cs.contains("b"));
     }
 }

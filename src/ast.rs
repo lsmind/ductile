@@ -125,6 +125,9 @@ pub struct Proc {
     pub checks: Vec<Check>,
     pub deliver: bool,
     pub foreach: Option<String>, // source proc name
+    /// v0.14b：deliver 引用（`.deliver(@report)` 的 @report）——关键节点集的根。
+    /// 旧版只置 is_deliver 丢弃参数，关键性判定无从谈起（实测 bug）。
+    pub deliver_refs: Vec<String>,
     pub foreach_var: String,
     pub pick_by: String, // pick strategy
 }
@@ -350,6 +353,7 @@ mod tests {
                     }],
                     checks: vec![],
                     deliver: false,
+                    deliver_refs: vec![],
                     foreach: None,
                     foreach_var: String::new(),
                     pick_by: "cost".into(),
@@ -364,6 +368,7 @@ mod tests {
                     }],
                     checks: vec![],
                     deliver: false,
+                    deliver_refs: vec![],
                     foreach: None,
                     foreach_var: String::new(),
                     pick_by: "cost".into(),
@@ -392,6 +397,7 @@ mod tests {
                 }],
                 checks: vec![],
                 deliver: false,
+                deliver_refs: vec![],
                 foreach: None,
                 foreach_var: String::new(),
                 pick_by: "cost".into(),

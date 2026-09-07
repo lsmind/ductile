@@ -189,6 +189,7 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
     let mut plan: Vec<Impl> = Vec::new();
     let mut checks: Vec<Check> = Vec::new();
     let mut is_deliver = false;
+    let mut deliver_refs: Vec<String> = Vec::new();
     let mut foreach_src: Option<String> = None;
     let mut foreach_var = String::new();
     let mut pick_by = "cost + history".to_string();
@@ -295,9 +296,19 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
             continue;
         }
 
-        // .deliver(media=[@proc])
+        // .deliver(media=[@proc]) — v0.14b：解析引用（关键节点集的根，此前被丢弃）
         if trimmed.starts_with(".deliver(") || trimmed.starts_with(".deliver (") {
             is_deliver = true;
+            let inner = trimmed
+                .trim_start_matches(".deliver(")
+                .trim_start_matches(".deliver (")
+                .trim_end_matches(')')
+                .trim();
+            for r in extract_refs(inner) {
+                if !deliver_refs.contains(&r) {
+                    deliver_refs.push(r);
+                }
+            }
             idx += 1;
             continue;
         }
@@ -333,6 +344,7 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
             plan,
             checks,
             deliver: is_deliver,
+            deliver_refs,
             foreach: foreach_src,
             foreach_var,
             pick_by,

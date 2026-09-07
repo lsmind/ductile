@@ -365,13 +365,26 @@ pub fn exec_pipeline(
         }
     }
 
-    // 终局判定：任何 Left → Failed（携带 partial：成果与 Left 标记并存）
-    if let Some(err) = first_native_error {
+    // v0.14b 终局裁决（errflow::fatal_left）：只有关键 proc（deliver 引用闭包）上的
+    // Left 才致命——旁路（日志/通知/监控类）失败不牵连主产出，流水线仍 Success。
+    // 兼容：无 deliver 的管线 = 全部关键（v0.9 语义不变）。
+    if let Some(fatal_proc) = errflow::fatal_left(&pl, &results) {
+        let root_msg = results
+            .get(&fatal_proc)
+            .and_then(|v| match v {
+                Value::Text(t) => crate::dslresult::extract_field("err_msg", t),
+                _ => None,
+            })
+            .unwrap_or_else(|| "unknown error".to_string());
         ExecResult::Failed {
-            error: err,
+            error: format!("critical proc '{}' failed: {}", fatal_proc, root_msg),
             partial: results,
         }
     } else {
+        // 旁路失败容忍：主链完好 → Success（旁路 Left 仍在 results 里可查）
+        if results.values().any(errflow::is_error_value) {
+            eprintln!("  [pipeline] bypass failures tolerated — critical chain intact");
+        }
         ExecResult::Success(results)
     }
 }
@@ -390,18 +403,22 @@ fn exec_proc(
     // v0.14 内置策略（errflow::strategy）：先跑一轮裸尝试，失败按根因分类处置。
     // Retry 预算循环只调 exec_proc_inner（裸）——策略块放本层，inner 不得再进策略，
     // 否则递归重试预算永远从 1 重数（实测嵌套爆炸 bug）。
+    // v0.14b 关键性（errflow::critical_set）：主链节点值得更努力——重试预算 ×2；
+    // 旁路节点基础预算。零 DSL 面：关键性由 deliver 引用闭包自动判定。
+    let critical = errflow::critical_set(pl).contains(&proc.name);
     let mut raw = match exec_proc_inner(proc, topic, params, results, pl) {
         Ok(v) => return Ok(v),
         Err(e) => e,
     };
     let code = errflow::classify(&raw);
-    if let errflow::Action::Retry { budget, backoff } = errflow::strategy(code) {
+    if let errflow::Action::Retry { budget, backoff } = errflow::strategy_for(code, critical) {
         for attempt in 0..budget {
             let delay = backoff.delay_secs(attempt);
             eprintln!(
-                "  [{}] errflow: {} → retry {}/{} in {}s",
+                "  [{}] errflow: {}{} → retry {}/{} in {}s",
                 proc.name,
                 code.code(),
+                if critical { " (critical)" } else { "" },
                 attempt + 1,
                 budget,
                 delay
@@ -880,6 +897,7 @@ mod tests {
                 }],
                 checks: vec![],
                 deliver: false,
+                deliver_refs: vec![],
                 foreach: None,
                 foreach_var: String::new(),
                 pick_by: "cost".into(),

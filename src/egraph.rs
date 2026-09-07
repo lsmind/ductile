@@ -866,6 +866,7 @@ mod tests {
             plan: impls,
             checks: vec![],
             deliver: false,
+            deliver_refs: vec![],
             foreach: None,
             foreach_var: String::new(),
             pick_by: "cost + history".into(),
