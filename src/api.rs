@@ -250,7 +250,47 @@ pub fn exec_result_json(r: &ExecResult) -> String {
                 .collect();
             format!("{{\"ok\":true,\"results\":{{{}}}}}", items.join(","))
         }
-        ExecResult::Failed(e) => format!("{{\"ok\":false,\"error\":\"{}\"}}", escape_json(e)),
+        ExecResult::Failed { error, partial } => {
+            // v0.14：失败是数据——partial 保留现场 + 首个根因的 err_code。
+            let code = partial
+                .values()
+                .find_map(|v| match v {
+                    crate::ast::Value::Text(t) => crate::dslresult::extract_field("err_code", t),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let mut parts: Vec<String> = Vec::new();
+            for (k, v) in partial {
+                let entry = match v {
+                    crate::ast::Value::Text(t) if t.starts_with("§§FIELDS§§") => {
+                        match decode_internal_fields(&t) {
+                            Some(fields) => {
+                                let items: Vec<String> = fields
+                                    .iter()
+                                    .map(|(fk, fv)| {
+                                        format!("\"{}\":\"{}\"", escape_json(fk), escape_json(fv))
+                                    })
+                                    .collect();
+                                format!("\"{}\":{{{}}}", escape_json(&k), items.join(","))
+                            }
+                            None => format!(
+                                "\"{}\":{}",
+                                escape_json(&k),
+                                value_json(&crate::ast::Value::Text(t.clone()))
+                            ),
+                        }
+                    }
+                    other => format!("\"{}\":{}", escape_json(&k), value_json(&other)),
+                };
+                parts.push(entry);
+            }
+            format!(
+                "{{\"ok\":false,\"error\":\"{}\",\"err_code\":\"{}\",\"partial\":{{{}}}}}",
+                escape_json(error),
+                escape_json(&code),
+                parts.join(",")
+            )
+        }
     }
 }
 
@@ -658,8 +698,29 @@ mod tests {
         assert!(ok.starts_with("{\"ok\":true"));
         assert!(ok.contains("\"type\":\"file\",\"path\":\"/tmp/a\""));
         assert!(ok.contains("\"type\":\"null\""));
-        let fail = exec_result_json(&ExecResult::Failed("boom \"x\"".into()));
-        assert_eq!(fail, "{\"ok\":false,\"error\":\"boom \\\"x\\\"\"}");
+        let fail = exec_result_json(&ExecResult::Failed {
+            error: "boom \"x\"".into(),
+            partial: BTreeMap::new(),
+        });
+        assert!(fail.starts_with("{\"ok\":false,\"error\":\"boom \\\"x\\\"\",\"err_code\":\"\""));
+        // v0.14：带 Left 的 partial 解码为干净对象
+        let mut p = BTreeMap::new();
+        let rec = crate::errflow::ErrorRecord::new(
+            "render",
+            "ffmpeg",
+            "run timed out after 5s: ffmpeg",
+            2,
+        );
+        p.insert("render".to_string(), crate::ast::Value::Text(rec.encode()));
+        p.insert("search".to_string(), crate::ast::Value::Text("hits".into()));
+        let fail2 = exec_result_json(&ExecResult::Failed {
+            error: "All paths failed for proc: render".into(),
+            partial: p,
+        });
+        assert!(fail2.contains("\"err_code\":\"timeout\""));
+        assert!(fail2.contains("\"render\":{\"err\":\"1\""));
+        assert!(fail2.contains("\"err_msg\":\"run timed out after 5s: ffmpeg\""));
+        assert!(fail2.contains("\"search\":{\"type\":\"text\",\"value\":\"hits\"}"));
     }
 
     #[test]

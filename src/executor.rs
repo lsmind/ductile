@@ -7,6 +7,7 @@
 use crate::ast::*;
 use crate::db;
 use crate::egraph;
+use crate::errflow;
 use crate::ranking::rank_impls_named;
 pub use crate::ranking::ImplPrefs;
 pub use crate::steps::exec_script_call;
@@ -179,7 +180,21 @@ pub fn exec_pipeline(
                         }
                     }
                 }
-                Err(e) => return ExecResult::Failed(e),
+                Err(e) => {
+                    // v0.14 egraph 路径同语义：Left 落库继续走（CSE 共享"失败"事实）
+                    let rec = errflow::ErrorRecord::new(&proc.name, "-", &e, 0);
+                    let enc = rec.encode();
+                    results.insert(proc.name.clone(), Value::Text(enc.clone()));
+                    for (alias, rep_name) in &plan.aliases {
+                        if rep_name == rep {
+                            results.insert(alias.clone(), Value::Text(enc.clone()));
+                        }
+                    }
+                    return ExecResult::Failed {
+                        error: e,
+                        partial: results,
+                    };
+                }
             }
         }
         return ExecResult::Success(results);
@@ -189,21 +204,48 @@ pub fn exec_pipeline(
     let layers = egraph::parallel_groups(&eg);
 
     let mut results: BTreeMap<String, Value> = BTreeMap::new();
-    let mut failed = false;
-    let mut error_msg = String::new();
+    let mut first_native_error: Option<String> = None;
 
     for layer in &layers {
-        if failed {
-            break;
-        }
         // Execute procs in this layer (serially for now — parallel via threads later)
         for proc_name in layer {
-            if failed {
-                break;
-            }
             let proc = pl.procs.iter().find(|p| &p.name == proc_name);
             if let Some(proc) = proc {
                 if proc.deliver {
+                    continue;
+                }
+
+                // v0.14 隐式传播：上游引用任一 Left → 本 proc 不执行，落传播 Left。
+                // 隐性依赖不被静默跳过（fail-closed 传统）；失败是值不是控制流。
+                let mut all_refs: Vec<String> = Vec::new();
+                for imp in &proc.plan {
+                    for r in &imp.refs {
+                        if !all_refs.contains(r) {
+                            all_refs.push(r.clone());
+                        }
+                    }
+                }
+                if let Some(ref src_proc) = proc.foreach {
+                    if !all_refs.contains(src_proc) {
+                        all_refs.push(src_proc.clone());
+                    }
+                }
+                if let Some(dead) = errflow::upstream_left(&results, &all_refs) {
+                    let up = results
+                        .get(&dead)
+                        .cloned()
+                        .unwrap_or(Value::Text(String::new()));
+                    let up_text = match &up {
+                        Value::Text(t) => t.clone(),
+                        _ => String::new(),
+                    };
+                    let rec = errflow::ErrorRecord::propagated(&proc.name, &dead, &up_text);
+                    eprintln!("  [{}] skipped: propagated from {}", proc.name, dead);
+                    results.insert(proc.name.clone(), Value::Text(rec.encode()));
+                    if first_native_error.is_none() {
+                        first_native_error =
+                            Some(format!("propagated from {}: {}", dead, rec.message));
+                    }
                     continue;
                 }
 
@@ -212,16 +254,38 @@ pub fn exec_pipeline(
                         results.insert(proc.name.clone(), val);
                     }
                     Err(e) => {
-                        failed = true;
-                        error_msg = e;
+                        // v0.14 错误值化：不再中止管线，Left 落 results 继续走，
+                        // 终局判定决定成败（下游按隐式传播短路）。
+                        let last_impl = proc
+                            .plan
+                            .iter()
+                            .rev()
+                            .find(|i| i.enabled)
+                            .map(|i| i.name.clone())
+                            .unwrap_or_else(|| "-".to_string());
+                        let rec = errflow::ErrorRecord::new(&proc.name, &last_impl, &e, 0);
+                        eprintln!(
+                            "  [{}] LEFT: {} ({})",
+                            proc.name,
+                            rec.message,
+                            rec.code.code()
+                        );
+                        results.insert(proc.name.clone(), Value::Text(rec.encode()));
+                        if first_native_error.is_none() {
+                            first_native_error = Some(e.clone());
+                        }
                     }
                 }
             }
         }
     }
 
-    if failed {
-        ExecResult::Failed(error_msg)
+    // 终局判定：任何 Left → Failed（携带 partial：成果与 Left 标记并存）
+    if let Some(err) = first_native_error {
+        ExecResult::Failed {
+            error: err,
+            partial: results,
+        }
     } else {
         ExecResult::Success(results)
     }
@@ -696,7 +760,7 @@ mod tests {
                 assert!(map.contains_key("p"));
                 assert!(map["p"].as_text().contains("STUB"));
             }
-            ExecResult::Failed(e) => panic!("stub should succeed: {}", e),
+            ExecResult::Failed { error, .. } => panic!("stub should succeed: {}", error),
         }
     }
 }

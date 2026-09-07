@@ -10,6 +10,8 @@
 //! 模式库来源：steps.rs / script.rs / executor.rs 全量错误字符串归纳
 //! + 外部脚本（Python/bash）常见 stderr 形态。
 
+use std::collections::BTreeMap;
+
 use crate::dslresult;
 
 /// 错误码（六类）。`code()` 返回静态串供编码。
@@ -24,6 +26,19 @@ pub enum ErrCode {
 }
 
 impl ErrCode {
+    /// 从编码字段还原（传播时继承上游分类）。
+    pub fn from_code(s: &str) -> Option<ErrCode> {
+        match s.trim() {
+            "timeout" => Some(ErrCode::Timeout),
+            "resource" => Some(ErrCode::Resource),
+            "permission" => Some(ErrCode::Permission),
+            "data" => Some(ErrCode::Data),
+            "contract" => Some(ErrCode::Contract),
+            "crash" => Some(ErrCode::Crash),
+            _ => None,
+        }
+    }
+
     pub fn code(&self) -> &'static str {
         match self {
             ErrCode::Timeout => "timeout",
@@ -176,6 +191,24 @@ impl ErrorRecord {
     }
 }
 
+impl ErrorRecord {
+    /// 传播构造器：上游 Left → 下游隐式短路（v0.14 隐式传播，无 DSL 面）。
+    /// err_code 继承上游根因分类，err_msg 标记传播来源。
+    pub fn propagated(proc: &str, from_proc: &str, upstream_encoded: &str) -> Self {
+        let code = dslresult::extract_field("err_code", upstream_encoded)
+            .and_then(|c| ErrCode::from_code(&c))
+            .unwrap_or(ErrCode::Crash);
+        ErrorRecord {
+            code,
+            proc: proc.to_string(),
+            impl_: "-".to_string(),
+            message: format!("propagated from {}", from_proc),
+            raw: String::new(),
+            attempts: 0,
+        }
+    }
+}
+
 /// 值是否为错误值（Left）。true = 上游失败。
 pub fn is_error_value(val: &crate::ast::Value) -> bool {
     match val {
@@ -184,6 +217,22 @@ pub fn is_error_value(val: &crate::ast::Value) -> bool {
             .unwrap_or(false),
         _ => false,
     }
+}
+
+/// 隐式传播（v0.14，无 DSL 面）：下游执行前检查上游引用，任一 Left → 本 proc
+/// 落 Left（err_code 继承上游根因，err_msg 标记传播来源）。返回 true = 应短路。
+pub fn upstream_left(
+    results: &BTreeMap<String, crate::ast::Value>,
+    refs: &[String],
+) -> Option<String> {
+    for r in refs {
+        if let Some(v) = results.get(r) {
+            if is_error_value(v) {
+                return Some(r.clone());
+            }
+        }
+    }
+    None
 }
 
 /// 截断到约 n 字符（按 char 计，防 panic 于多字节边界）。
@@ -421,6 +470,19 @@ mod tests {
     }
 
     // ── 顺序陷阱回归（模式互相干扰的真实形态） ──
+
+    #[test]
+    fn upstream_left_detects_dead_dep() {
+        let err = ErrorRecord::new("render", "ffmpeg", "boom timeout", 1).encode();
+        let mut results = BTreeMap::new();
+        results.insert("render".to_string(), crate::ast::Value::Text(err));
+        results.insert("search".to_string(), crate::ast::Value::Text("ok".into()));
+        assert_eq!(
+            upstream_left(&results, &["search".to_string(), "render".to_string()]),
+            Some("render".to_string())
+        );
+        assert_eq!(upstream_left(&results, &["search".to_string()]), None);
+    }
 
     #[test]
     fn permission_beats_resource_weak_words() {

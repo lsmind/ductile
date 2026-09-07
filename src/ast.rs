@@ -205,7 +205,12 @@ impl Value {
 #[derive(Debug)]
 pub enum ExecResult {
     Success(BTreeMap<String, Value>),
-    Failed(String),
+    /// v0.14：失败携带部分结果——失败是数据。partial 含全部已完成 proc 的值
+    /// （Left 错误值为 §§FIELDS§§err=1§§ 编码文本），debug/agent 不再丢失现场。
+    Failed {
+        error: String,
+        partial: BTreeMap<String, Value>,
+    },
 }
 
 // ── RecentRuns: sliding window ──

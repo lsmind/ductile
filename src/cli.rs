@@ -375,9 +375,17 @@ fn cmd_run(path: &str, topic_str: &str, policy_path: Option<&str>) -> Result<i32
             }
             Ok(0)
         }
-        ExecResult::Failed(err) => {
-            eprintln!("Pipeline failed: {}", err);
-            harvest::set_degraded(&pl.name, &err);
+        ExecResult::Failed { error, partial } => {
+            eprintln!("Pipeline failed: {}", error);
+            if !partial.is_empty() {
+                eprintln!("  [partial] {} procs completed/marked:", partial.len());
+                for (k, v) in &partial {
+                    let is_err = crate::errflow::is_error_value(v);
+                    let tag = if is_err { "LEFT" } else { "OK  " };
+                    eprintln!("    [{}] {} => {:?}", tag, k, v);
+                }
+            }
+            harvest::set_degraded(&pl.name, &error);
             eprintln!(
                 "[degraded] flag set — fix then: ductile degraded clear {}",
                 pl.name

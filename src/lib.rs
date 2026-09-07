@@ -167,9 +167,10 @@ fn run(
             }
             Ok(out)
         }
-        ExecResult::Failed(err) => {
-            Err(PyRuntimeError::new_err(format!("Pipeline failed: {}", err)))
-        }
+        ExecResult::Failed { error, .. } => Err(PyRuntimeError::new_err(format!(
+            "Pipeline failed: {}",
+            error
+        ))),
     }
 }
 
