@@ -158,6 +158,11 @@ pub fn extract_first_string(body: &str) -> String {
                 let mut esc = false;
                 for c in raw.chars() {
                     if esc {
+                        // Only \" and \\ are DSL escapes; keep other \X literal
+                        // so Windows paths like C:\Users\... survive parsing.
+                        if c != '"' && c != '\\' {
+                            out.push('\\');
+                        }
                         out.push(c);
                         esc = false;
                     } else if c == '\\' {
@@ -165,6 +170,9 @@ pub fn extract_first_string(body: &str) -> String {
                     } else {
                         out.push(c);
                     }
+                }
+                if esc {
+                    out.push('\\');
                 }
                 return out;
             }
@@ -202,9 +210,17 @@ pub fn extract_all_string_args(key: &str, body: &str) -> Vec<String> {
 
 /// ~/ 前缀展开为 $HOME。
 pub fn expand_tilde(path: &str) -> String {
-    if path.starts_with("~/") {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".into());
-        format!("{}/{}", home, &path[2..])
+    if path.starts_with("~/") || path.starts_with("~\\") {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| {
+                if cfg!(windows) {
+                    r"C:\Users\Public".into()
+                } else {
+                    "/home/user".into()
+                }
+            });
+        format!("{}{}{}", home, std::path::MAIN_SEPARATOR, &path[2..])
     } else {
         path.to_string()
     }
@@ -319,7 +335,11 @@ mod tests {
     fn expand_tilde_with_slash() {
         let expanded = expand_tilde("~/test");
         assert!(!expanded.contains('~'));
-        assert!(expanded.ends_with("/test"));
+        assert!(
+            expanded.ends_with("/test") || expanded.ends_with("\\test"),
+            "{}",
+            expanded
+        );
     }
 
     #[test]
@@ -367,6 +387,12 @@ mod tests {
         // DSL 字符串内的 \" 转义：终止符不应被奇数反斜杠提前截断
         let body = "sh(\"echo \\\"hi\\\"\")";
         assert_eq!(extract_first_string(body), "echo \"hi\"");
+    }
+
+    #[test]
+    fn extract_first_string_keeps_windows_path_backslashes() {
+        let body = r#"mkdir("C:\Users\foo\bar")"#;
+        assert_eq!(extract_first_string(body), r"C:\Users\foo\bar");
     }
 
     #[test]

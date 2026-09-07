@@ -14,8 +14,16 @@ use std::path::PathBuf;
 // ── Path ──
 
 pub fn db_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let dir = PathBuf::from(&home).join(".local/share/ductile");
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| {
+            if cfg!(windows) {
+                std::env::temp_dir().to_string_lossy().into_owned()
+            } else {
+                "/tmp".into()
+            }
+        });
+    let dir = PathBuf::from(&home).join(".local").join("share").join("ductile");
     let _ = fs::create_dir_all(&dir);
     dir.join("ductile.db")
 }
@@ -24,6 +32,8 @@ pub fn open() -> Connection {
     let path = db_path();
     let conn = Connection::open(&path).unwrap_or_else(|e| panic!("Cannot open ductile.db: {}", e));
     conn.execute_batch("PRAGMA journal_mode=WAL;").ok();
+    // Ensure schema exists (fresh clones / first Windows run never called init_db).
+    conn.execute_batch(SCHEMA_DDL).ok();
     conn
 }
 

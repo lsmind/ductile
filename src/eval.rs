@@ -320,9 +320,10 @@ mod tests {
         assert_eq!(cache.get_fresh(("p", "i", "latency"), 60), None);
     }
 
-    // ── Strategy：MeasuredCost（真跑脚本）──
+    // ── Strategy：MeasuredCost（真跑脚本，依赖 bash）──
 
     #[test]
+    #[cfg(unix)]
     fn measured_cost_executes_script_and_caches() {
         let cache = InMemoryCache::new();
         let src = MeasuredCost {
@@ -343,6 +344,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn measured_cost_failing_script_returns_none() {
         let cache = InMemoryCache::new();
         let src = MeasuredCost {
@@ -353,6 +355,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn measured_cost_non_numeric_stdout_returns_none() {
         let cache = InMemoryCache::new();
         let src = MeasuredCost {
@@ -362,6 +365,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn measured_cost_topic_expansion_and_timeout_output() {
         let cache = InMemoryCache::new();
         let src = MeasuredCost {

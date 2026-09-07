@@ -1,7 +1,7 @@
 # Ductile（铸渠）总体设计文档
 
-> 版本 **v0.13.1** · 2026-09-07 整理 · 所有数字经源码与实测核实（`git 4956e3e`，271 Rust 测试绿）
-> 配套文档：README.md（产品视角）· SPEC.md（API 规格，供 AI 调用者）· docs/v0.11_decouple_spec.md（裁判分离实施规格）
+> 版本 **v0.13.1** · 2026-09-07 整理 · ~13.4k LOC / 325+ Rust 测试 · 含 v0.14 errflow
+> 配套文档：README.md（产品视角）· SPEC.md（API 规格，供 AI 调用者）· docs/v0.11_decouple_spec.md · docs/v0.14_error_flow_spec.md
 
 ---
 
@@ -37,35 +37,33 @@
 
 ```
 ┌────────────────────────────────────────────────────┐
-│ CLI (cli.rs, 1161行) —— check/run/parse/graph/stats │
+│ CLI (cli.rs ~1080) —— check/run/parse/graph/stats  │
 │   import/search/discover/learn/db-stats            │
 │   patch/version/promote/grow/scaffold/harvest…     │
 ├────────────────────────────────────────────────────┤
-│ 集成层  api.rs(692) core+pyo3薄壳双形态             │
+│ 集成层  api.rs(~700) core+pyo3薄壳双形态            │
 │         lib.rs → python/ductile（LangChain 工具）   │
 ├────────────────────────────────────────────────────┤
-│ DSL 层  parser(1496) / ast(414) / typecheck(169)   │
-│         when(434, Interpreter 模式条件路由)          │
+│ DSL 层  parser(~1400) / ast(~390) / typecheck      │
+│         when(~390, Interpreter 条件路由)            │
 ├────────────────────────────────────────────────────┤
-│ 编排层  executor(702, 纯编排) / ranking(382, 偏好   │
-│         学习) / eval(401, 裁判分离运行时) /          │
-│         egraph(1335, 等价类+CSE)                    │
+│ 编排层  executor(~870) / ranking / eval /          │
+│         egraph(~1225, union-only 等价类+CSE) /     │
+│         errflow(~1120, v0.14 错误分类与传播)        │
 ├────────────────────────────────────────────────────┤
-│ 执行层  steps(1263, 21 内置算子+进程表) /            │
-│         textargs(399, 文本解析原语) /                │
-│         dslresult(200, ##DSL_RESULT 协议)           │
+│ 执行层  steps(~1200, 内置算子+进程表) /             │
+│         textargs / dslresult（##DSL_RESULT）       │
 ├────────────────────────────────────────────────────┤
-│ 语义层  script(384, v0.12 脚本契约：脚本即 API)      │
+│ 语义层  script（v0.12 脚本契约：脚本即 API）         │
 ├────────────────────────────────────────────────────┤
-│ 知识线  registry(224, proc库+同构) / learn(237) /   │
-│         harvest(909) / promote(260, MDL晋升门) /    │
-│         grow(286, 构式生长) / version(126, 快照)    │
+│ 知识线  registry / learn / harvest / promote /     │
+│         grow / version                             │
 ├────────────────────────────────────────────────────┤
-│ 数据层  db(1290, SQLite, 22 个 *_conn 注入内核)     │
+│ 数据层  db(~1180, SQLite, *_conn 注入内核)         │
 └────────────────────────────────────────────────────┘
 ```
 
-22 模块共 13,010 行 Rust。`parser`/`egraph`/`db`/`steps`/`cli` 五大件各 ~1.2-1.5K 行；executor 在 v0.12.1 从 2642 行巨石拆到 702 行纯编排。
+约 23 模块、~13.4k 行 Rust。`parser`/`egraph`/`db`/`steps`/`errflow`/`cli` 为主要体量；executor 在 v0.12.1 从巨石拆到纯编排，v0.14 错误值化与默认路径/egraph 路径终局语义对齐（`fatal_left`）。
 
 ---
 
@@ -201,7 +199,7 @@ score=85
 
 ## 6. 工程质量
 
-### 6.1 测试架构（271 Rust + 11 pytest，三层）
+### 6.1 测试架构（325+ Rust + 11 pytest，三层）
 
 | 层 | 对象 | 手法 |
 |----|------|------|
@@ -245,11 +243,14 @@ executor 巨石拆四模块（textargs/dslresult/steps/ranking，re-export 兼�
 | v0.12 | 脚本契约 | 脚本即 API；契约头/契约卡/cse_safe；script CLI 族 |
 | v0.12.1 | 模块化 | executor 拆分 + db 注入 + 测试 162→262，修 6 潜伏 bug |
 | v0.13 | API/集成 | api.rs core+薄壳；LangChain 插件；实测端到端 |
-| v0.13.1 | 收敛 | 删 Web 前端与 serve（用户裁定）；测试 271；文档全对齐 |
+| v0.13.1 | 收敛 | 删 Web 前端与 serve（用户裁定）；测试 325+；文档全对齐 |
+| v0.13.1+ | 硬化 | Windows 可编译；egraph 失败语义对齐 fatal_left；typecheck 未知函数；CI |
 
 ## 8. 当前状态与边界
 
-- **代码**：22 模块 13,010 行；271 Rust 测试 + 11 pytest 全绿；main 已推送（`4956e3e`）
-- **制品**：二进制 `~/.local/bin/ductile`；wheel 0.13.1 本地装好（PyPI 远端仍 0.6.1，等 token）
+- **代码**：~23 模块 ~13.4k 行；325+ Rust 测试 + 11 pytest；Linux CI
+- **制品**：二进制 `ductile`；wheel 0.13.1（PyPI badge 已对齐；远端发布视 token）
 - **明确不做**：Web 控制台（不成熟，已删可找回）；嵌入式脚本（DSL 只链接不嵌脚本，v0.12 裁定）
+- **平台**：Linux 一等公民（bash/`process_group`）；Windows 可编译，shell 算子需 PATH 上有 bash
 - **设计取舍备忘**：评价与流程分离是宪法级原则——任何把 cost/门槛写回 `.pipeline` 的提案都是倒退
+- **安全**：`run`/`sh` 执行任意命令字符串——仅适合本地可信操作员，非多租户沙箱

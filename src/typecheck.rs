@@ -1,17 +1,21 @@
 //! Type checker — validates pipeline structure.
 //!
-//! v0.4: No level or scope checks. Only checks:
+//! Checks:
 //!   - NoEnabledImpl: proc has at least one enabled impl
 //!   - CostNegative: impl has negative cost
 //!   - EmptyPlan: non-deliver proc has empty plan
+//!   - UnknownFunction: enabled impl body calls a non-registered function (fail-closed)
 
 use crate::ast::*;
+use crate::steps::{is_probe_stub, known_functions};
+use crate::textargs::detect_func;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeError {
     NoEnabledImpl(String),
     CostNegative(String, String),
     EmptyPlan(String),
+    UnknownFunction(String, String, String),
 }
 
 impl std::fmt::Display for TypeError {
@@ -26,15 +30,26 @@ impl std::fmt::Display for TypeError {
             TypeError::EmptyPlan(proc) => {
                 write!(f, "[{}] empty plan", proc)
             }
+            TypeError::UnknownFunction(proc, impl_name, func) => {
+                write!(
+                    f,
+                    "[{}] impl '{}' unknown function '{}' — fail-closed",
+                    proc, impl_name, func
+                )
+            }
         }
     }
 }
 
 pub fn check_pipeline(pl: &Pipeline) -> Vec<TypeError> {
-    pl.procs.iter().flat_map(|proc| check_proc(proc)).collect()
+    let known: std::collections::BTreeSet<&str> = known_functions().into_iter().collect();
+    pl.procs
+        .iter()
+        .flat_map(|proc| check_proc(proc, &known))
+        .collect()
 }
 
-fn check_proc(proc: &Proc) -> Vec<TypeError> {
+fn check_proc(proc: &Proc, known: &std::collections::BTreeSet<&str>) -> Vec<TypeError> {
     let mut errs = Vec::new();
 
     // Plan check
@@ -53,6 +68,16 @@ fn check_proc(proc: &Proc) -> Vec<TypeError> {
                     proc.name.clone(),
                     impl_.name.clone(),
                 ));
+            }
+            if impl_.enabled && !impl_.stub {
+                let func = detect_func(&impl_.body_text);
+                if !func.is_empty() && !is_probe_stub(&func) && !known.contains(func.as_str()) {
+                    errs.push(TypeError::UnknownFunction(
+                        proc.name.clone(),
+                        impl_.name.clone(),
+                        func,
+                    ));
+                }
             }
         }
     }
@@ -96,7 +121,7 @@ mod tests {
             enabled: true,
             when: None,
             refs: vec![],
-            body_text: "noop()".into(),
+            body_text: "run(\"true\")".into(),
             stub: false,
             retry: 0,
             ensure: vec![],
@@ -158,6 +183,21 @@ mod tests {
         assert!(errs
             .iter()
             .any(|e| matches!(e, TypeError::NoEnabledImpl(_))));
+    }
+
+    // ── Unknown function ──
+    #[test]
+    fn unknown_function_detected() {
+        let mut i = mk_impl("bad", Cost::default());
+        i.body_text = "not_a_real_fn(x=1)".into();
+        let pl = mk_pipeline(vec![mk_proc("p", vec![i])]);
+        let errs = check_pipeline(&pl);
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, TypeError::UnknownFunction(_, _, _))),
+            "{:?}",
+            errs
+        );
     }
 
     // ── TypeError display ──

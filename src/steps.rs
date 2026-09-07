@@ -12,10 +12,24 @@ use crate::textargs::{
 };
 use std::collections::BTreeMap;
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+
+/// Best-effort home directory (HOME on Unix, USERPROFILE on Windows).
+fn home_dir() -> String {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| {
+            if cfg!(windows) {
+                r"C:\Users\Public".into()
+            } else {
+                "/tmp".into()
+            }
+        })
+}
 
 // ── Function Registry（v0.11.1 重构：Registry + Adapter 模式）──
 //
@@ -314,15 +328,20 @@ fn exec_spawn(
         return Err("spawn requires a command string".into());
     }
     use std::process::Stdio;
-    let child = Command::new("bash")
+    // v0.12.1：Unix 上子进程自立进程组。此前继承父组 → exec_kill 的
+    // kill -9 -pid（组杀）目标组不存在，静默无效；且孤孙子进程
+    // （cmd 里的 `&`）会在组杀时漏杀。Windows 无 process_group，仅 kill 主进程。
+    let mut spawn_cmd = Command::new("bash");
+    spawn_cmd
         .arg("-c")
         .arg(&cmd)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        // v0.12.1：子进程自立进程组。此前继承父组 → exec_kill 的
-        // kill -9 -pid（组杀）目标组不存在，静默无效；且孤孙子进程
-        // （cmd 里的 `&`）会在组杀时漏杀。
-        .process_group(0)
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        spawn_cmd.process_group(0);
+    }
+    let child = spawn_cmd
         .spawn()
         .map_err(|e| format!("spawn failed: {}", e))?;
     let pid = child.id();
@@ -497,10 +516,10 @@ fn exec_fs_rm(_impl_: &Impl, body: &str) -> Result<Value, String> {
 
 fn dirs_home() -> &'static Path {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
-    HOME.get_or_init(|| PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into())))
+    HOME.get_or_init(|| PathBuf::from(home_dir()))
 }
 
-/// cp("src", "dst") — file or directory tree.
+/// cp("src", "dst") — file or directory tree (pure Rust, no shell `cp`).
 fn exec_fs_cp(_impl_: &Impl, body: &str) -> Result<Value, String> {
     let src = expand_tilde(&extract_string_arg("from", body));
     let dst = expand_tilde(&extract_string_arg("to", body));
@@ -512,23 +531,31 @@ fn exec_fs_cp(_impl_: &Impl, body: &str) -> Result<Value, String> {
         return Err(format!("cp: source not found: {}", src));
     }
     if s.is_dir() {
-        // shell out for recursive copy (keeps this fn small)
-        let st = Command::new("cp")
-            .arg("-r")
-            .arg(&src)
-            .arg(&dst)
-            .output()
-            .map_err(|e| format!("cp failed: {}", e))?;
-        if !st.status.success() {
-            return Err(format!(
-                "cp failed: {}",
-                String::from_utf8_lossy(&st.stderr)
-            ));
-        }
+        copy_dir_recursive(s, Path::new(&dst))?;
     } else {
+        if let Some(parent) = Path::new(&dst).parent() {
+            let _ = fs::create_dir_all(parent);
+        }
         fs::copy(&src, &dst).map_err(|e| format!("cp failed: {}", e))?;
     }
     Ok(Value::Text(format!("copied {} -> {}", src, dst)))
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|e| format!("cp mkdir failed: {}", e))?;
+    for entry in fs::read_dir(src).map_err(|e| format!("cp read_dir failed: {}", e))? {
+        let entry = entry.map_err(|e| format!("cp entry failed: {}", e))?;
+        let ty = entry
+            .file_type()
+            .map_err(|e| format!("cp file_type failed: {}", e))?;
+        let to = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &to)?;
+        } else {
+            fs::copy(entry.path(), &to).map_err(|e| format!("cp failed: {}", e))?;
+        }
+    }
+    Ok(())
 }
 
 /// mkdir("path") — create all parents.
@@ -692,7 +719,7 @@ fn exec_run(
 
 fn find_bridge(script: &str) -> String {
     // Search order: current dir, ~/.local/share/ductile/bridge/, project-local
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let home = home_dir();
     let candidates = [
         format!("./{}", script),
         format!("./bridge/{}", script),
@@ -1074,9 +1101,17 @@ mod tests {
 
     // ── fs 七件套 ──
 
+    /// Normalize path for embedding in DSL `"..."` literals (forward slashes
+    /// avoid Windows `\` escape ambiguity in extract_string_arg / bodies).
+    fn dsl_path(p: &std::path::Path) -> String {
+        p.display().to_string().replace('\\', "/")
+    }
+
     #[test]
     fn fs_exists_true_false() {
-        let ok = exec_fs_exists(&default_impl(), r#"exists("/tmp")"#).unwrap();
+        let here = std::env::temp_dir();
+        let ok = exec_fs_exists(&default_impl(), &format!(r#"exists("{}")"#, dsl_path(&here)))
+            .unwrap();
         assert_eq!(ok.as_text(), "true");
         let no = exec_fs_exists(&default_impl(), r#"exists("/nonexistent-xyz-ductile")"#).unwrap();
         assert_eq!(no.as_text(), "false");
@@ -1090,11 +1125,11 @@ mod tests {
         std::fs::write(dir.join("b.txt"), "world").unwrap();
         let st = exec_fs_stat(
             &default_impl(),
-            &format!(r#"stat("{}")"#, dir.join("a.txt").display()),
+            &format!(r#"stat("{}")"#, dsl_path(&dir.join("a.txt"))),
         )
         .unwrap();
         assert!(st.as_text().starts_with("file "), "{}", st.as_text());
-        let ls = exec_fs_ls(&default_impl(), &format!(r#"ls("{}")"#, dir.display())).unwrap();
+        let ls = exec_fs_ls(&default_impl(), &format!(r#"ls("{}")"#, dsl_path(&dir))).unwrap();
         assert_eq!(ls.as_text(), "a.txt\nb.txt");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1107,22 +1142,22 @@ mod tests {
         let _ = std::fs::create_dir_all(&src);
         std::fs::write(src.join("f.txt"), "data").unwrap();
         // mkdir dst（from/to 形态）
-        let m = exec_fs_mkdir(&default_impl(), &format!(r#"mkdir("{}")"#, dst.display())).unwrap();
-        assert_eq!(m.as_text(), dst.display().to_string());
+        let m = exec_fs_mkdir(&default_impl(), &format!(r#"mkdir("{}")"#, dsl_path(&dst))).unwrap();
+        assert_eq!(m.as_text().replace('\\', "/"), dsl_path(&dst));
         // cp 目录树
         let c = exec_fs_cp(
             &default_impl(),
             &format!(
                 r#"cp(from="{}", to="{}")"#,
-                src.display(),
-                dst.join("src").display()
+                dsl_path(&src),
+                dsl_path(&dst.join("src"))
             ),
         )
         .unwrap();
         assert!(c.as_text().contains("copied"));
-        assert!(dst.join("src/f.txt").exists());
+        assert!(dst.join("src").join("f.txt").exists());
         // rm 树
-        let r = exec_fs_rm(&default_impl(), &format!(r#"rm("{}")"#, base.display())).unwrap();
+        let r = exec_fs_rm(&default_impl(), &format!(r#"rm("{}")"#, dsl_path(&base))).unwrap();
         assert!(r.as_text().contains("removed"));
         assert!(!base.exists());
     }
@@ -1130,11 +1165,12 @@ mod tests {
     #[test]
     fn fs_rm_refuses_protected_roots() {
         assert!(exec_fs_rm(&default_impl(), r#"rm("/")"#).is_err());
-        assert!(exec_fs_rm(
-            &default_impl(),
-            &format!(r#"rm("{}")"#, std::env::var("HOME").unwrap())
-        )
-        .is_err());
+        let home = home_dir().replace('\\', "/");
+        assert!(
+            exec_fs_rm(&default_impl(), &format!(r#"rm("{}")"#, home)).is_err(),
+            "home={}",
+            home
+        );
     }
 
     #[test]
@@ -1148,9 +1184,10 @@ mod tests {
         assert!(exec_fs_cp(&default_impl(), r#"cp(from="/no/such/src", to="/tmp/x")"#).is_err());
     }
 
-    // ── run：DSL_RESULT 集成 + 超时 + env ──
+    // ── run：DSL_RESULT 集成 + 超时 + env（依赖 bash；Windows 无 bash 时跳过）──
 
     #[test]
+    #[cfg(unix)]
     fn run_echo_returns_stdout() {
         let r = exec_run(
             &default_impl(),
@@ -1163,6 +1200,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn run_dsl_result_block_structured() {
         let cmd = "echo x; printf '##DSL_RESULT\nscore=85\n##DSL_END\n'";
         let body = format!("run(\"{}\")", cmd);
@@ -1176,6 +1214,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn run_failing_command_err() {
         let r = exec_run(&default_impl(), "t", r#"run("exit 3")"#, &BTreeMap::new());
         assert!(r.is_err());
@@ -1183,6 +1222,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn run_timeout_kills() {
         let r = exec_run(
             &default_impl(),
@@ -1195,6 +1235,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn run_env_vars_visible() {
         let body = r#"run("echo $DUCTILE_TEST_V", env="DUCTILE_TEST_V=xyz123")"#;
         let r = exec_run(&default_impl(), "t", &body, &BTreeMap::new()).unwrap();
@@ -1202,6 +1243,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn run_topic_resolution() {
         let body = r#"run("echo {topic}")"#;
         let r = exec_run(&default_impl(), "my-topic", body, &BTreeMap::new()).unwrap();
@@ -1211,6 +1253,7 @@ mod tests {
     // ── 进程管理 ──
 
     #[test]
+    #[cfg(unix)]
     fn spawn_wait_kill_cycle() {
         let mut results = BTreeMap::new();
         // spawn 一个 sleep 30 的后台进程

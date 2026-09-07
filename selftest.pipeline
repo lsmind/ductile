@@ -1,33 +1,34 @@
-#!/home/beef/.local/bin/ductile run
+#!/usr/bin/env -S ductile run
 // selftest.pipeline — ductile 自测（狗粮门禁）：单测+正负探针+脚本回归
 // 直跑：./selftest.pipeline   全绿输出 SELFTEST-PASS（exit 0）；任一失败 → report 判死 → exit 1
 // 注意：llm-ping 依赖外部 LLM 桥，不进自测（避免网络抖动误杀门禁）
+// 仓库根：优先 $DUCTILE_ROOT，否则 git rev-parse
 Pipeline("selftest", "ductile 用 ductile 自测：unit → 正向/负向探针 → 脚本回归 → 汇总门禁")
   .proc("unit")
-    .desc("Rust 单元测试（325+）")
+    .desc("Rust 单元测试")
     .plan(
-      lib -> run("cd /home/beef/projects/ductile && cargo test --release --lib 2>&1 | grep '^test result'")
+      lib -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && cargo test --release --lib 2>&1 | grep '^test result'")
         .tags(#test)
         .desc("全绿标准：'; 0 failed'")
     )
   .proc("pos")
     .desc("正向探针：成功路径必须 success")
     .plan(
-      p -> run("cd /home/beef/projects/ductile && ductile run pipelines/nocost_probe.pipeline regression 2>&1 | grep -c 'executed successfully'")
+      p -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && ductile run pipelines/nocost_probe.pipeline regression 2>&1 | grep -c 'executed successfully'")
         .tags(#test)
         .desc("nocost_probe 计数=1")
     )
   .proc("neg")
     .desc("负向探针：ghost/disabled 必须硬错（v0.11 回归钉）")
     .plan(
-      n -> run("cd /home/beef/projects/ductile && ductile check pipelines/weights_probe.pipeline >/dev/null 2>&1 && echo BAD-ghost-should-fail || echo ghost-ok; ductile check examples/full_syntax.pipeline >/dev/null 2>&1 && echo BAD-disabled-should-fail || echo disabled-ok")
+      n -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && ductile check pipelines/weights_probe.pipeline >/dev/null 2>&1 && echo BAD-ghost-should-fail || echo ghost-ok; ductile check examples/full_syntax.pipeline >/dev/null 2>&1 && echo BAD-disabled-should-fail || echo disabled-ok")
         .tags(#test)
         .desc("两行输出都应是 *-ok")
     )
   .proc("scripts")
     .desc("可执行脚本回归（shebang 直跑三件）")
     .plan(
-      s -> run("cd /home/beef/projects/ductile/examples/scripts && ./daily-digest.pipeline >/dev/null 2>&1 && ./disk-watch.pipeline >/dev/null 2>&1 && ./errflow-drill.pipeline >/dev/null 2>&1 && echo scripts-ok")
+      s -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT/examples/scripts\" && ./daily-digest.pipeline >/dev/null 2>&1 && ./disk-watch.pipeline >/dev/null 2>&1 && ./errflow-drill.pipeline >/dev/null 2>&1 && echo scripts-ok")
         .tags(#test)
         .desc("三个 +x 脚本全 exit 0")
     )

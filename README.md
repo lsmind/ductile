@@ -4,8 +4,9 @@
 
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-271%20passed-brightgreen.svg)](#测试)
-[![PyPI](https://img.shields.io/badge/PyPI-0.6.1-blue.svg)](https://pypi.org/project/ductile/)
+[![Tests](https://img.shields.io/badge/Tests-316%2B%20passed-brightgreen.svg)](#测试)
+[![PyPI](https://img.shields.io/badge/PyPI-0.13.1-blue.svg)](https://pypi.org/project/ductile/)
+[![CI](https://github.com/lsmind/ductile/actions/workflows/ci.yml/badge.svg)](https://github.com/lsmind/ductile/actions/workflows/ci.yml)
 
 ---
 
@@ -21,7 +22,7 @@
 |------|---------|---------------------|--------------------|-----------|
 | 声明式流程定义 | ✅ 纯文本 | ⚠️ 代码+图 | ✅ DAG | ❌ |
 | 多路径自动降级 | ✅ 内核 | ❌ 手写 | ❌ 手写 | ⚠️ 静态 |
-| e-graph 等价类 + equality saturation | ✅ v0.10 | ❌ | ❌ | ❌ |
+| e-graph 等价类熔合（union-only） | ✅ v0.10 | ❌ | ❌ | ❌ |
 | CSE（等价 proc 只跑一次） | ✅ v0.10 | ❌ | ❌ | ❌ |
 | 运行时自适应惩罚 | ✅ 独家 | ❌ | ❌ | ❌ |
 | 同构发现 + 打散重组 | ✅ | ❌ | ❌ | ❌ |
@@ -81,9 +82,9 @@ web 路径失败 → 自动滑到 mcp；裁判打分 < 80 → deliver 被门住�
 
 ## 核心能力
 
-### e-graph 等价类 + equality saturation（v0.10 新增）
+### e-graph 等价类 + 受限熔合（v0.10 新增）
 
-`.pick(egraph)` 一行开启。等价 proc 自动并入同一 e-class（同构合并、merge 交换/结合律、write→read 对消），执行时每 class 只跑一个代表，其余 CSE 共享结果。5 procs 的管线压成 3 classes、少跑 2 次重复计算——多路径选择的数学本体从"贪心排序"升级为"等价类提取"。**when-载体守卫（v0.11.1）**：挂 `.when()` 裁判路由的 impl 不参与熔合——否则 judge→consumer 依赖边会被抹掉，deliver 抢跑、判决落空。
+`.pick(egraph)` 一行开启。等价 proc 自动并入同一 e-class（同构合并、merge 交换/结合律、write→read 对消），执行时每 class 只跑一个代表，其余 CSE 共享结果。实现为 **union-only**（不合成新节点，可证终止），不是完整 egg 式 equality saturation；并行组目前只做拓扑分层，层内仍串行。**when-载体守卫（v0.11.1）**：挂 `.when()` 裁判路由的 impl 不参与熔合——否则 judge→consumer 依赖边会被抹掉，deliver 抢跑、判决落空。
 
 ```bash
 ductile graph your.pipeline   # 看 e-class 明细 / 融合规则命中 / CSE 别名 / 静态提取计划
@@ -195,7 +196,7 @@ src/
 └── cli.rs        # 命令分发 + 纯参数解析
 ```
 
-17 模块各带单元测试；总 271 个测试（纯函数直测 + 内存库回路 + 真子进程集成），`cargo test --lib` 一条命令全跑。
+17 模块各带单元测试；Windows 本机 **316** 通过（bash 相关测例 `cfg(unix)`）；Linux CI 跑全量含 shell 集成测。`cargo test --lib` 一条命令全跑。
 
 ## 设计哲学
 
@@ -209,7 +210,7 @@ src/
 cargo test --lib
 ```
 
-271 个测试，全部通过。覆盖：解析原语、##DSL_RESULT 协议、内存库 CRUD/TTL 回路、偏好学习收敛、e-graph 熔合守卫、fs/进程算子（真子进程）、JSON 解析器（含 UTF-16 代理对）。
+316 个测试本机通过（Linux CI 另含 bash 集成测）。覆盖：解析原语、##DSL_RESULT 协议、内存库 CRUD/TTL 回路、偏好学习收敛、e-graph 熔合守卫、errflow、fs/进程算子、JSON 解析器（含 UTF-16 代理对）。
 
 ## License
 

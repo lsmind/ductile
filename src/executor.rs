@@ -181,21 +181,56 @@ pub fn exec_pipeline(
                     }
                 }
                 Err(e) => {
-                    // v0.14 egraph 路径同语义：Left 落库继续走（CSE 共享"失败"事实）
+                    // v0.14 egraph 路径与默认路径同语义：Left 落库继续走（CSE 共享失败），
+                    // 终局用 fatal_left 裁决；contract/Exit 才立即中止。
                     let rec = errflow::ErrorRecord::new(&proc.name, "-", &e, 0);
                     let enc = rec.encode();
+                    eprintln!(
+                        "  [{}] LEFT: {} ({})",
+                        proc.name,
+                        rec.message,
+                        rec.code.code()
+                    );
                     results.insert(proc.name.clone(), Value::Text(enc.clone()));
                     for (alias, rep_name) in &plan.aliases {
                         if rep_name == rep {
                             results.insert(alias.clone(), Value::Text(enc.clone()));
                         }
                     }
-                    return ExecResult::Failed {
-                        error: e,
-                        partial: results,
-                    };
+                    if errflow::respond(rec.code) == errflow::Response::Exit {
+                        eprintln!(
+                            "  [pipeline] errflow: {} error in {} → exit flow",
+                            rec.code.code(),
+                            proc.name
+                        );
+                        return ExecResult::Failed {
+                            error: format!(
+                                "{} error in {}: unrecoverable, flow exited",
+                                rec.code.code(),
+                                proc.name
+                            ),
+                            partial: results,
+                        };
+                    }
                 }
             }
+        }
+        // 与默认路径一致：仅关键链（deliver 闭包）上的 Left 致命
+        if let Some(fatal_proc) = errflow::fatal_left(&pl, &results) {
+            let root_msg = results
+                .get(&fatal_proc)
+                .and_then(|v| match v {
+                    Value::Text(t) => crate::dslresult::extract_field("err_msg", t),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "unknown error".to_string());
+            return ExecResult::Failed {
+                error: format!("critical proc '{}' failed: {}", fatal_proc, root_msg),
+                partial: results,
+            };
+        }
+        if results.values().any(errflow::is_error_value) {
+            eprintln!("  [pipeline] bypass failures tolerated — critical chain intact");
         }
         return ExecResult::Success(results);
     }
