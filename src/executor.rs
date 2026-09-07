@@ -215,8 +215,7 @@ pub fn exec_pipeline(
                     continue;
                 }
 
-                // v0.14 隐式传播：上游引用任一 Left → 本 proc 不执行，落传播 Left。
-                // 隐性依赖不被静默跳过（fail-closed 传统）；失败是值不是控制流。
+                // v0.14a3 下游响应策略（errflow::respond）：按死亡上游的错误分类决策。
                 let mut all_refs: Vec<String> = Vec::new();
                 for imp in &proc.plan {
                     for r in &imp.refs {
@@ -230,23 +229,92 @@ pub fn exec_pipeline(
                         all_refs.push(src_proc.clone());
                     }
                 }
-                if let Some(dead) = errflow::upstream_left(&results, &all_refs) {
-                    let up = results
-                        .get(&dead)
-                        .cloned()
-                        .unwrap_or(Value::Text(String::new()));
-                    let up_text = match &up {
-                        Value::Text(t) => t.clone(),
-                        _ => String::new(),
-                    };
-                    let rec = errflow::ErrorRecord::propagated(&proc.name, &dead, &up_text);
-                    eprintln!("  [{}] skipped: propagated from {}", proc.name, dead);
-                    results.insert(proc.name.clone(), Value::Text(rec.encode()));
-                    if first_native_error.is_none() {
-                        first_native_error =
-                            Some(format!("propagated from {}: {}", dead, rec.message));
+                let dead = errflow::dead_refs(&results, &all_refs);
+                if !dead.is_empty() {
+                    let code = results
+                        .get(&dead[0])
+                        .and_then(|v| match v {
+                            Value::Text(t) => Some(errflow::code_of(t)),
+                            _ => None,
+                        })
+                        .unwrap_or(errflow::ErrCode::Crash);
+                    match errflow::respond(code) {
+                        errflow::Response::Exit => {
+                            // 创作错误（contract）：运行期不可恢复，整流退出（保留 partial）
+                            eprintln!(
+                                "  [pipeline] errflow: contract error in {} → exit flow",
+                                dead[0]
+                            );
+                            let msg = format!(
+                                "contract error in {}: unrecoverable, flow exited",
+                                dead[0]
+                            );
+                            return ExecResult::Failed {
+                                error: msg,
+                                partial: results,
+                            };
+                        }
+                        resp => {
+                            // Ignore/Wait/Switch 对引用者的共同语义 = 方法切换：
+                            // 只封锁真正引用死源的 impl，未引用的备选照跑（切换方法）。
+                            // Wait 的"等待"由分层顺序天然提供（上游已吃满 Retry 预算）。
+                            let surviving: Vec<crate::ast::Impl> = proc
+                                .plan
+                                .iter()
+                                .filter(|imp| !imp.refs.iter().any(|r| dead.contains(r)))
+                                .cloned()
+                                .collect();
+                            if !surviving.is_empty() && resp == errflow::Response::Switch {
+                                eprintln!(
+                                    "  [{}] errflow: switch method ({} impls avoid dead {})",
+                                    proc.name,
+                                    surviving.len(),
+                                    dead.join(",")
+                                );
+                                let mut p2 = proc.clone();
+                                p2.plan = surviving;
+                                match exec_proc(&p2, topic, params, &results, &pl) {
+                                    Ok(val) => {
+                                        results.insert(proc.name.clone(), val);
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        let rec = errflow::ErrorRecord::new(&proc.name, "-", &e, 0);
+                                        eprintln!(
+                                            "  [{}] LEFT: {} ({})",
+                                            proc.name,
+                                            rec.message,
+                                            rec.code.code()
+                                        );
+                                        results
+                                            .insert(proc.name.clone(), Value::Text(rec.encode()));
+                                        if first_native_error.is_none() {
+                                            first_native_error = Some(e);
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
+                            // 无可切换方法 → 隐式传播 Left（无视类局部死亡的标准路径）
+                            let up = results
+                                .get(&dead[0])
+                                .cloned()
+                                .unwrap_or(Value::Text(String::new()));
+                            let up_text = match &up {
+                                Value::Text(t) => t.clone(),
+                                _ => String::new(),
+                            };
+                            let rec =
+                                errflow::ErrorRecord::propagated(&proc.name, &dead[0], &up_text);
+                            eprintln!("  [{}] skipped: propagated from {}", proc.name, dead[0]);
+                            results.insert(proc.name.clone(), Value::Text(rec.encode()));
+                            if first_native_error.is_none() {
+                                first_native_error =
+                                    Some(format!("propagated from {}: {}", dead[0], rec.message));
+                            }
+                            continue;
+                        }
                     }
-                    continue;
                 }
 
                 match exec_proc(proc, topic, params, &results, &pl) {
@@ -273,6 +341,23 @@ pub fn exec_pipeline(
                         results.insert(proc.name.clone(), Value::Text(rec.encode()));
                         if first_native_error.is_none() {
                             first_native_error = Some(e.clone());
+                        }
+                        // v0.14a3 Exit（respond 表）：contract = 创作错误，运行期不可恢复，
+                        // 立即退出整个流程（无论下游是否引用——修：不能藏在下游 dead_refs 里）
+                        if errflow::respond(rec.code) == errflow::Response::Exit {
+                            eprintln!(
+                                "  [pipeline] errflow: {} error in {} → exit flow",
+                                rec.code.code(),
+                                proc.name
+                            );
+                            return ExecResult::Failed {
+                                error: format!(
+                                    "{} error in {}: unrecoverable, flow exited",
+                                    rec.code.code(),
+                                    proc.name
+                                ),
+                                partial: results,
+                            };
                         }
                     }
                 }
@@ -302,7 +387,42 @@ fn exec_proc(
     if let Some(ref src) = proc.foreach {
         return exec_foreach_proc(proc, src, topic, params, results, pl);
     }
+    // v0.14 内置策略（errflow::strategy）：先跑一轮裸尝试，失败按根因分类处置。
+    // Retry 预算循环只调 exec_proc_inner（裸）——策略块放本层，inner 不得再进策略，
+    // 否则递归重试预算永远从 1 重数（实测嵌套爆炸 bug）。
+    let mut raw = match exec_proc_inner(proc, topic, params, results, pl) {
+        Ok(v) => return Ok(v),
+        Err(e) => e,
+    };
+    let code = errflow::classify(&raw);
+    if let errflow::Action::Retry { budget, backoff } = errflow::strategy(code) {
+        for attempt in 0..budget {
+            let delay = backoff.delay_secs(attempt);
+            eprintln!(
+                "  [{}] errflow: {} → retry {}/{} in {}s",
+                proc.name,
+                code.code(),
+                attempt + 1,
+                budget,
+                delay
+            );
+            std::thread::sleep(std::time::Duration::from_secs(delay));
+            match exec_proc_inner(proc, topic, params, results, pl) {
+                Ok(v) => return Ok(v),
+                Err(e) => raw = e,
+            }
+        }
+    }
+    Err(raw)
+}
 
+fn exec_proc_inner(
+    proc: &Proc,
+    topic: &str,
+    params: &BTreeMap<String, String>,
+    results: &BTreeMap<String, Value>,
+    pl: &Pipeline,
+) -> Result<Value, String> {
     // Normal proc: rank impls, try in order
     let recent_map = load_recent_runs(&proc.name);
     let eligible: Vec<&Impl> = proc
@@ -319,6 +439,7 @@ fn exec_proc(
         &proc.name,
     );
 
+    let mut raw_err: Option<String> = None;
     for (rank, impl_) in ranked.iter().enumerate() {
         let pid = (b'A' + rank as u8) as char;
         if impl_.stub {
@@ -366,12 +487,15 @@ fn exec_proc(
                     latency_ms,
                 );
                 db::record_pref(&proc.name, &impl_.name, false);
+                // v0.14 根因透传：最终 Err 携带最后 impl 的原始错误（非包装串），
+                // 分类层据此定 code，策略层据此决策。
+                raw_err = Some(err);
                 continue;
             }
         }
     }
 
-    Err(format!("All paths failed for proc: {}", proc.name))
+    Err(raw_err.unwrap_or_else(|| format!("All paths failed for proc: {}", proc.name)))
 }
 
 fn exec_foreach_proc(
@@ -517,6 +641,15 @@ fn run_impl_with_retry(
         match run_impl_steps(impl_, topic, results) {
             Ok(val) => return Ok(val),
             Err(err) => {
+                // v0.14 Reroute（errflow 策略）：数据类错误同输入必再错，
+                // 立即放弃当前 impl 剩余重试预算，让位下一备选路径。
+                if errflow::classify(&err) == errflow::ErrCode::Data {
+                    eprintln!(
+                        "    -> errflow: data error → reroute (skip {} retries)",
+                        impl_.retry - attempt
+                    );
+                    return Err(err);
+                }
                 if attempt < impl_.retry {
                     let delay = 1u64 << (attempt + 1); // 2s, 4s, 8s...
                     eprintln!(

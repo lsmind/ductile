@@ -219,6 +219,105 @@ pub fn is_error_value(val: &crate::ast::Value) -> bool {
     }
 }
 
+/// 内置策略动作（v0.14 §3）：错误分类 → 自动处置。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    /// proc 级重试预算（跨 impl：全 plan 失败后线性退避再来整轮）
+    Retry { budget: u32, backoff: Backoff },
+    /// 数据错→立即换 impl（impl 传输层重试时同输入必再错，不撞墙）
+    Reroute,
+    /// 不自动处理：Left 落库 + 隐式传播
+    Escalate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Backoff {
+    Linear,
+}
+
+impl Backoff {
+    pub fn delay_secs(&self, attempt: u32) -> u64 {
+        match self {
+            // linear: 1s, 2s, 3s…（区别于 impl.retry 的指数 2s/4s/8s）
+            Backoff::Linear => (attempt + 1) as u64,
+        }
+    }
+}
+
+/// 内置策略表（硬编码，不可配置——用户裁定 v0.14：错误处理统一模块管理，
+/// 不单独配置不走 .eval）。
+///
+/// | code | action | 理由 |
+/// |------|--------|------|
+/// | timeout | Retry{2, linear} | 瞬时资源紧张常见，两轮内常自愈 |
+/// | resource | Retry{1, linear} | 网络抖动/文件迟到，一轮缓冲 |
+/// | permission | Escalate | 权限重试无意义，直接上报 |
+/// | data | Reroute | 同输入同 impl 必再错，立即换路径 |
+/// | contract | Escalate | 创作错误（DSL/契约写错），fail-fast |
+/// | crash | Escalate | 未知根因，不瞎猜 |
+pub fn strategy(code: ErrCode) -> Action {
+    match code {
+        ErrCode::Timeout => Action::Retry {
+            budget: 2,
+            backoff: Backoff::Linear,
+        },
+        ErrCode::Resource => Action::Retry {
+            budget: 1,
+            backoff: Backoff::Linear,
+        },
+        ErrCode::Permission => Action::Escalate,
+        ErrCode::Data => Action::Reroute,
+        ErrCode::Contract => Action::Escalate,
+        ErrCode::Crash => Action::Escalate,
+    }
+}
+
+/// 下游响应策略（v0.14a3 用户裁定：正常节点的策略根据错误进程的判断进行——
+/// 无视/等待/切换方法/退出整个流程）。引擎按死亡上游的错误分类自动决策。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Response {
+    /// 无视：与死源无关的 proc/impl 照常运行（全类默认，Exit 除外）
+    Ignore,
+    /// 等待：瞬态错误先吃满上游 Retry 预算再定生死（分层顺序天然提供）
+    Wait,
+    /// 切换方法：只封锁真正引用死源的 impl，未引用的备选照跑
+    Switch,
+    /// 退出整个流程：创作错误 fail-fast，立即中止管线（保留 partial）
+    Exit,
+}
+
+/// 错误分类 → 下游响应。
+///
+/// | code | 响应 | 理由 |
+/// |------|------|------|
+/// | timeout / resource | Wait→Switch | 上游重试期间下游阻塞；预算耗尽后仅封引用者，其余切换 |
+/// | data | Switch | 数据错换路径：非引用 impl 立即接管 |
+/// | permission / crash | Ignore+Switch | 局部死亡：无关者无视，引用者传播 Left |
+/// | contract | Exit | DSL/契约写错，运行期不可恢复，整流退出 |
+pub fn respond(code: ErrCode) -> Response {
+    match code {
+        ErrCode::Timeout | ErrCode::Resource => Response::Wait,
+        ErrCode::Data => Response::Switch,
+        ErrCode::Permission | ErrCode::Crash => Response::Ignore,
+        ErrCode::Contract => Response::Exit,
+    }
+}
+
+/// refs 中已死亡（Left）的上游列表。
+pub fn dead_refs(results: &BTreeMap<String, crate::ast::Value>, refs: &[String]) -> Vec<String> {
+    refs.iter()
+        .filter(|r| results.get(*r).map(is_error_value).unwrap_or(false))
+        .cloned()
+        .collect()
+}
+
+/// 从编码文本还原错误分类（无 err_code 字段 → crash）。
+pub fn code_of(encoded: &str) -> ErrCode {
+    dslresult::extract_field("err_code", encoded)
+        .and_then(|c| ErrCode::from_code(&c))
+        .unwrap_or(ErrCode::Crash)
+}
+
 /// 隐式传播（v0.14，无 DSL 面）：下游执行前检查上游引用，任一 Left → 本 proc
 /// 落 Left（err_code 继承上游根因，err_msg 标记传播来源）。返回 true = 应短路。
 pub fn upstream_left(
@@ -482,6 +581,54 @@ mod tests {
             Some("render".to_string())
         );
         assert_eq!(upstream_left(&results, &["search".to_string()]), None);
+    }
+
+    // ── 下游响应策略表（v0.14a3 用户裁定） ──
+
+    #[test]
+    fn respond_table() {
+        use crate::errflow::Response;
+        assert_eq!(respond(ErrCode::Timeout), Response::Wait);
+        assert_eq!(respond(ErrCode::Resource), Response::Wait);
+        assert_eq!(respond(ErrCode::Data), Response::Switch);
+        assert_eq!(respond(ErrCode::Permission), Response::Ignore);
+        assert_eq!(respond(ErrCode::Crash), Response::Ignore);
+        assert_eq!(respond(ErrCode::Contract), Response::Exit);
+    }
+
+    #[test]
+    fn strategy_table() {
+        use crate::errflow::Action;
+        assert_eq!(
+            strategy(ErrCode::Timeout),
+            Action::Retry {
+                budget: 2,
+                backoff: Backoff::Linear
+            }
+        );
+        assert_eq!(strategy(ErrCode::Data), Action::Reroute);
+        assert_eq!(strategy(ErrCode::Permission), Action::Escalate);
+        assert_eq!(strategy(ErrCode::Contract), Action::Escalate);
+        assert_eq!(strategy(ErrCode::Crash), Action::Escalate);
+    }
+
+    #[test]
+    fn dead_refs_and_code_of() {
+        let err =
+            ErrorRecord::new("render", "ffmpeg", "Permission denied (os error 13)", 1).encode();
+        let mut results = BTreeMap::new();
+        results.insert("render".to_string(), crate::ast::Value::Text(err));
+        results.insert("search".to_string(), crate::ast::Value::Text("ok".into()));
+        let dead = dead_refs(&results, &["search".to_string(), "render".to_string()]);
+        assert_eq!(dead, vec!["render".to_string()]);
+        assert_eq!(
+            code_of(&match results["render"] {
+                crate::ast::Value::Text(ref t) => t.clone(),
+                _ => String::new(),
+            }),
+            ErrCode::Permission
+        );
+        assert_eq!(code_of("plain text"), ErrCode::Crash);
     }
 
     #[test]
