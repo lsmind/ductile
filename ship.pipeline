@@ -34,7 +34,7 @@ Pipeline("ship", "git 自动管理：测试门禁 → add → commit → push �
   .proc("verify")
     .desc("验证工作树干净")
     .plan(
-      v -> run("cd /home/beef/projects/ductile && echo dirty: $(git status --short | wc -l) && git log --oneline -1 && git status -sb | head -1")
+      v -> run("cd /home/beef/projects/ductile && echo push-done: '@push' >/dev/null; echo dirty: $(git status --short | wc -l) && git log --oneline -1 && git status -sb | head -1")
         .tags(#run, #git)
         .desc("收尾状态")
     )

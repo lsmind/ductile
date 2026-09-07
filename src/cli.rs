@@ -32,7 +32,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
                 }
             }
         },
-        "run" if args.len() >= 3 => match split_run_args(&args[2..]) {
+        "run" if args.len() >= 3 => match split_run_args(&args[3..]) {
             Err(e) => {
                 eprintln!("{}", e);
                 Ok(1)
