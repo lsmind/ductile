@@ -875,3 +875,17 @@ schema 从契约卡生成）。已知坑（实测）：
 - 下游引用死源且无可切换方法 → 传播 Left（`err_msg=propagated from X`，err_code 继承）
 - 任何 Left → `run` exit 1；`run_json` 输出 `{"ok":false,"err_code":…,"partial":{…}}`
 - partial 中 Left 解码为干净对象，Right 原样——debug/agent 不丢现场
+
+### 12.5 关键过程/关键节点判定（v0.14b）
+
+引擎自动判定节点关键性并调整行为（零 DSL 面）：
+
+- **critical_set**：`.deliver(@x)` 引用闭包 BFS 回溯——deliver→x→x 的 refs 逐层上溯，
+  主产出链上的 proc = 关键节点；不在链上 = 旁路（日志/通知/监控类）。
+  无 deliver proc 的管线 = 全部关键（v0.9 兼容）。
+- **strategy_for(code, critical)**：关键节点 Retry 预算 ×2（主链值得更努力），旁路基础预算
+- **fatal_left 终局裁决**：只有关键 proc 上的 Left 致命（`critical proc 'x' failed`）；
+  旁路失败容忍——主产出不受牵连，流水线仍 Success（stderr 明示
+  `bypass failures tolerated`，旁路 Left 仍在 results/partial 可查）
+- parser 变更：`.deliver(@x)` 参数旧版只置 is_deliver 即丢弃——现解析进
+  `Proc.deliver_refs`（v0.4 起的潜伏遗漏，关键性判定的地基）
