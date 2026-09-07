@@ -14,14 +14,27 @@ use std::collections::BTreeMap;
 
 use crate::dslresult;
 
-/// 错误码（六类）。`code()` 返回静态串供编码。
+/// 错误码（十二类，v0.14c 扩充）。`code()` 返回静态串供编码。
+/// 划界原则：同一类的错误共享同一处置策略（strategy）与下游响应（respond）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrCode {
     Timeout,
+    /// 限流/配额（429/too many requests/quota）——等待退避后重试通常有效
+    RateLimit,
+    /// 认证/授权失效（401/403/invalid key/token expired）——重试无意义，换供应商有效
+    Auth,
+    /// 网络不可达（conn refused/DNS/5xx）——与本地资源分离：网络抖动 vs 确定性缺失
+    Network,
     Resource,
     Permission,
+    /// OOM/内存耗尽（CUDA OOM/exit 137/killed）——共享机器上常为瞬时
+    Memory,
+    /// 依赖/环境缺失（ImportError/command not found/shared library）——环境确定性坏
+    Dependency,
     Data,
     Contract,
+    /// 用户中断（SIGINT/cancelled）——意图明确，禁止任何自动重试
+    Cancelled,
     Crash,
 }
 
@@ -30,10 +43,16 @@ impl ErrCode {
     pub fn from_code(s: &str) -> Option<ErrCode> {
         match s.trim() {
             "timeout" => Some(ErrCode::Timeout),
+            "ratelimit" => Some(ErrCode::RateLimit),
+            "auth" => Some(ErrCode::Auth),
+            "network" => Some(ErrCode::Network),
             "resource" => Some(ErrCode::Resource),
             "permission" => Some(ErrCode::Permission),
+            "memory" => Some(ErrCode::Memory),
+            "dependency" => Some(ErrCode::Dependency),
             "data" => Some(ErrCode::Data),
             "contract" => Some(ErrCode::Contract),
+            "cancelled" => Some(ErrCode::Cancelled),
             "crash" => Some(ErrCode::Crash),
             _ => None,
         }
@@ -42,10 +61,16 @@ impl ErrCode {
     pub fn code(&self) -> &'static str {
         match self {
             ErrCode::Timeout => "timeout",
+            ErrCode::RateLimit => "ratelimit",
+            ErrCode::Auth => "auth",
+            ErrCode::Network => "network",
             ErrCode::Resource => "resource",
             ErrCode::Permission => "permission",
+            ErrCode::Memory => "memory",
+            ErrCode::Dependency => "dependency",
             ErrCode::Data => "data",
             ErrCode::Contract => "contract",
+            ErrCode::Cancelled => "cancelled",
             ErrCode::Crash => "crash",
         }
     }
@@ -81,6 +106,44 @@ const PAT_CONTRACT: &[&str] = &[
 
 const PAT_TIMEOUT: &[&str] = &["timed out", "timeouterror", "timeout expired"];
 
+const PAT_RATELIMIT: &[&str] = &[
+    "too many requests",
+    "429",
+    "rate limit",
+    "ratelimit",
+    "rate exceeded",
+    "quota exceeded",
+    "quota exceeded",
+    "quota limit",
+    "enhance your calm",
+    "slow down",
+];
+
+const PAT_AUTH: &[&str] = &[
+    "401",
+    "403",
+    "unauthorized",
+    "forbidden",
+    "invalid api key",
+    "invalid_api_key",
+    "invalid token",
+    "token expired",
+    "expired token",
+    "authentication",
+    "authenticationfailed",
+    "permission denied by api",
+    "incorrect api key",
+];
+
+const PAT_CANCELLED: &[&str] = &[
+    "interrupted by user",
+    "cancelled",
+    "canceled",
+    "ctrl+c",
+    "sigint",
+    "keyboardinterrupt",
+];
+
 const PAT_PERMISSION: &[&str] = &[
     "permission denied",
     "permissionerror",
@@ -90,28 +153,74 @@ const PAT_PERMISSION: &[&str] = &[
     "read-only file system",
 ];
 
+/// 网络不可达（v0.14c 拆出）：连接层故障——抖动常自愈，与"文件确实不存在"分离。
+const PAT_NETWORK: &[&str] = &[
+    "connection refused",
+    "connection reset",
+    "connectionerror",
+    "connection error",
+    "connect failed",
+    "getaddrinfo failed", // DNS 解析失败真实形态（裸 "enotfound" 会误伤 FileNotFoundError）
+    "errno -2",           // getaddrinfo ENOTFOUND 的数字形态
+    "econnrefused",
+    "ehostunreach",
+    "enetunreach",
+    "econnreset",
+    "network is unreachable",
+    "network error",
+    "temporary failure in name resolution",
+    "name or service not known",
+    "service unavailable",
+    "503 service",
+    "502 bad gateway",
+    "504 gateway",
+    "gateway timeout",
+    "bad gateway",
+];
+
+const PAT_MEMORY: &[&str] = &[
+    "out of memory",
+    "cuda out of memory",
+    "cuda error: out of memory",
+    "oom",
+    "cannot allocate memory",
+    "memoryerror",
+    "killed",
+    "exit some(137)",
+    "exit 137",
+    "tried to allocate",
+];
+
+/// 本地资源不可得（v0.14c 收窄）：确定性缺失——文件不存在/磁盘满/端口占用。
+/// 网络连接类已拆去 PAT_NETWORK。
 const PAT_RESOURCE: &[&str] = &[
     "not found",
     "no such file",
     "nosuchfile",
     "filenotfounderror",
-    "connection refused",
-    "connection reset",
-    "connectionerror",
-    "enotfound",
-    "econnrefused",
-    "ehostunreach",
-    "enetunreach",
     "launch failed",
     "spawn failed",
     "disk full",
     "enospc",
     "address in use",
     "eaddrinuse",
-    "service unavailable",
-    "503 service",
-    "502 bad gateway",
-    "504 gateway",
+];
+
+const PAT_DEPENDENCY: &[&str] = &[
+    "modulenotfounderror",
+    "importerror",
+    "cannot import",
+    "no module named",
+    "command not found",
+    "not found command",
+    "shared library",
+    "shared libraries", // bash 真实形态是复数："error while loading shared libraries"
+    "cannot open shared object",
+    "library not found",
+    "librarymissingerror",
+    "version mismatch",
+    "version conflict",
+    "incompatible version",
 ];
 
 const PAT_DATA: &[&str] = &[
@@ -135,23 +244,41 @@ fn matches_any(lower: &str, pats: &[&str]) -> bool {
     pats.iter().any(|p| lower.contains(p))
 }
 
-/// 分类原始错误串。判定顺序：contract → timeout → permission → resource → data → crash。
+/// 分类原始错误串。判定链（先具体后兜底，v0.14c 十二类）：
+/// cancelled → contract → ratelimit → auth → timeout → memory → dependency →
+/// permission → network → resource → data → crash
 ///
 /// 顺序理由：
-/// - contract 在前：契约错误是引擎层概念，串形态固定（`param 'x' not in contract`），
-///   不会与其他类的子串歧义
-/// - permission 在 resource 前：`stat failed: Permission denied (os error 13)` 这类
-///   io::Error 同时含 "failed" 弱词，权限是更强的语义信号
-/// - resource 在 data 前：`read failed: No such file` 的 NotFound 属资源不可得
-/// - data 的宽模式（validation/parse error）放后，只兜剩余
+/// - cancelled 最先：用户意图是最高优先级信号，任何自动处置都是违背意图
+/// - contract 次之：契约错误是引擎层概念，串形态固定，无歧义
+/// - ratelimit/auth 在 timeout 前：429 响应体常含 "too many requests" 与
+///   "retry after" 字样，401/403 比"慢"更需要先被识别为"凭证坏"
+/// - memory 在 network/resource 前：OOM-kill 的 "killed" 是强信号，
+///   且 CUDA OOM 常带 "cuda" 弱词，避免被 "not found" 吃掉
+/// - dependency 在 resource 前：`ModuleNotFoundError: No module named 'x'`
+///   同时含 "no module"（依赖）与字面 "not found" 子串风险——依赖更强
+/// - permission 在 network/resource 前：io::Error 的权限是更强语义信号
+/// - network 在 resource 前：`connect refused` 若先撞 "not found" 弱词会误判
 pub fn classify(raw: &str) -> ErrCode {
     let lower = raw.to_lowercase();
-    if matches_any(&lower, PAT_CONTRACT) {
+    if matches_any(&lower, PAT_CANCELLED) {
+        ErrCode::Cancelled
+    } else if matches_any(&lower, PAT_CONTRACT) {
         ErrCode::Contract
+    } else if matches_any(&lower, PAT_RATELIMIT) {
+        ErrCode::RateLimit
+    } else if matches_any(&lower, PAT_AUTH) {
+        ErrCode::Auth
     } else if matches_any(&lower, PAT_TIMEOUT) {
         ErrCode::Timeout
+    } else if matches_any(&lower, PAT_MEMORY) {
+        ErrCode::Memory
+    } else if matches_any(&lower, PAT_DEPENDENCY) {
+        ErrCode::Dependency
     } else if matches_any(&lower, PAT_PERMISSION) {
         ErrCode::Permission
+    } else if matches_any(&lower, PAT_NETWORK) {
+        ErrCode::Network
     } else if matches_any(&lower, PAT_RESOURCE) {
         ErrCode::Resource
     } else if matches_any(&lower, PAT_DATA) {
@@ -245,19 +372,39 @@ impl Backoff {
 }
 
 /// 内置策略表（硬编码，不可配置——用户裁定 v0.14：错误处理统一模块管理，
-/// 不单独配置不走 .eval）。
+/// 不单独配置不走 .eval）。十二类（v0.14c 扩充）。
 ///
 /// | code | action | 理由 |
 /// |------|--------|------|
+/// | cancelled | Escalate | 用户意图：禁止任何自动重试 |
 /// | timeout | Retry{2, linear} | 瞬时资源紧张常见，两轮内常自愈 |
-/// | resource | Retry{1, linear} | 网络抖动/文件迟到，一轮缓冲 |
-/// | permission | Escalate | 权限重试无意义，直接上报 |
+/// | ratelimit | Retry{2, linear} | 限流窗口：等待退避后重试有效（预算比 timeout 更克制，退避即等待窗） |
+/// | auth | Escalate | 凭证坏重试无意义（换供应商=Switch 响应层的事） |
+/// | memory | Retry{1, linear} | 共享机器显存被占常为瞬时，一轮等待释放 |
+/// | network | Retry{2, linear} | 网络抖动自愈概率高 |
+/// | resource | Retry{1, linear} | 文件迟到/竞态一轮缓冲 |
 /// | data | Reroute | 同输入同 impl 必再错，立即换路径 |
+/// | dependency | Escalate | 环境确定性坏（缺包/缺库），重试无意义 |
+/// | permission | Escalate | 权限重试无意义，直接上报 |
 /// | contract | Escalate | 创作错误（DSL/契约写错），fail-fast |
 /// | crash | Escalate | 未知根因，不瞎猜 |
 pub fn strategy(code: ErrCode) -> Action {
     match code {
+        ErrCode::Cancelled => Action::Escalate,
         ErrCode::Timeout => Action::Retry {
+            budget: 2,
+            backoff: Backoff::Linear,
+        },
+        ErrCode::RateLimit => Action::Retry {
+            budget: 2,
+            backoff: Backoff::Linear,
+        },
+        ErrCode::Auth => Action::Escalate,
+        ErrCode::Memory => Action::Retry {
+            budget: 1,
+            backoff: Backoff::Linear,
+        },
+        ErrCode::Network => Action::Retry {
             budget: 2,
             backoff: Backoff::Linear,
         },
@@ -265,8 +412,9 @@ pub fn strategy(code: ErrCode) -> Action {
             budget: 1,
             backoff: Backoff::Linear,
         },
-        ErrCode::Permission => Action::Escalate,
         ErrCode::Data => Action::Reroute,
+        ErrCode::Dependency => Action::Escalate,
+        ErrCode::Permission => Action::Escalate,
         ErrCode::Contract => Action::Escalate,
         ErrCode::Crash => Action::Escalate,
     }
@@ -286,19 +434,27 @@ pub enum Response {
     Exit,
 }
 
-/// 错误分类 → 下游响应。
+/// 错误分类 → 下游响应（十二类，v0.14c）。
 ///
 /// | code | 响应 | 理由 |
 /// |------|------|------|
-/// | timeout / resource | Wait→Switch | 上游重试期间下游阻塞；预算耗尽后仅封引用者，其余切换 |
+/// | cancelled | Exit | 用户已表态，整流立即停，尊重意图 |
+/// | timeout / ratelimit / memory | Wait→Switch | 瞬态：上游吃满预算再定生死，之后仅封引用者 |
+/// | network / resource | Wait→Switch | 同上（抖动类） |
+/// | auth | Switch | 凭证坏：立即封锁该供应商 impl，未引用的备选接管（换供应商） |
 /// | data | Switch | 数据错换路径：非引用 impl 立即接管 |
-/// | permission / crash | Ignore+Switch | 局部死亡：无关者无视，引用者传播 Left |
+/// | dependency / permission / crash | Ignore+Switch | 局部死亡：无关者无视，引用者传播 Left |
 /// | contract | Exit | DSL/契约写错，运行期不可恢复，整流退出 |
 pub fn respond(code: ErrCode) -> Response {
     match code {
-        ErrCode::Timeout | ErrCode::Resource => Response::Wait,
-        ErrCode::Data => Response::Switch,
-        ErrCode::Permission | ErrCode::Crash => Response::Ignore,
+        ErrCode::Cancelled => Response::Exit,
+        ErrCode::Timeout
+        | ErrCode::RateLimit
+        | ErrCode::Memory
+        | ErrCode::Network
+        | ErrCode::Resource => Response::Wait,
+        ErrCode::Auth | ErrCode::Data => Response::Switch,
+        ErrCode::Dependency | ErrCode::Permission | ErrCode::Crash => Response::Ignore,
         ErrCode::Contract => Response::Exit,
     }
 }
@@ -515,6 +671,7 @@ mod tests {
     #[test]
     fn py_traceback_filenotfound() {
         let tb = "Traceback (most recent call last):\n  File \"x.py\", line 2\nFileNotFoundError: [Errno 2] No such file or directory: 'in.csv'";
+        // v0.14c：本地文件缺失仍是 resource（enotfound 裸模式已修，不再误伤）
         assert_eq!(classify(tb), ErrCode::Resource);
     }
 
@@ -547,9 +704,10 @@ mod tests {
 
     #[test]
     fn py_connection_refused() {
+        // v0.14c：连接类从 resource 拆出 → network（抖动自愈 vs 确定性缺失）
         assert_eq!(
             classify("requests.exceptions.ConnectionError: HTTPConnectionPool: Max retries exceeded ... Connection refused"),
-            ErrCode::Resource
+            ErrCode::Network
         );
     }
 
@@ -571,7 +729,8 @@ mod tests {
 
     #[test]
     fn bash_oOm_kill() {
-        assert_eq!(classify("run failed (exit Some(137))"), ErrCode::Crash);
+        // v0.14c：exit 137 = SIGKILL(常为 OOM-kill) → memory（原 crash）
+        assert_eq!(classify("run failed (exit Some(137))"), ErrCode::Memory);
     }
 
     #[test]
@@ -658,6 +817,110 @@ mod tests {
         assert_eq!(respond(ErrCode::Permission), Response::Ignore);
         assert_eq!(respond(ErrCode::Crash), Response::Ignore);
         assert_eq!(respond(ErrCode::Contract), Response::Exit);
+    }
+
+    // ── v0.14c 新六类 ──
+
+    #[test]
+    fn new_ratelimit() {
+        assert_eq!(
+            classify("HTTP 429 Too Many Requests: rate limit exceeded"),
+            ErrCode::RateLimit
+        );
+        assert_eq!(
+            classify("openai: quota exceeded for this month"),
+            ErrCode::RateLimit
+        );
+    }
+
+    #[test]
+    fn new_auth() {
+        assert_eq!(
+            classify("HTTP 401 Unauthorized: invalid api key"),
+            ErrCode::Auth
+        );
+        assert_eq!(classify("Error code: 403 - forbidden"), ErrCode::Auth);
+        assert_eq!(
+            classify("the token has expired (token expired)"),
+            ErrCode::Auth
+        );
+    }
+
+    #[test]
+    fn new_memory() {
+        assert_eq!(
+            classify("torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.5 GiB"),
+            ErrCode::Memory
+        );
+        assert_eq!(classify("MemoryError"), ErrCode::Memory);
+    }
+
+    #[test]
+    fn new_dependency() {
+        assert_eq!(
+            classify("ModuleNotFoundError: No module named 'numpy'"),
+            ErrCode::Dependency
+        );
+        assert_eq!(
+            classify("bash: ffmpeg: command not found"),
+            ErrCode::Dependency
+        );
+        assert_eq!(
+            classify("error while loading shared libraries: libcuda.so.1"),
+            ErrCode::Dependency
+        );
+    }
+
+    #[test]
+    fn new_network() {
+        assert_eq!(
+            classify("socket.gaierror: [Errno -2] Name or service not known"),
+            ErrCode::Network
+        );
+        assert_eq!(classify("HTTP 502 Bad Gateway"), ErrCode::Network);
+        assert_eq!(classify("HTTP 503 Service Unavailable"), ErrCode::Network);
+    }
+
+    #[test]
+    fn new_cancelled() {
+        assert_eq!(classify("KeyboardInterrupt"), ErrCode::Cancelled);
+        assert_eq!(
+            classify("process interrupted by user (SIGINT)"),
+            ErrCode::Cancelled
+        );
+    }
+
+    #[test]
+    fn respond_table_v14c() {
+        use crate::errflow::Response;
+        assert_eq!(respond(ErrCode::Cancelled), Response::Exit);
+        assert_eq!(respond(ErrCode::RateLimit), Response::Wait);
+        assert_eq!(respond(ErrCode::Memory), Response::Wait);
+        assert_eq!(respond(ErrCode::Network), Response::Wait);
+        assert_eq!(respond(ErrCode::Auth), Response::Switch);
+        assert_eq!(respond(ErrCode::Dependency), Response::Ignore);
+    }
+
+    #[test]
+    fn strategy_table_v14c() {
+        use crate::errflow::Action;
+        assert_eq!(strategy(ErrCode::Cancelled), Action::Escalate);
+        assert_eq!(
+            strategy(ErrCode::RateLimit),
+            Action::Retry {
+                budget: 2,
+                backoff: Backoff::Linear
+            }
+        );
+        assert_eq!(strategy(ErrCode::Auth), Action::Escalate);
+        assert_eq!(
+            strategy(ErrCode::Memory),
+            Action::Retry {
+                budget: 1,
+                backoff: Backoff::Linear
+            }
+        );
+        assert_eq!(strategy(ErrCode::Dependency), Action::Escalate);
     }
 
     #[test]
