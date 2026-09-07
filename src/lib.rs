@@ -8,6 +8,7 @@ pub mod ast;
 pub mod db;
 pub mod dslresult;
 pub mod egraph;
+pub mod errflow;
 pub mod eval;
 pub mod executor;
 pub mod grow;
