@@ -796,14 +796,16 @@ pub fn exec_script_call(
         }
     }
 
-    // 调用参数合并：`@proc.field` 引用上游结果，其余走变量解析
+    // 调用参数合并：`@proc` 整值引用 / `@proc.field` 与 {topic} 走 resolve_vars。
+    // v0.14.2 fix：纯 `@x.y` 此前只查整值键 → miss → 空串 → 误报 "param is empty"。
+    // 现在 miss 时 fallthrough 到 resolve_vars（.field 解析在那里），与 run() 语法对齐。
     let mut call_args: BTreeMap<String, String> = BTreeMap::new();
     for (k, v) in &args {
         let resolved = if let Some(stripped) = v.strip_prefix('@') {
             match results.get(stripped) {
                 Some(Value::Text(t)) => t.clone(),
                 Some(Value::File(f)) => f.clone(),
-                _ => String::new(),
+                _ => resolve_vars(v, topic, results),
             }
         } else {
             resolve_vars(v, topic, results)
@@ -980,6 +982,33 @@ mod tests {
     }
 
     // ── exec_write + exec_read roundtrip ──
+    // ── v0.14.2 issue #2：纯 @proc.field 引用走 resolve_vars fallthrough ──
+
+    #[test]
+    fn script_arg_pure_at_field_resolves() {
+        // `a="@src.ratio"` 此前只查整值键 "src.ratio" → miss → 空 → 误报 param is empty
+        let mut results = BTreeMap::new();
+        results.insert(
+            "src".into(),
+            Value::Text(
+                "§§FIELDS§§ratio=0.5240§§RAW§§##DSL_RESULT\nratio=0.5240\n##DSL_END".into(),
+            ),
+        );
+        let body = r#"script(fake_probe, a="@src.ratio")"#;
+        let (_name, args) = crate::script::parse_script_body(body).unwrap();
+        let topic = "t";
+        let resolved = if let Some(stripped) = args[0].1.strip_prefix('@') {
+            match results.get(stripped) {
+                Some(Value::Text(t)) => t.clone(),
+                Some(Value::File(f)) => f.clone(),
+                _ => resolve_vars(&args[0].1, topic, &results),
+            }
+        } else {
+            resolve_vars(&args[0].1, topic, &results)
+        };
+        assert_eq!(resolved, "0.5240");
+    }
+
     #[test]
     fn exec_write_then_read() {
         let path = "/tmp/ductile_test_roundtrip.txt";

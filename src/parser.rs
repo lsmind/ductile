@@ -142,12 +142,17 @@ pub(crate) fn extract_all_quoted(s: &str) -> Vec<String> {
     result
 }
 
+/// 返回**字节**索引（调用方全部拿它做字符串切片）。
+/// v0.14.2 fix：旧版返回 char_indices 序号，调用方当字节索引用——
+/// 多字节字符（中文/→/…）之后偏移 N-1 字节，strip 尾巴残留垃圾
+/// （impl .desc 含 "→" 时残留 `SS")`，issue #1 深层根因）。
+/// 现在直接在字节维度扫括号深度，索引即字节，语义对齐。
 pub(crate) fn find_matching_paren(s: &str) -> Option<usize> {
     let mut depth = 0i32;
-    for (i, c) in s.chars().enumerate() {
-        match c {
-            '(' => depth += 1,
-            ')' => {
+    for (i, b) in s.bytes().enumerate() {
+        match b {
+            b'(' => depth += 1,
+            b')' => {
                 depth -= 1;
                 if depth == 0 {
                     return Some(i);
@@ -421,7 +426,7 @@ fn parse_impl_entries(text: &str, proc_name: &str) -> Result<Vec<Impl>, ParseErr
             let name = entry[..arrow_pos].trim().to_string();
             let body_with_cost = entry[arrow_pos + 4..].trim();
 
-            let (body_text, cost, retry, ensure, when, enabled, stub, tags) =
+            let (body_text, cost, retry, ensure, when, enabled, stub, tags, description) =
                 extract_cost_and_modifiers(body_with_cost, &name);
 
             // v0.11.1 重构：.when() 里的 @ref 也算依赖——裁判路由 `.when(@gate.score < 80)`
@@ -446,7 +451,7 @@ fn parse_impl_entries(text: &str, proc_name: &str) -> Result<Vec<Impl>, ParseErr
                 stub,
                 retry,
                 ensure,
-                description: String::new(),
+                description,
             });
         } else {
             // v0.11: .plan() 内每个条目必须是 `name -> body`。
@@ -505,8 +510,8 @@ pub(crate) fn split_impl_entries(text: &str) -> Vec<String> {
     entries
 }
 
-/// Extract .cost(), .retry(), .ensure(), .when(), .disabled, .stub, and .tags(#a, #b)
-/// Returns (body_text, cost, retry, ensure, when, enabled, stub, tags)
+/// Extract .cost(), .retry(), .ensure(), .when(), .disabled, .stub, .tags, and .desc()
+/// Returns (body_text, cost, retry, ensure, when, enabled, stub, tags, description)
 fn extract_cost_and_modifiers(
     text: &str,
     _impl_name: &str,
@@ -519,6 +524,7 @@ fn extract_cost_and_modifiers(
     bool,
     bool,
     BTreeSet<String>,
+    String,
 ) {
     let mut cost = Cost::default();
     let mut body = text.trim().to_string();
@@ -528,6 +534,24 @@ fn extract_cost_and_modifiers(
     let mut enabled = true;
     let mut stub = false;
     let mut tags = BTreeSet::new();
+    let mut description = String::new();
+
+    // impl 级 .desc("text")：剥离去 description 字段。
+    // 此前从未剥离——尾部残留 `.desc(` 会被 script() 的 rfind(')') 探进去，
+    // tokenizer 吞掉 `.desc(` 后的文本到值里（issue #1：静默脏值）；
+    // 且 Impl.description 从未被解析（永远是空串）。两处一并修。
+    if let Some(d_pos) = body.find(".desc(") {
+        let after = &body[d_pos..];
+        if let Some(close) = find_matching_paren(after) {
+            let inner = &after[6..close];
+            // 取第一个引号对内的文本；裸文本也接受
+            description = inner.trim().to_string();
+            if let Some(stripped) = description.strip_prefix('"') {
+                description = stripped.split('"').next().unwrap_or("").to_string();
+            }
+            body = format!("{}{}", &body[..d_pos], &after[close + 1..]);
+        }
+    }
 
     // Extract .tags(#a, #b, ...) or .tags(a, b)
     if let Some(tags_pos) = body.find(".tags(") {
@@ -625,6 +649,7 @@ fn extract_cost_and_modifiers(
         enabled,
         stub,
         tags,
+        description,
     )
 }
 
@@ -1256,6 +1281,32 @@ render.flux  cost latency=120.0
 "#;
         let pl = parse_pipeline(input).unwrap();
         assert!(pl.procs[0].plan[0].stub);
+    }
+
+    #[test]
+    fn parse_impl_desc_stripped_from_body() {
+        // issue #1 回归：impl 级 .desc 此前不剥离，尾部 `.desc(` 被 script() 的
+        // rfind(')') 探进去吞值。修后 body_text 干净、description 有值。
+        let input = r#"Pipeline("t")
+.proc("v")
+  .plan(
+    v -> script(s0_probe3, a="v=@armA.ratio", b="r=1", c="tail")
+      .tags(#t)
+      .desc("armA < armB 且 roundtrip=1 → PASS")
+  )
+"#;
+        let pl = parse_pipeline(input).unwrap();
+        let imp = &pl.procs[0].plan[0];
+        assert!(
+            !imp.body_text.contains(".desc"),
+            "body leaked: {}",
+            imp.body_text
+        );
+        assert_eq!(
+            imp.body_text.trim(),
+            r#"script(s0_probe3, a="v=@armA.ratio", b="r=1", c="tail")"#
+        );
+        assert_eq!(imp.description, "armA < armB 且 roundtrip=1 → PASS");
     }
 
     #[test]
