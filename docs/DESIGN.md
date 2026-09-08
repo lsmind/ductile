@@ -253,4 +253,4 @@ executor 巨石拆四模块（textargs/dslresult/steps/ranking，re-export 兼�
 - **明确不做**：Web 控制台（不成熟，已删可找回）；嵌入式脚本（DSL 只链接不嵌脚本，v0.12 裁定）
 - **平台**：Linux 一等公民（bash/`process_group`）；Windows 可编译，shell 算子需 PATH 上有 bash
 - **设计取舍备忘**：评价与流程分离是宪法级原则——任何把 cost/门槛写回 `.pipeline` 的提案都是倒退
-- **安全**：`run`/`sh` 执行任意命令字符串——仅适合本地可信操作员，非多租户沙箱
+- **安全**：默认允许 `run`/`sh`/`spawn`（本地可信）；`DUCTILE_RESTRICT_SHELL=1` 或 `--restrict-shell` 封锁 shell；`DUCTILE_UNSAFE_SHELL=1` 可覆盖。非多租户沙箱。

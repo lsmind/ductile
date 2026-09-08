@@ -1,18 +1,19 @@
-#!/home/beef/.local/bin/ductile run
-// disk-watch.pipeline — 磁盘哨兵：根分区水位 + data 大目录 top5 → 报告
+#!/usr/bin/env -S ductile run
+// disk-watch.pipeline — 磁盘哨兵：HOME 分区水位 + HOME 下大目录 top5 → 报告
 // 直跑：./disk-watch.pipeline
-Pipeline("disk_watch", "磁盘哨兵：根分区使用率 + data 下大目录排行，报告落盘")
+// 路径：用 $HOME（可用 DUCTILE_HOME 覆盖探测根）
+Pipeline("disk_watch", "磁盘哨兵：HOME 使用率 + 大目录排行，报告落盘")
   .proc("usage")
-    .desc("根分区水位")
+    .desc("HOME 所在分区水位")
     .plan(
-      root -> run("df -h /home/beef | tail -1 | awk '{print $5}'")
+      root -> run("df -h \"${DUCTILE_HOME:-$HOME}\" | tail -1 | awk '{print $5}'")
         .tags(#run, #shell)
         .desc("使用率")
     )
   .proc("big")
     .desc("大目录排行")
     .plan(
-      top -> run("du -sh /home/beef/data/* 2>/dev/null | sort -rh | head -5")
+      top -> run("du -sh \"${DUCTILE_HOME:-$HOME}\"/* 2>/dev/null | sort -rh | head -5")
         .tags(#run, #shell)
         .desc("top5")
     )

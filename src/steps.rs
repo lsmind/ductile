@@ -31,6 +31,32 @@ fn home_dir() -> String {
         })
 }
 
+/// Shell gate: default allow (local trusted operator).
+/// `DUCTILE_RESTRICT_SHELL=1` blocks run/sh/spawn; `DUCTILE_UNSAFE_SHELL=1` overrides.
+pub fn shell_allowed() -> bool {
+    let flag = |k: &str| {
+        matches!(
+            std::env::var(k).ok().as_deref(),
+            Some("1") | Some("true") | Some("yes") | Some("TRUE") | Some("YES")
+        )
+    };
+    if flag("DUCTILE_UNSAFE_SHELL") {
+        return true;
+    }
+    !flag("DUCTILE_RESTRICT_SHELL")
+}
+
+fn deny_if_shell_restricted(op: &str) -> Result<(), String> {
+    if shell_allowed() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} blocked by DUCTILE_RESTRICT_SHELL=1 — unset it, or set DUCTILE_UNSAFE_SHELL=1 to allow (local trusted only)",
+            op
+        ))
+    }
+}
+
 // ── Function Registry（v0.11.1 重构：Registry + Adapter 模式）──
 //
 // 旧形态：run_impl_steps 里 19 分支的裸 match。两个真实缺陷：
@@ -308,6 +334,7 @@ fn exec_spawn(
     body: &str,
     results: &BTreeMap<String, Value>,
 ) -> Result<Value, String> {
+    deny_if_shell_restricted("spawn")?;
     let name = extract_string_arg("name", body);
     if name.is_empty() {
         return Err("spawn requires name=\"handle\"".into());
@@ -622,6 +649,7 @@ fn exec_run(
     body: &str,
     results: &BTreeMap<String, Value>,
 ) -> Result<Value, String> {
+    deny_if_shell_restricted("run")?;
     let cmd_raw = extract_first_string(body);
     let cmd = resolve_vars(&cmd_raw, topic, results);
     // v0.7 resource management: optional timeout=seconds arg (default 300s, 0 = no limit)
@@ -1316,6 +1344,30 @@ mod tests {
             &BTreeMap::new()
         )
         .is_err());
+    }
+
+    #[test]
+    fn restrict_shell_blocks_run() {
+        std::env::set_var("DUCTILE_RESTRICT_SHELL", "1");
+        std::env::remove_var("DUCTILE_UNSAFE_SHELL");
+        let err = exec_run(
+            &default_impl(),
+            "t",
+            r#"run("echo hi")"#,
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert!(err.contains("DUCTILE_RESTRICT_SHELL"), "{}", err);
+        std::env::remove_var("DUCTILE_RESTRICT_SHELL");
+    }
+
+    #[test]
+    fn unsafe_shell_overrides_restrict() {
+        std::env::set_var("DUCTILE_RESTRICT_SHELL", "1");
+        std::env::set_var("DUCTILE_UNSAFE_SHELL", "1");
+        assert!(shell_allowed());
+        std::env::remove_var("DUCTILE_RESTRICT_SHELL");
+        std::env::remove_var("DUCTILE_UNSAFE_SHELL");
     }
 
     // ── write 边界 ──

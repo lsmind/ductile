@@ -58,7 +58,7 @@ Pipeline("release", "Ductile 自发布流水线")
   .proc("report")
     .desc("生成发布报告")
     .plan(
-      write_report -> write(to="/home/beef/projects/ductile/target/release_report.md", content="Release 0.11.0 published.\n- fmt/test/push/build/publish/verify: all passed\n- wheel: target/wheels/ductile-0.11.0-cp311-*.whl\n- logs: /tmp/dt-test.log, /tmp/dt-build.log, /tmp/dt-publish.log\n")
+      write_report -> write(to="target/release_report.md", content="Release 0.11.0 published.\n- fmt/test/push/build/publish/verify: all passed\n- wheel: target/wheels/ductile-0.11.0-cp311-*.whl\n- logs: /tmp/dt-test.log, /tmp/dt-build.log, /tmp/dt-publish.log\n")
     )
     .when(@verify.rc == 0)
 

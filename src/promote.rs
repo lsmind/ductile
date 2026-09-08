@@ -258,3 +258,41 @@ fn auto_tag(res: &str, used: &mut std::collections::HashSet<String>) -> String {
     used.insert(t.clone());
     t
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mdl_gate_singleton_never_promotes() {
+        let v = mdl_gate("echo hello world this is long enough", 1, 10);
+        assert!(!v.promoted, "count=1 must not promote");
+    }
+
+    #[test]
+    fn mdl_gate_frequent_short_cmd_may_promote() {
+        // 长命令 × 多次引用：增益应为正
+        let cmd = "cargo test --release --lib 2>&1 | grep test.result";
+        let v = mdl_gate(cmd, 5, 8);
+        assert!(v.gain_bits > 0.0, "gain={}", v.gain_bits);
+        assert!(v.promoted);
+    }
+
+    #[test]
+    fn residual_strips_cd_prefix() {
+        assert_eq!(residual("cd /tmp && ls -la"), "ls -la");
+        assert_eq!(residual("echo hi"), "echo hi");
+        assert_eq!(residual("cd only"), "cd only");
+    }
+
+    #[test]
+    fn auto_tag_from_residual_word() {
+        let mut used = std::collections::HashSet::new();
+        assert_eq!(auto_tag("cargo test --lib", &mut used), "cargo");
+        // 撞名加序号
+        let t2 = auto_tag("cargo build", &mut used);
+        assert!(t2.starts_with("cargo"), "{}", t2);
+        assert_ne!(t2, "cargo");
+    }
+}
+

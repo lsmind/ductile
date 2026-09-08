@@ -1,14 +1,10 @@
 //! v0.14 错误分类学 — Either 错误流的分类层。
 //!
-//! 设计（docs/v0.14_error_flow_spec.md §2）：
-//! - 六类错误码：timeout / resource / permission / data / contract / crash
-//! - 分类是引擎事实：纯函数启发式，`crash` 兜底永不过时（新模式先落 crash，库可迭代）
-//! - 判定顺序（先具体后兜底）：contract → timeout → permission → resource → data → crash
-//! - ErrorRecord 编码为 `§§FIELDS§§` 协议文本 → when.rs 现有解释器可直接路由
-//!   `@proc.err_code == "timeout"`（零新求值器）
-//!
-//! 模式库来源：steps.rs / script.rs / executor.rs 全量错误字符串归纳
-//! + 外部脚本（Python/bash）常见 stderr 形态。
+//! 设计（docs/v0.14_error_flow_spec.md）：
+//! - 十五类错误码（v0.14d）：timeout/ratelimit/auth/network/resource/permission/
+//!   memory/dependency/truncation/format/schema/data/contract/cancelled/crash
+//! - 分类是引擎事实：纯函数启发式，`crash` 兜底永不过时
+//! - ErrorRecord 编码为 `§§FIELDS§§` → when.rs 可直接路由 `@proc.err_code`
 
 use std::collections::BTreeMap;
 

@@ -1,4 +1,4 @@
-#!/home/beef/.local/bin/ductile run
+#!/usr/bin/env -S ductile run
 // errflow-drill.pipeline — 错误流演习：一次跑通 v0.14d 十五类里的高危四类
 // 直跑：./errflow-drill.pipeline
 // 观察：ratelimit 限流重试 / auth 换供应商 / format 跳撞墙 / truncation 重采样

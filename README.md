@@ -117,6 +117,17 @@ ductile patch research search web enabled false
 ductile patch research summarize s1 retry 5
 ```
 
+### Shell 安全门（可选）
+
+默认允许 `run`/`sh`/`spawn`（本地可信操作员模型）。多租户或不可信输入场景请显式收紧：
+
+```bash
+DUCTILE_RESTRICT_SHELL=1 ductile run app.pipeline   # 或：ductile run app.pipeline --restrict-shell
+# 临时放开：DUCTILE_UNSAFE_SHELL=1
+```
+
+受限模式下 shell 算子 fail-closed；`write`/`read`/`ls` 等非 shell 算子不受影响。
+
 ### 同构发现 + 打散重组
 
 导入多个 pipeline 后，自动识别跨 pipeline 的相似节点。从零件库按 tag 组装新流水线。

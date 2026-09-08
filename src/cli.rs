@@ -37,7 +37,12 @@ pub fn run(args: &[String]) -> Result<i32, String> {
                 eprintln!("{}", e);
                 Ok(1)
             }
-            Ok((topic, policy_path)) => cmd_run(&args[2], &topic, policy_path.as_deref()),
+            Ok((topic, policy_path, restrict)) => {
+                if restrict {
+                    std::env::set_var("DUCTILE_RESTRICT_SHELL", "1");
+                }
+                cmd_run(&args[2], &topic, policy_path.as_deref())
+            }
         },
         "graph" if args.len() >= 3 => cmd_graph(&args[2]),
         "parse" if args.len() >= 3 => cmd_parse(&args[2]),
@@ -252,7 +257,9 @@ fn print_usage() {
     eprintln!();
     eprintln!("Commands:");
     eprintln!("  check <file>           Parse + type check");
-    eprintln!("  run   <file> [topic]   Parse + check + execute");
+    eprintln!("  run   <file> [topic] [--policy f.eval] [--restrict-shell]");
+    eprintln!("                         Parse + check + execute");
+    eprintln!("                         --restrict-shell blocks run/sh/spawn (or set DUCTILE_RESTRICT_SHELL=1)");
     eprintln!("  graph <file>           Show e-graph structure");
     eprintln!("  parse <file>           Parse only (show structure)");
     eprintln!();
@@ -849,9 +856,10 @@ fn cmd_fts(query: &str) -> Result<i32, String> {
 
 // ── 纯参数解析（无 I/O，可单测）──
 
-/// run 子命令参数：--policy <file> 任意位置，其余 token 拼 topic。
-pub fn split_run_args(args: &[String]) -> Result<(String, Option<String>), String> {
+/// run 子命令参数：--policy <file> / --restrict-shell 任意位置，其余 token 拼 topic。
+pub fn split_run_args(args: &[String]) -> Result<(String, Option<String>, bool), String> {
     let mut policy_path: Option<String> = None;
+    let mut restrict = false;
     let mut topic_parts: Vec<&str> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -861,12 +869,15 @@ pub fn split_run_args(args: &[String]) -> Result<(String, Option<String>), Strin
             }
             policy_path = Some(args[i + 1].clone());
             i += 2;
+        } else if args[i] == "--restrict-shell" {
+            restrict = true;
+            i += 1;
         } else {
             topic_parts.push(&args[i]);
             i += 1;
         }
     }
-    Ok((topic_parts.join(" "), policy_path))
+    Ok((topic_parts.join(" "), policy_path, restrict))
 }
 
 /// promote 参数：[days] [top] [--dry]，按**位置**区分（1st→days, 2nd→top）。
@@ -1058,23 +1069,26 @@ mod tests {
 
     #[test]
     fn run_args_policy_extracted() {
-        let (topic, policy) = split_run_args(&s(&["my", "topic", "--policy", "p.eval"])).unwrap();
+        let (topic, policy, restrict) =
+            split_run_args(&s(&["my", "topic", "--policy", "p.eval"])).unwrap();
         assert_eq!(topic, "my topic");
         assert_eq!(policy.as_deref(), Some("p.eval"));
+        assert!(!restrict);
     }
 
     #[test]
     fn run_args_policy_first() {
-        let (topic, policy) = split_run_args(&s(&["--policy", "p.eval", "hello"])).unwrap();
+        let (topic, policy, _) = split_run_args(&s(&["--policy", "p.eval", "hello"])).unwrap();
         assert_eq!(topic, "hello");
         assert_eq!(policy.as_deref(), Some("p.eval"));
     }
 
     #[test]
     fn run_args_no_policy() {
-        let (topic, policy) = split_run_args(&s(&["just", "topic"])).unwrap();
+        let (topic, policy, restrict) = split_run_args(&s(&["just", "topic"])).unwrap();
         assert_eq!(topic, "just topic");
         assert!(policy.is_none());
+        assert!(!restrict);
     }
 
     #[test]
@@ -1085,9 +1099,18 @@ mod tests {
     #[test]
     fn run_args_policy_consumes_next_token() {
         // --policy 后跟的 token 不会被误当 topic
-        let (topic, _) =
+        let (topic, _, _) =
             split_run_args(&s(&["--policy", "a.eval", "x", "--policy", "b.eval"])).unwrap();
         assert_eq!(topic, "x");
+    }
+
+    #[test]
+    fn run_args_restrict_shell_flag() {
+        let (topic, policy, restrict) =
+            split_run_args(&s(&["hello", "--restrict-shell"])).unwrap();
+        assert_eq!(topic, "hello");
+        assert!(policy.is_none());
+        assert!(restrict);
     }
 
     // ── parse_promote_args ──

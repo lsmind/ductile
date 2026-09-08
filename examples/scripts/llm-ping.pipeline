@@ -1,4 +1,4 @@
-#!/home/beef/.local/bin/ductile run
+#!/usr/bin/env -S ductile run
 // llm-ping.pipeline — LLM 桥接健康检查：探测 → 失败换路 → 结果落盘
 // 直跑：./llm-ping.pipeline
 Pipeline("llm_ping", "LLM 桥接健康检查：主路探测 + 失败自动换备选桥")
