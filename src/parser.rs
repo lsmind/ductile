@@ -371,28 +371,64 @@ fn parse_plan_block(
     let mut buf = String::new();
     let mut idx = start_idx;
     let mut started = false;
+    // v0.14.3 fix: 深度扫描必须跳过 DSL 字符串字面量内的括号。
+    // 旧版裸扫：`run("case x in h*) ... *) ...")` 里字符串内的 `)` 会把
+    // depth 提前打到 0，plan 块在字符串中间截断，后续文本成孤儿行
+    // （devcycle.pipeline 路由 crash 根因；awk '{print $1}'、$() 同类）。
+    // 转义感知：字符串内的 \" 不闭串（与 extract_first_string 同语义）。
+    let mut in_string = false;
+    let mut esc = false;
 
     while idx < lines.len() {
         let line = lines[idx];
         for c in line.chars() {
-            if c == '(' {
-                depth += 1;
-                started = true;
+            if esc {
+                buf.push(c);
+                esc = false;
+                continue;
             }
-            if c == ')' {
-                depth -= 1;
-                if started && depth == 0 {
+            match c {
+                '\\' if in_string => {
                     buf.push(c);
-                    break;
+                    esc = true;
                 }
+                '"' => {
+                    in_string = !in_string;
+                    buf.push(c);
+                }
+                '(' if !in_string => {
+                    depth += 1;
+                    started = true;
+                    buf.push(c);
+                }
+                ')' if !in_string => {
+                    depth -= 1;
+                    if started && depth == 0 {
+                        buf.push(c);
+                        break;
+                    }
+                    buf.push(c);
+                }
+                _ => buf.push(c),
             }
-            buf.push(c);
         }
         buf.push('\n');
         idx += 1;
         if started && depth <= 0 {
             break;
         }
+    }
+
+    // 串未闭而 plan 块结束（depth 归 0 或行耗尽）= DSL 语法错误（fail-closed），
+    // 不再静默截断产生垃圾 body。注：depth==0 正常闭合点串必已闭（引号内的
+    // ) 不减深度），所以这里抓的是「字符串跨过 plan 边界还没闭合」的形态。
+    if in_string {
+        return Err(ParseError {
+            line: idx,
+            col: 1,
+            msg: "unbalanced quotes inside .plan(...) — a DSL string literal is never closed".into(),
+            line_text: lines[idx.saturating_sub(1)].to_string(),
+        });
     }
 
     let impls = parse_impl_entries(&buf, proc_name)?;
@@ -1558,5 +1594,26 @@ mod prim_tests {
         assert_eq!(out[0].0, "latency");
         assert_eq!(out[1], ("risk".to_string(), "0.5".to_string()));
         assert!(parse_cost_args("bogus").is_err());
+    }
+
+    #[test]
+    fn plan_block_parens_inside_string_literal_do_not_close_block() {
+        // v0.14.3: 字符串字面量内的 ) 不得把 .plan 深度打到 0。
+        // devcycle.pipeline 路由 crash 根因：`case "$TOPIC" in start:*) ... *)`
+        let src = "Pipeline(\"t\", \"case regression\")\n  .proc(\"route\")\n    .plan(\n      r -> run(\"case hello in h*) echo MATCH ;; *) echo OTHER ;; esac\")\n    )\n  .proc(\"deliver\")\n    .deliver(@route)\n";
+        let pl = parse_pipeline(src).unwrap();
+        assert_eq!(pl.procs.len(), 2);
+        let route = &pl.procs[0];
+        assert_eq!(route.plan.len(), 1);
+        // body 必须完整到达 esac，未被字符串内的 ) 截断
+        assert!(route.plan[0].body_text.contains("esac"), "body truncated: {:?}", route.plan[0].body_text);
+        assert!(route.plan[0].body_text.contains("*)"), "case wildcard arm lost");
+    }
+
+    #[test]
+    fn plan_block_unterminated_string_is_hard_error() {
+        // 串未闭而 plan 结束 → fail-closed 硬错误，不静默截断
+        let src = "Pipeline(\"t\", \"unterminated\")\n  .proc(\"p\")\n    .plan(\n      x -> run(\"echo never-closed)\n    )\n";
+        assert!(parse_pipeline(src).is_err());
     }
 }

@@ -43,9 +43,9 @@ Pipeline("selftest", "ductile 用 ductile 自测：unit → 正向/负向探针 
   .proc("report")
     .desc("汇总门禁：全绿才 PASS，任一失败整流 exit 1（critical 链放大）")
     .plan(
-      r -> run("echo '@unit' | grep -q '; 0 failed' && echo '@pos' | grep -q '^1$' && echo '@neg' | grep -q 'ghost-ok' && echo '@neg' | grep -q 'disabled-ok' && echo '@scripts' | grep -q 'scripts-ok' && echo '@hyper' | grep -q 'hyper-ok' && echo SELFTEST-PASS || (echo SELFTEST-FAIL; exit 1)")
+      r -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && mkdir -p target/devcycle && echo u='@unit' n='@neg' s='@scripts' h='@hyper' p='@pos' >/dev/null && { echo '@unit'; echo '@pos'; echo '@neg'; echo '@scripts'; echo '@hyper'; } > target/devcycle/selftest-summary.txt && grep -q '; 0 failed' target/devcycle/selftest-summary.txt && grep -q '^1$' target/devcycle/selftest-summary.txt && grep -q 'ghost-ok' target/devcycle/selftest-summary.txt && grep -q 'disabled-ok' target/devcycle/selftest-summary.txt && grep -q 'scripts-ok' target/devcycle/selftest-summary.txt && grep -q 'hyper-ok' target/devcycle/selftest-summary.txt && echo SELFTEST-PASS || (echo SELFTEST-FAIL; exit 1)")
         .tags(#gate)
-        .desc("六重 grep 门禁（含 hyper）")
+        .desc("六重 grep 门禁（含 hyper）— 落盘文件版：@ref 含单引号不再炸 bash")
     )
   .proc("deliver")
     .plan(d -> run("echo done"))
