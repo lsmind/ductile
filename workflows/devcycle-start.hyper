@@ -1,0 +1,11 @@
+// 开工段拓扑（可 check）
+// plan 双 impl（llm|stub）用 min_impls + 管线表达；不另立 xor alt 顶点以免投影噪音
+HyperGraph("devcycle_start")
+  .goal("instruction -> plan -> preflight -> handoff")
+  .require(min_impls=1)
+  .vertex("intake", role=source, tags=#intent)
+  .vertex("plan", role=default, tags=#llm)
+  .vertex("preflight", role=default, tags=#git)
+  .vertex("handoff", role=sink, tags=#write)
+  .hedge("flow", kind=chain, intake, plan, preflight, handoff)
+  .deliver(handoff)

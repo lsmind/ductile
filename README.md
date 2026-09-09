@@ -26,7 +26,7 @@
 | CSE（等价 proc 只跑一次） | ✅ v0.10 | ❌ | ❌ | ❌ |
 | 运行时自适应惩罚 | ✅ 独家 | ❌ | ❌ | ❌ |
 | 同构发现 + 打散重组 | ✅ | ❌ | ❌ | ❌ |
-| 超图层指导建图（`.hyper`） | ✅ | ⚠️ 代码建图 | ⚠️ DAG 定义 | ❌ |
+| 超网络生成运行图（`.hyper`） | ✅ | ⚠️ 代码建图 | ⚠️ DAG 定义 | ❌ |
 | 热补丁（不改源文件） | ✅ | ❌ | ❌ | ❌ |
 | SQLite 统一存储 | ✅ 单文件 | ❌ | ✅ 外部 DB | ❌ |
 | 版本快照 | ✅ 内置 | ❌ | ❌ | ❌ |
@@ -83,38 +83,16 @@ web 路径失败 → 自动滑到 mcp；裁判打分 < 80 → deliver 被门住�
 
 ## 核心能力
 
-### 超图层 = 有序/类型化关联超图（compile-time）
+### 超网络（`.hyper`）
 
-顶点 + **typed hedges**，投影成可执行 DAG。不是经典无向超图，也不是「stage 列表」马甲；运行时不跑超边。
+不确定时用超网络**生成**运行图，再执行：
 
 ```bash
-ductile hyper parse examples/hyper/unstructured_extract.hyper
 ductile hyper build examples/hyper/unstructured_extract.hyper -o out.pipeline
 ductile hyper check examples/hyper/unstructured_extract.hyper examples/scripts/unstructured-extract.pipeline
-ductile hyper similar examples/hyper/unstructured_extract.hyper --json examples/
 ```
 
-```
-HyperGraph("demo")
-  .vertex("load", role=source)
-  .vertex("work", role=default)
-  .vertex("judge", role=judge)
-  .vertex("out", role=sink)
-  .hedge("flow", kind=chain, load, work, out)
-  .hedge("q", kind=gate, judge=judge, producers=work, consumers=out)
-  .deliver(out)
-```
-
-| kind | 含义 |
-|------|------|
-| `chain` | 有序路径 → 数据边 |
-| `gate` | 显式 `judge=` / `producers=` / `consumers=`：when-门，**不**把 judge 灌进 consumer 数据依赖 |
-| `bundle` | 共现；`hyper check` 强制成员都在 |
-| `xor` | slot=首成员；alts 不投影为 stage；slot 多 impl |
-
-复用：`hyper↔hyper` 看 `hypergraph_key`；对 pipeline 只看 `dag_key`。语义回归：`bash examples/scripts/hyper_semantics_drill.sh`。
-
-**约束边界**：超图层强制「点/边/门/共现/备选槽齐套」（`hyper check`）；**不**管运行时选路、自由环、HITL、when 阈值对错。详见 [SPEC §2.4b 约束面](SPEC.md)。
+`chain` / `gate` / `bundle` / `xor` 见 [SPEC §2.4b](SPEC.md)。LLM 只取入边数据（`@ref`）。仓库自测周期：[docs/DEVCYCLE.md](docs/DEVCYCLE.md)。
 
 ### e-graph 等价类 + 受限熔合（v0.10 新增）
 
@@ -235,43 +213,20 @@ agent = create_react_agent(llm, tools, prompt)   # 或任何 LangChain Agent
 
 ## 代码结构
 
-```
-src/
-├── parser.rs     # DSL 解析（.pipeline / .eval 策略）
-├── ast.rs        # 类型（Impl/Proc/Pipeline/Policy/CostValue）
-├── typecheck.rs  # 类型检查
-├── executor.rs   # 编排主干（pipeline/proc/foreach/retry）
-├── steps.rs      # step_registry + 21 个内置执行器（fs/进程/读写/run/llm/search/script）
-├── textargs.rs   # 纯文本解析原语（detect_func/resolve_vars/extract_*）
-├── dslresult.rs  # ##DSL_RESULT 协议编解码
-├── ranking.rs    # 偏好学习/排序/失败惩罚
-├── eval.rs       # Evaluator/CostSource/CostCache（裁判分离运行时）
-├── egraph.rs     # e-graph 等价类 + CSE + when-载体守卫
-├── db.rs         # SQLite（*_conn 注入内核，测试用内存库）
-├── script.rs     # v0.12 脚本契约（脚本即 API）
-├── api.rs        # v0.13 富 API 层（core+pyo3 薄壳双形态，LangChain 共用）
-├── hyper.rs      # 超图层：有序/类型化 HyperGraph → 投影/校验 .pipeline
-├── config.rs     # config.toml 解析（[llm] 等）
-└── cli.rs        # 命令分发 + 纯参数解析
-bridge/
-└── llm_bridge.py # OpenAI 兼容 LLM 桥（schema → ##DSL_RESULT）
-```
-
-17 模块各带单元测试；Windows 本机 **325** 通过（bash 相关测例 `cfg(unix)`）；Linux CI 跑全量含 shell 集成测。`cargo test --lib` 一条命令全跑。
+核心在 `src/`（解析、编排、执行、超网络、API）；Python 包与 LLM 桥在 `python/`、`bridge/`。细节以源码为准。
 
 ## 设计哲学
 
-- **声明意图，不声明猜测值** — 不需要手写 cost 数字，引擎自己学
-- **机制替代意志力** — 连续失败自动 BLOCKED，不需要人盯
-- **tag 做索引，description 做判断** — 系统识别结构，决定权在使用者
+- **声明意图** — 备选与门槛写进 DSL，由引擎选路与学习  
+- **数据流喂模型** — LLM 消费 `@ref` 入边，而非整库上下文  
+
+说明：[docs/DESIGN.md](docs/DESIGN.md) · 语法：[SPEC.md](SPEC.md)
 
 ## 测试
 
 ```bash
 cargo test --lib
 ```
-
-325 个测试本机通过（Linux CI 另含 bash 集成测）。覆盖：解析原语、##DSL_RESULT 协议、内存库 CRUD/TTL 回路、偏好学习收敛、e-graph 熔合守卫、errflow、fs/进程算子、JSON 解析器（含 UTF-16 代理对）。
 
 ## License
 

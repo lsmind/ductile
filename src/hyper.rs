@@ -1,21 +1,6 @@
-//! Ordered, typed hypergraph layer (compile-time) — not classical undirected hypergraphs.
-//!
-//! **Constraint surface** (see SPEC §2.4b): shapes only — stage presence, data `@ref`,
-//! `.when(@judge)`, `min_impls` / xor slot, bundle co-occurrence, `require.judge`.
-//! Does **not** do runtime rewiring, free cycles, HITL, score thresholds, or impl picking.
-//!
-//! Model:
-//! - **Vertices** `V`: named nodes with role/tags
-//! - **Hyperedges** `E`: incidence over V with an explicit `kind`
-//!   - `chain`: **ordered** tuple (v0,…,vk) → DAG edges v_i→v_{i+1}
-//!   - `gate`: **explicit ports** `judge=` + `producers=` + `consumers=`
-//!     → producers→judge (data); consumers get `.when(@judge)` only (no junk data-dep on judge)
-//!   - `bundle`: co-occurrence constraint; enforced by `hyper check` on pipelines
-//!   - `xor`: exclusive alternatives; **one** projected stage (slot=first member), others suppressed
-//!
-//! Projection → `.pipeline` DAG for execution. Runtime never interprets hyperedges directly.
-//!
-//! Legacy `.stage(..., after=, gated_by=)` desugars into vertices + hedges.
+//! Hypernetwork: generate runnable `.pipeline` graphs from typed hedges; `check` validates shape.
+//! Kinds: `chain` | `gate` (explicit ports) | `bundle` | `xor`. Runtime runs pipelines only.
+//! Legacy `.stage` desugars to vertices + hedges.
 
 use crate::ast::Pipeline;
 use crate::parser::{parse_pipeline, parse_pipeline_file, ParseError};

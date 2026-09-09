@@ -1,0 +1,27 @@
+#!/usr/bin/env -S ductile run
+// devcycle.pipeline — 仓库狗粮入口：默认走「落盘」；topic 以 start: 开头则走「开工」
+//
+// 开工（指令→handoff）：
+//   ./devcycle.pipeline "start: 给 hyper 加 bundle 文档"
+//   ductile run ./devcycle.pipeline "start: ..."
+//
+// 落盘（selftest→ship）：
+//   ./devcycle.pipeline "feat: hyper 约束面文档"
+//   ductile run ./devcycle.pipeline "feat: ..."
+//
+// 全貌见 docs/DEVCYCLE.md 与 workflows/devcycle.hyper
+Pipeline("devcycle", "devcycle 路由：start:* → 开工；否则 → 落盘")
+  .proc("route")
+    .desc("按 topic 前缀分流")
+    .plan(
+      r -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && export PATH=\"${CARGO_TARGET_DIR:+$CARGO_TARGET_DIR/debug:}${CARGO_TARGET_DIR:+$CARGO_TARGET_DIR/release:}$ROOT/target/debug:$ROOT/target/release:$PATH\" && TOPIC='{topic}' && case \"$TOPIC\" in start:*) REST=\"${TOPIC#start:}\" && REST=\"${REST# }\" && ductile run workflows/devcycle-start.pipeline \"$REST\" 2>&1 | tee /tmp/devcycle-route.log | tail -40 && echo ROUTE-START ;; *) ductile run workflows/devcycle-land.pipeline \"$TOPIC\" 2>&1 | tee /tmp/devcycle-route.log | tail -40 && echo ROUTE-LAND ;; esac")
+        .tags(#route)
+    )
+  .proc("gate")
+    .desc("出口标记")
+    .plan(
+      g -> run("echo '@route' | grep -qE 'HANDOFF-READY|DEVCYCLE-LAND-PASS|ROUTE-START|ROUTE-LAND' && echo DEVCYCLE-OK || (echo DEVCYCLE-FAIL; echo '@route'; exit 1)")
+        .tags(#gate)
+    )
+  .proc("deliver")
+    .deliver(@gate)
