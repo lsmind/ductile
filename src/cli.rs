@@ -140,6 +140,13 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         "l4" if args.len() >= 3 && args[2] == "label" && args.len() >= 5 => {
             cmd_l4_label(&args[3], &args[4])
         }
+        // v0.15 判别实验搁置队列（缺口 #5）
+        "shelve" if args.len() >= 3 && args[2] == "list" => {
+            cmd_shelve_list(args.get(3).map(|s| s.as_str()))
+        }
+        "shelve" if args.len() >= 3 && args[2] == "resolve" && args.len() >= 5 => {
+            cmd_shelve_resolve(&args[3], &args[4..].join(" "))
+        }
         "script" if args.len() >= 3 && args[2] == "attach" && args.len() >= 4 => {
             cmd_script_attach(&args[3])
         }
@@ -235,6 +242,21 @@ fn cmd_incident_list(status: Option<&str>) -> Result<i32, String> {
 }
 
 // ── v0.15 L4 端到端复核 CLI（缺口 #4）──
+
+// ── v0.15 搁置队列 CLI（缺口 #5）──
+
+fn cmd_shelve_list(status: Option<&str>) -> Result<i32, String> {
+    print!("{}", shelve::render_shelved_conn(&db::open_try()?, status));
+    Ok(0)
+}
+
+fn cmd_shelve_resolve(id: &str, resolution: &str) -> Result<i32, String> {
+    let conn = db::open_try()?;
+    let id: i64 = id.parse().map_err(|_| format!("bad shelved id: {id}"))?;
+    shelve::resolve_shelved_conn(&conn, id, resolution)?;
+    println!("shelved #{id} resolved: {resolution}");
+    Ok(0)
+}
 
 fn cmd_l4_list() -> Result<i32, String> {
     print!("{}", l4::render_reviews_conn(&db::open_try()?, 20));

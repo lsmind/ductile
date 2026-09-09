@@ -411,6 +411,13 @@ pub fn exec_pipeline(
                 _ => None,
             })
             .unwrap_or_else(|| "unknown error".to_string());
+        // v0.15 L4 复核（log-only；enforcing 时 fail verdict 升格为管线失败）
+        if let Some(l4_err) = l4_finalize(&pl, &results, Some(&root_msg)) {
+            return ExecResult::Failed {
+                error: format!("critical proc '{}' failed: {}; {}", fatal_proc, root_msg, l4_err),
+                partial: results,
+            };
+        }
         ExecResult::Failed {
             error: format!("critical proc '{}' failed: {}", fatal_proc, root_msg),
             partial: results,
@@ -419,6 +426,13 @@ pub fn exec_pipeline(
         // 旁路失败容忍：主链完好 → Success（旁路 Left 仍在 results 里可查）
         if results.values().any(errflow::is_error_value) {
             eprintln!("  [pipeline] bypass failures tolerated — critical chain intact");
+        }
+        // v0.15 L4 复核：Success 也记录（log-only 攒标签数据面）
+        if let Some(l4_err) = l4_finalize(&pl, &results, None) {
+            return ExecResult::Failed {
+                error: l4_err,
+                partial: results,
+            };
         }
         ExecResult::Success(results)
     }
@@ -489,6 +503,52 @@ fn record_incident(pl: &Pipeline, proc: &Proc, err: &str) {
         let code = errflow::classify(err).code().to_string();
         crate::incident::record_incident_conn(&conn, &pl.name, &proc.name, &code, err, "");
     }
+}
+
+/// v0.15 L4 端到端复核（cognition spec §7 缺口 #4）：管线收尾 log-only 记录。
+/// DUCTILE_L4=1 开启；Success→pass（deliver 摘要），Failed→fail（致命错误）。
+/// 旁路写入（open_try 失败静默）——复核记录不能搞死主管线。
+/// enforcing 阶段（≥8 标签且一致率≥70%）升格：fail verdict 回写为 pipeline 错误。
+fn l4_finalize(pl: &Pipeline, results: &BTreeMap<String, Value>, fatal: Option<&str>) -> Option<String> {
+    // cfg!(test) 守卫：cargo test 继承 shell 的 DUCTILE_L4=1 时曾把单测的
+    // exec_pipeline 复核写进真库（环境泄漏脚枪）
+    if cfg!(test) {
+        return None;
+    }
+    if std::env::var("DUCTILE_L4").map(|v| v == "1").unwrap_or(false) != true {
+        return None;
+    }
+    let Ok(conn) = crate::db::open_try() else {
+        return None;
+    };
+    // deliver proc 本身不执行（executor 跳过）；摘要取 deliver 引用的 proc 值
+    let deliver_target: Vec<String> = pl
+        .procs
+        .iter()
+        .filter(|p| p.deliver)
+        .flat_map(|p| p.deliver_refs.clone())
+        .collect();
+    let deliver_summary: String = results
+        .iter()
+        .filter(|(k, _)| deliver_target.contains(k))
+        .map(|(k, v)| format!("{}: {}", k, v.as_text().chars().take(200).collect::<String>()))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let (verdict, evidence) = match fatal {
+        Some(msg) => ("fail", format!("critical: {}", msg.chars().take(200).collect::<String>())),
+        None => ("pass", if deliver_summary.is_empty() {
+            "no deliver proc; all procs completed".to_string()
+        } else {
+            deliver_summary.chars().take(200).collect::<String>()
+        }),
+    };
+    let _ = crate::l4::record_review_conn(&conn, &pl.name, verdict, &evidence, None);
+    eprintln!("  [l4] review recorded: {} (log-only)", verdict);
+    // enforcing 阶段：fail verdict 不再容忍
+    if verdict == "fail" && crate::l4::phase_for_conn(&conn) == crate::l4::L4Phase::Enforcing {
+        return Some(format!("L4 enforcing: end-to-end review failed — {}", evidence));
+    }
+    None
 }
 
 /// v0.15 契约校验（cognition spec §7 P0）。纯函数：proc 契约 × 结果值 → Ok/Err。

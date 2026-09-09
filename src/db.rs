@@ -14,10 +14,16 @@ use std::path::PathBuf;
 // ── Path ──
 
 pub fn db_path() -> PathBuf {
+    db_path_with(std::env::var_os("DUCTILE_DATA"))
+}
+
+/// db_path 的参数化内核（测试注入用，不碰全局 env——set_var 在并行测试下
+/// 会把其他线程的 db::open() 重定向到临时目录，曾致 2 例 flaky）。
+pub fn db_path_with(data: Option<std::ffi::OsString>) -> PathBuf {
     // v0.15 fix: 尊重 DUCTILE_DATA——selftest 探针/隔离 E2E 设置它就是期望库落在
     // 隔离目录，但本函数从未读过它，导致所有"隔离"写入全部落进真库
     // （l4 探针断言 log_only 被真库污染成 enforcing 才暴露）。
-    if let Some(data) = std::env::var_os("DUCTILE_DATA") {
+    if let Some(data) = data {
         let dir = PathBuf::from(&data);
         let _ = fs::create_dir_all(&dir);
         return dir.join("ductile.db");
@@ -177,7 +183,19 @@ pub const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS pipelines (
             run_id      INTEGER,
             reviewed_at TEXT DEFAULT ''
         );
-        CREATE INDEX IF NOT EXISTS idx_l4_reviews_pipeline ON l4_reviews(pipeline);";
+        CREATE INDEX IF NOT EXISTS idx_l4_reviews_pipeline ON l4_reviews(pipeline);
+        CREATE TABLE IF NOT EXISTS shelved (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            pipeline    TEXT NOT NULL,
+            proc_name   TEXT NOT NULL,
+            reason      TEXT DEFAULT '',
+            evidence    TEXT DEFAULT '',
+            status      TEXT NOT NULL DEFAULT 'open',
+            resolution  TEXT DEFAULT '',
+            created_at  TEXT DEFAULT '',
+            resolved_at TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_shelved_status ON shelved(status);";
 
 pub fn init_db() {
     let conn = open();
@@ -261,6 +279,18 @@ pub struct IncidentRow {
 
 /// v0.15 canary 行（canary.rs 的查询载体）
 #[derive(Debug, Clone)]
+pub struct ShelvedRow {
+    pub id: i64,
+    pub pipeline: String,
+    pub proc_name: String,
+    pub reason: String,
+    pub evidence: String,
+    pub status: String,
+    pub resolution: String,
+    pub created_at: String,
+    pub resolved_at: String,
+}
+
 pub struct L4ReviewRow {
     pub id: i64,
     pub pipeline: String,
@@ -1395,13 +1425,13 @@ mod conn_tests {
 
     #[test]
     fn db_path_respects_ductile_data() {
-        // v0.15 fix 回归钉：DUCTILE_DATA 必须决定库路径，否则隔离探针污染真库
+        // v0.15 fix 回归钉：DUCTILE_DATA 必须决定库路径，否则隔离探针污染真库。
+        // 参数注入而非 set_var——全局 env 在并行测试下会把别的线程的 db::open()
+        // 重定向到临时目录（flaky 竞态）。
         let tmp = std::env::temp_dir().join(format!("dt_data_test_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&tmp);
-        std::env::set_var("DUCTILE_DATA", &tmp);
-        let p = db_path();
-        std::env::remove_var("DUCTILE_DATA");
+        let p = db_path_with(Some(tmp.clone().into_os_string()));
         assert_eq!(p, tmp.join("ductile.db"), "db must live under DUCTILE_DATA");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let fallback = db_path_with(None);
+        assert!(fallback.ends_with("ductile.db"));
     }
 }

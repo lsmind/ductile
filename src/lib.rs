@@ -30,6 +30,7 @@ pub mod when;
 pub mod canary;
 pub mod incident;
 pub mod l4;
+pub mod shelve;
 
 pub mod cli;
 

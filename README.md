@@ -5,7 +5,7 @@
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/Tests-325%2B%20passed-brightgreen.svg)](#测试)
-[![PyPI](https://img.shields.io/badge/PyPI-0.13.1-blue.svg)](https://pypi.org/project/ductile/)
+[![PyPI](https://img.shields.io/badge/PyPI-0.15.0-blue.svg)](https://pypi.org/project/ductile/)
 [![CI](https://github.com/lsmind/ductile/actions/workflows/ci.yml/badge.svg)](https://github.com/lsmind/ductile/actions/workflows/ci.yml)
 
 ---
