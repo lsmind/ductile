@@ -127,13 +127,15 @@ def resolve_settings(args: argparse.Namespace) -> tuple[str, str, str, int]:
 
 def chat_completions(base: str, key: str, model: str, messages: list, timeout: int = 120) -> str:
     url = base.rstrip("/") + "/chat/completions"
-    body = json.dumps(
-        {
-            "model": model,
-            "messages": messages,
-            "temperature": 0.2,
-        }
-    ).encode("utf-8")
+    payload: dict = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.2,
+    }
+    max_tokens = env("OPENAI_MAX_TOKENS")
+    if max_tokens.isdigit():
+        payload["max_tokens"] = int(max_tokens)
+    body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=body,
