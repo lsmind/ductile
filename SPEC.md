@@ -111,6 +111,7 @@ Pipeline("name", "optional description")
 | `run` | `run("shell command")` | 执行 shell 命令 |
 | `sh` | `sh("shell command")` | run 的别名 |
 | `merge` | `merge(@a, @b, dedup)` | 合并结果（可选去重） |
+| `contract` | `.contract(outputs="a,b", invariants="@self.score >= 80")` | 节点契约卡（proc 修饰符，见 §13） |
 | 其他 | — | 未知函数 fail-closed（硬错误，不再 `<noop>`） |
 
 `run` / `sh` / `llm`（带 `schema`）的输出如果包含 `##DSL_RESULT` 块，自动解析为结构化数据（见第 7 节）。
@@ -343,6 +344,59 @@ ductile version diff <file.pipeline> <v1> <v2>
 
 - 存储在 `~/.local/share/ductile/versions/<pipeline_name>/`
 
+### 2.14 canary（v0.15 认知层）
+
+```
+ductile canary list [proc]
+ductile canary add <pipeline> <proc> <input> [expect] [note...]
+ductile canary rm <id>
+ductile canary pass <pipeline> <proc>
+```
+
+- **已知好输入库**：五分类归因闸的判别面。class2（上游投毒）vs class3/4（本地问题）
+  的唯一判别手段 = 用归档的 canary 输入重跑本节点。
+- `expect` 谓词用 `.when()` 语法（`@self.field` 引用结果字段），缺省 `@self.ok == 1`。
+- `canary pass` 记录硬门禁通过面——**无 canary 通过记录禁止本地 patch**。
+- canary 绿（canary 过 + 真实输入挂）→ 上游投毒，本节点清白；canary 红 → 本地问题。
+
+### 2.15 incident（v0.15 认知层）
+
+```
+ductile incident list [status]
+ductile incident close <id> <resolution...>
+```
+
+- **事故一等实体**：节点失败自动落库（exec 失败分支 + 契约违例点双接线），带分层信号
+  （contract 缺字段→L1 / 谓词违例→L2 / timeout 等→L0 / truncation→L0.5）。
+- 同 `(pipeline, proc, code)` 的 open 事故聚合为一条（信号束语义，不刷屏）。
+- `close` 带 resolution（最终归因），evidence 追加 resolved 记录，可审计。
+
+### 2.16 l4（v0.15 认知层）
+
+```
+ductile l4 status                     # 当前升格状态 + 一致率
+ductile l4 list                       # 复核记录（最新 20 条）
+ductile l4 review <pipeline> <pass|fail> <evidence...>
+ductile l4 label <id> <ok|bad>
+```
+
+- **端到端复核**：任务意图 vs deliver 的独立判断（唯一合法 LLM 检测层）。
+- 冷启动 **log-only**：复核只记录不拦截；攒够 **≥8 个操作者标签且 L4 与标签一致率 ≥70%**
+  才升格 **enforcing**（fail verdict 升格为管线错误）。
+- 管线收尾自动记录：`DUCTILE_L4=1 ductile run x.pipeline`（Success→pass 带 deliver 摘要，
+  Failed→fail 带致命错误）。
+
+### 2.17 shelve（v0.15 认知层）
+
+```
+ductile shelve list [status]
+ductile shelve resolve <id> <resolution...>
+```
+
+- **判别实验模糊搁置队列**：canary 通过率落灰区（0.25–0.75）= 判别实验本身不可信，
+  强制搁置进 designer 审队列，**不写错误认知**（test-the-test）。
+- `resolve` 裁决不可撤销（verdicts are immutable）。
+
 ---
 
 ## 3. 执行引擎行为
@@ -449,7 +503,8 @@ v0.11 起谓词层退役（裁判与生产分离）：`.check()` / `.ensure()` �
 
 ## 4. SQLite schema
 
-数据库路径：`~/.local/share/ductile/ductile.db`
+数据库路径：`$DUCTILE_DATA/ductile.db`（未设置时 `~/.local/share/ductile/ductile.db`）。
+`DUCTILE_DATA` 同时是自测/探针的隔离开关——所有认知层表都落在这一个库里。
 
 ```sql
 CREATE TABLE pipelines (
@@ -530,6 +585,40 @@ CREATE TABLE scaffolds (           -- 构式库 (V26 生长, v0.9.2+)
     source TEXT DEFAULT 'grown',   -- 'grown' = ductile grow; 'v26' = 首次导入
     imported_at TEXT DEFAULT '',
     UNIQUE(text)
+);
+
+-- v0.15 认知层（见 §13）
+CREATE TABLE canaries (            -- 已知好输入库（归因判别面）
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pipeline TEXT NOT NULL, proc_name TEXT NOT NULL,
+    input TEXT NOT NULL,
+    expect TEXT NOT NULL DEFAULT '@self.ok == 1',
+    note TEXT DEFAULT '', saved_at TEXT DEFAULT ''
+);
+CREATE TABLE incidents (           -- 事故一等实体（信号束聚合）
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pipeline TEXT NOT NULL, proc_name TEXT NOT NULL,
+    signals TEXT NOT NULL DEFAULT '',   -- L0-L2 分层信号
+    err_code TEXT DEFAULT '',
+    evidence TEXT DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'open',
+    created_at TEXT DEFAULT '', closed_at TEXT DEFAULT ''
+);
+CREATE TABLE l4_reviews (          -- L4 端到端复核（log-only → enforcing）
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pipeline TEXT NOT NULL,
+    verdict TEXT NOT NULL,         -- pass / fail
+    evidence TEXT DEFAULT '',
+    label TEXT NOT NULL DEFAULT '',-- 操作者标签 ok/bad（升格判据）
+    run_id INTEGER, reviewed_at TEXT DEFAULT ''
+);
+CREATE TABLE shelved (             -- 判别实验模糊搁置队列
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pipeline TEXT NOT NULL, proc_name TEXT NOT NULL,
+    reason TEXT DEFAULT '', evidence TEXT DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'open',
+    resolution TEXT DEFAULT '',
+    created_at TEXT DEFAULT '', resolved_at TEXT DEFAULT ''
 );
 ```
 
@@ -943,3 +1032,70 @@ cancelled→contract→ratelimit→auth→timeout→memory→dependency→permis
   `bypass failures tolerated`，旁路 Left 仍在 results/partial 可查）
 - parser 变更：`.deliver(@x)` 参数旧版只置 is_deliver 即丢弃——现解析进
   `Proc.deliver_refs`（v0.4 起的潜伏遗漏，关键性判定的地基）
+
+
+---
+
+## 13. 认知层（v0.15 — 契约卡 / canary / incident / L4 / shelve）
+
+让引擎从「执行成功/失败」升级到「知道为什么失败、谁的责任、该不该改认知」。
+设计全文见 [docs/cognition_spec.md](docs/cognition_spec.md)。
+
+### 13.1 节点契约卡（P0）
+
+```python
+.proc("judge")
+  .plan(j -> run("judge.sh {topic}"))
+  .contract(outputs="score, note", invariants="@self.score >= 80")
+```
+
+- 执行后确定性校验（零 LLM）：`outputs` 字段存在性（L1）+ `invariants` 谓词（L2，
+  `.when()` 语法，`@self.field` 自引用本 proc 结果）。
+- 违例 → `contract violation:` 错误（errflow Exit，不重试——契约错不是瞬态错）→
+  自动落 incident。
+- 没有契约就没有误差信号——这是认知层的地基。
+
+### 13.2 五分类归因闸
+
+| class | 归因 | 判定 |
+|-------|------|------|
+| 1 | 环境问题（桥/网络/凭证） | 桥哈希≠仓库、finish_reason、网络锚点——确定性终态，零 LLM |
+| 2 | 上游投毒 | canary 绿（canary 过 + 真实输入挂）|
+| 3 | 描述欠约束 | canary 红 + 判别实验：desc 修订后同模型产出质变 |
+| 4 | 模型能力不足 | canary 红 + 判别实验无改善 |
+| 5 | 世界真变了 | 需外部变化证据，准入最严 |
+
+硬门禁：**无 canary 通过记录禁止本地 patch**——class2 排除不了就动手 = 把上游锅
+背到自己身上。
+
+### 13.3 分层信号（L0-L4）
+
+| 层 | 检测物 | 载体 |
+|----|--------|------|
+| L0 | 基础设施（timeout/memory/network） | errflow 分类 |
+| L0.5 | 截断（finish_reason=length） | META 块 |
+| L1 | 输出字段缺失 | 契约卡 outputs |
+| L2 | 谓词违例 | 契约卡 invariants |
+| L3 | 统计漂移（长度包络/分数带宽） | 历史分布（待实现） |
+| L4 | 端到端意图达成 | 独立复核（唯一合法 LLM 检测层） |
+
+确定性证据短路 LLM：L0-L2 全绿时 L4 才有意义。
+
+### 13.4 L4 冷启动与升格
+
+```
+log_only ──(≥8 标签 且 一致率≥70%)──▶ enforcing
+```
+
+- log-only：复核记录但不拦截（攒标签数据面）。
+- enforcing：fail verdict 升格为管线错误（`L4 enforcing: end-to-end review failed`）。
+- `DUCTILE_L4=1` 开启管线收尾自动复核；`cfg!(test)` 守卫防测试污染真库。
+
+### 13.5 LLM 输出安全（血泪规则）
+
+LLM 结果**一律不进 bash**。`echo '@ref'`、`echo x='@ref' >/dev/null` 都会被输出里的
+单引号炸掉（`>/dev/null` 只丢输出，字符串照样过 shell 解析）。合法消费方式只有两种：
+
+1. **结构化字段**：`.when(@proc.field ...)` / 契约 invariants（Rust 侧求值）
+2. **`write` 内置动词落盘**：`write(to="f.md", content=@plan)` 后 `cat f.md`——
+   write 在 Rust 侧解析 `@ref`，不过 shell

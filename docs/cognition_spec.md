@@ -168,16 +168,33 @@ incident → 分类 → patch(tentative, c=置信度)
 | ⑦ | 双写冲突 | §4 写权限表 + 提案队列 |
 | ⑧ | 描述双语漂移 | patch 可物化为谓词，NL 引用谓词 ID |
 
-## 7. 实现缺口（按依赖排序）
+## 7. 实现状态（v0.15.0 已全部落地）
 
-1. **P0 节点契约卡**：`expects/outputs/invariants` 声明 + 执行后校验 + `##DSL_RESULT`
-   META 块（finish_reason/usage/bridge_hash/model_id）。没有它没有误差信号。
-2. **canary 输入库**：class 2 vs 3/4 判别全靠它。designer 新职责：每节点族存档
-   已知好输入。
-3. **incident 一等实体**：信号束的载体。runs 表现在只有节点结果，没有事故聚合。
-4. **L4 冷启动**：端到端复核初期 log-only，攒够任务成败标签才升格拦截。前 N 次
-   运行不设端到端门，接受。
-5. **test-the-test**：判别实验结果模糊时强制搁置进 designer 审队列，不写错误认知。
+| # | 缺口（原排序） | 状态 | 落点 |
+|---|--------------|------|------|
+| 1 | P0 节点契约卡 + META 块 | ✅ `5ab3f8c` | `.contract()`（parser/executor）+ llm 桥 META 块（finish_reason/usage/bridge_hash/model_id） |
+| 2 | canary 输入库 | ✅ `e809700` | `src/canary.rs` + `canary add/list/rm/pass` CLI + 硬门禁查询面 |
+| 3 | incident 一等实体 | ✅ `e809700` | `src/incident.rs` + L0-L2 信号分层自动落库 + 聚合去重 + close 闭环 |
+| 4 | L4 冷启动 log-only | ✅ `7d6331c`/`95a5ec9` | `src/l4.rs` + 升格状态机（≥8 标签且一致率≥70%）+ `DUCTILE_L4=1` executor 接线（enforcing 时 fail 拦截） |
+| 5 | test-the-test 搁置队列 | ✅ `95a5ec9` | `src/shelve.rs` + 判别分类器（≥0.75 Green / <0.25 Red / 灰区搁置）+ 裁决不可撤销 |
+
+CLI 面：`canary` / `incident` / `l4` / `shelve` 四组子命令（SPEC §2.14-2.17）；
+执行面：契约校验 + incident 双接线 + L4 收尾复核；数据面：`$DUCTILE_DATA/ductile.db`
+四张新表（SPEC §4）。
+
+### 7.1 实现中沉淀的工程教训
+
+- **LLM 输出一律不进 bash**：`echo '@ref'` 与 `>/dev/null` 重定向都不是消毒——
+  内容过 shell 解析就会被打出来的单引号炸掉。合法路径只有 `.when` 结构化字段与
+  `write` 动词落盘（SPEC §13.5）。
+- **环境变量必须真的被读**：`DUCTILE_DATA` 曾是被 selftest 导出却从未被 `db_path()`
+  读取的幽灵变量，所有"隔离"探针实际在写真库。
+- **cargo test 继承 shell 环境**：`export DUCTILE_L4=1` 后跑测试会把单测的复核
+  写进真库——`l4_finalize` 加 `cfg!(test)` 守卫。
+- **测试禁 set_var 全局 env**：并行测试下会把别的线程的 `db::open()` 重定向到
+  即将删除的临时目录（flaky）；改参数注入（`db_path_with`）。
+- **rusqlite 参数计数**：无占位符 SQL 绑定 `params![Option]` 报错但被 `let Ok(..)`
+  吞掉——查询面静默返回空表，必须显式分支绑定。
 
 ## 8. 不做什么（负空间）
 

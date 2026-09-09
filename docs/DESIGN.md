@@ -17,13 +17,19 @@
 
 ```
 .hyper（超网络）→ .pipeline（运行图）→ e-graph / ranking / errflow（执行）
+                                                    ↓
+                              认知层（v0.15）：contract / canary / incident / l4 / shelve
 ```
 
 | 层 | 职责 |
 |----|------|
 | 超网络 `.hyper` | 不确定时生成可运行拓扑；`check` 校验形状 |
-| 运行图 `.pipeline` | 工序、备选 impl、数据依赖 `@ref`、`.when` |
+| 运行图 `.pipeline` | 工序、备选 impl、数据依赖 `@ref`、`.when`、`.contract` |
 | 执行 | 选路、降级、等价消解、学习 |
+| 认知层 | 契约校验产生误差信号 → 事故聚合与分层信号 → 归因判别（canary/搁置）→ 端到端复核（log-only→enforcing） |
+
+认知层原则：确定性证据短路 LLM；无 canary 通过记录禁止本地 patch；判别模糊必搁置。
+设计全文见 [cognition_spec.md](cognition_spec.md)。
 
 LLM 步骤应只消费入边数据（`@proc` / `@proc.field`），按数据流取最小必要上下文。
 

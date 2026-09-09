@@ -34,16 +34,25 @@ fn home_dir() -> String {
 /// Shell gate: default allow (local trusted operator).
 /// `DUCTILE_RESTRICT_SHELL=1` blocks run/sh/spawn; `DUCTILE_UNSAFE_SHELL=1` overrides.
 pub fn shell_allowed() -> bool {
-    let flag = |k: &str| {
+    shell_allowed_with(
+        std::env::var("DUCTILE_UNSAFE_SHELL").ok(),
+        std::env::var("DUCTILE_RESTRICT_SHELL").ok(),
+    )
+}
+
+/// shell_allowed 的参数化内核（测试注入用——set_var 全局 env 在并行测试下
+/// 会把 DUCTILE_RESTRICT_SHELL=1 泄漏进并发进程，曾致 run_echo 系列随机挂）。
+pub fn shell_allowed_with(unsafe_shell: Option<String>, restrict_shell: Option<String>) -> bool {
+    let flag = |v: Option<String>| {
         matches!(
-            std::env::var(k).ok().as_deref(),
+            v.as_deref(),
             Some("1") | Some("true") | Some("yes") | Some("TRUE") | Some("YES")
         )
     };
-    if flag("DUCTILE_UNSAFE_SHELL") {
+    if flag(unsafe_shell) {
         return true;
     }
-    !flag("DUCTILE_RESTRICT_SHELL")
+    !flag(restrict_shell)
 }
 
 fn deny_if_shell_restricted(op: &str) -> Result<(), String> {
@@ -1554,27 +1563,20 @@ mod tests {
     }
 
     #[test]
-    fn restrict_shell_blocks_run() {
-        std::env::set_var("DUCTILE_RESTRICT_SHELL", "1");
-        std::env::remove_var("DUCTILE_UNSAFE_SHELL");
-        let err = exec_run(
-            &default_impl(),
-            "t",
-            r#"run("echo hi")"#,
-            &BTreeMap::new(),
-        )
-        .unwrap_err();
-        assert!(err.contains("DUCTILE_RESTRICT_SHELL"), "{}", err);
-        std::env::remove_var("DUCTILE_RESTRICT_SHELL");
+    fn restrict_shell_gate_logic() {
+        // 纯逻辑测试（参数注入，不碰全局 env——并行测试安全）
+        assert!(shell_allowed_with(None, Some("1".into())) == false);
+        assert!(shell_allowed_with(Some("1".into()), Some("1".into())) == true);
+        assert!(shell_allowed_with(None, None) == true);
+        assert!(shell_allowed_with(None, Some("0".into())) == true);
     }
 
     #[test]
     fn unsafe_shell_overrides_restrict() {
-        std::env::set_var("DUCTILE_RESTRICT_SHELL", "1");
-        std::env::set_var("DUCTILE_UNSAFE_SHELL", "1");
-        assert!(shell_allowed());
-        std::env::remove_var("DUCTILE_RESTRICT_SHELL");
-        std::env::remove_var("DUCTILE_UNSAFE_SHELL");
+        assert!(shell_allowed_with(
+            Some("1".into()),
+            Some("1".into())
+        ));
     }
 
     #[test]

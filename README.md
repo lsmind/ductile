@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-325%2B%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/Tests-384%2B%20passed-brightgreen.svg)](#测试)
 [![PyPI](https://img.shields.io/badge/PyPI-0.15.0-blue.svg)](https://pypi.org/project/ductile/)
 [![CI](https://github.com/lsmind/ductile/actions/workflows/ci.yml/badge.svg)](https://github.com/lsmind/ductile/actions/workflows/ci.yml)
 
@@ -28,6 +28,7 @@
 | 同构发现 + 打散重组 | ✅ | ❌ | ❌ | ❌ |
 | 超网络生成运行图（`.hyper`） | ✅ | ⚠️ 代码建图 | ⚠️ DAG 定义 | ❌ |
 | 热补丁（不改源文件） | ✅ | ❌ | ❌ | ❌ |
+| 认知层（契约/canary/incident/L4 复核） | ✅ v0.15 | ❌ | ❌ | ❌ |
 | SQLite 统一存储 | ✅ 单文件 | ❌ | ✅ 外部 DB | ❌ |
 | 版本快照 | ✅ 内置 | ❌ | ❌ | ❌ |
 | 零改接入外部工具 | ✅ 5 行 echo | ❌ Tool 类 | ❌ Operator | ⚠️ 适配器 |
@@ -136,6 +137,25 @@ ductile graph your.pipeline   # 看 e-class 明细 / 融合规则命中 / CSE �
 ductile patch research search web enabled false
 ductile patch research summarize s1 retry 5
 ```
+
+### 认知层（v0.15）
+
+引擎不只记录成败，还回答"为什么失败、谁的责任、该不该改认知"：
+
+- **节点契约卡**：`.contract(outputs="score", invariants="@self.score >= 80")` 执行后确定性校验，违例自动落事故
+- **canary 已知好输入库**：五分类归因的判别面——canary 绿=上游投毒，红=本地问题；无 canary 通过记录禁止本地 patch
+- **incident 一等实体**：失败自动聚合为带 L0-L2 分层信号的事故，close 带 resolution 可审计
+- **L4 端到端复核**：冷启动 log-only 攒标签，≥8 标签且一致率 ≥70% 才升格拦截（复核者先被校准）
+- **shelve 搁置队列**：判别实验结果模糊时强制搁置，绝不写错误认知
+
+```bash
+ductile canary add research judge '已知好输入' '@self.score >= 80'
+ductile incident list
+ductile l4 status
+DUCTILE_L4=1 ductile run research.pipeline "topic"
+```
+
+设计全文：[docs/cognition_spec.md](docs/cognition_spec.md) · DSL 面：[SPEC §13](SPEC.md)
 
 ### Shell 安全门（可选）
 
