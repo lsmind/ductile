@@ -47,10 +47,16 @@ Pipeline("selftest", "ductile 用 ductile 自测：unit → 正向/负向探针 
         .tags(#test, #cognition)
         .desc("canary add + incident list 双 CLI 真跑（隔离 DUCTILE_DATA 不污染真库）")
     )
+  .proc("l4probe")
+    .desc("v0.15 L4 冷启动探针：log-only 记录 + 标签 + 状态机（真 CLI 跑）")
+    .plan(
+      l -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && D=$(mktemp -d) && DUCTILE_DATA=$D ductile l4 review selftest-l4 pass 'e2e probe' | grep -q 'recorded \[pass\]' && DUCTILE_DATA=$D ductile l4 label 1 ok | grep -q 'labeled ok' && DUCTILE_DATA=$D ductile l4 status | grep -q 'log_only' && echo l4-ok")
+        .tags(#test, #l4)
+    )
   .proc("report")
     .desc("汇总门禁：全绿才 PASS，任一失败整流 exit 1（critical 链放大）")
     .plan(
-      r -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && mkdir -p target/devcycle && echo u='@unit' n='@neg' s='@scripts' h='@hyper' p='@pos' >/dev/null && { echo '@unit'; echo '@pos'; echo '@neg'; echo '@scripts'; echo '@hyper'; echo '@cognition'; } > target/devcycle/selftest-summary.txt && grep -q '; 0 failed' target/devcycle/selftest-summary.txt && grep -q '^1$' target/devcycle/selftest-summary.txt && grep -q 'ghost-ok' target/devcycle/selftest-summary.txt && grep -q 'disabled-ok' target/devcycle/selftest-summary.txt && grep -q 'scripts-ok' target/devcycle/selftest-summary.txt && grep -q 'hyper-ok' target/devcycle/selftest-summary.txt && grep -q 'cognition-ok' target/devcycle/selftest-summary.txt && echo SELFTEST-PASS || (echo SELFTEST-FAIL; exit 1)")
+      r -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && mkdir -p target/devcycle && echo u='@unit' n='@neg' s='@scripts' h='@hyper' p='@pos' >/dev/null && { echo '@unit'; echo '@pos'; echo '@neg'; echo '@scripts'; echo '@hyper'; echo '@cognition'; echo '@l4probe'; } > target/devcycle/selftest-summary.txt && grep -q '; 0 failed' target/devcycle/selftest-summary.txt && grep -q '^1$' target/devcycle/selftest-summary.txt && grep -q 'ghost-ok' target/devcycle/selftest-summary.txt && grep -q 'disabled-ok' target/devcycle/selftest-summary.txt && grep -q 'scripts-ok' target/devcycle/selftest-summary.txt && grep -q 'hyper-ok' target/devcycle/selftest-summary.txt && grep -q 'cognition-ok' target/devcycle/selftest-summary.txt && grep -q 'l4-ok' target/devcycle/selftest-summary.txt && echo SELFTEST-PASS || (echo SELFTEST-FAIL; exit 1)")
         .tags(#gate)
         .desc("六重 grep 门禁（含 hyper）— 落盘文件版：@ref 含单引号不再炸 bash")
     )

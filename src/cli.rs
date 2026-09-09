@@ -131,6 +131,15 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         "incident" if args.len() >= 3 && args[2] == "close" && args.len() >= 5 => {
             cmd_incident_close(&args[3], &args[4..].join(" "))
         }
+        // v0.15 L4 端到端复核（缺口 #4，冷启动 log-only）
+        "l4" if args.len() >= 3 && args[2] == "list" => cmd_l4_list(),
+        "l4" if args.len() >= 3 && args[2] == "status" => cmd_l4_status(),
+        "l4" if args.len() >= 3 && args[2] == "review" && args.len() >= 6 => {
+            cmd_l4_review(&args[3], &args[4], &args[5..].join(" "))
+        }
+        "l4" if args.len() >= 3 && args[2] == "label" && args.len() >= 5 => {
+            cmd_l4_label(&args[3], &args[4])
+        }
         "script" if args.len() >= 3 && args[2] == "attach" && args.len() >= 4 => {
             cmd_script_attach(&args[3])
         }
@@ -222,6 +231,60 @@ fn cmd_incident_list(status: Option<&str>) -> Result<i32, String> {
         );
         println!("    {}", crate::trunc_chars(&r.evidence, 110));
     }
+    Ok(0)
+}
+
+// ── v0.15 L4 端到端复核 CLI（缺口 #4）──
+
+fn cmd_l4_list() -> Result<i32, String> {
+    print!("{}", l4::render_reviews_conn(&db::open_try()?, 20));
+    Ok(0)
+}
+
+fn cmd_l4_status() -> Result<i32, String> {
+    let conn = db::open_try()?;
+    let phase = l4::phase_for_conn(&conn);
+    let rate = l4::agreement_rate(&conn);
+    println!(
+        "L4 phase: {} | agreement: {} | min_labeled: {} | min_agreement: {}",
+        phase.as_str(),
+        match rate {
+            Some(a) => format!("{:.2}", a),
+            None => "n/a".to_string(),
+        },
+        l4::L4_ENFORCE_MIN_LABELED,
+        l4::L4_ENFORCE_MIN_AGREEMENT
+    );
+    Ok(0)
+}
+
+fn cmd_l4_review(pipeline: &str, verdict: &str, evidence: &str) -> Result<i32, String> {
+    let conn = db::open_try()?;
+    let id = l4::record_review_conn(&conn, pipeline, verdict, evidence, None)?;
+    let phase = l4::phase_for_conn(&conn);
+    println!(
+        "l4 review #{} recorded [{}] phase={} (log-only 阶段不拦截)",
+        id, verdict, phase.as_str()
+    );
+    Ok(0)
+}
+
+fn cmd_l4_label(id: &str, label: &str) -> Result<i32, String> {
+    let conn = db::open_try()?;
+    let id: i64 = id.parse().map_err(|_| format!("bad review id: {id}"))?;
+    l4::label_review_conn(&conn, id, label)?;
+    let phase = l4::phase_for_conn(&conn);
+    let rate = l4::agreement_rate(&conn);
+    println!(
+        "l4 review #{} labeled {} | phase={} agreement={}",
+        id,
+        label,
+        phase.as_str(),
+        match rate {
+            Some(a) => format!("{:.2}", a),
+            None => "n/a".to_string(),
+        }
+    );
     Ok(0)
 }
 

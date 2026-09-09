@@ -14,6 +14,14 @@ use std::path::PathBuf;
 // ── Path ──
 
 pub fn db_path() -> PathBuf {
+    // v0.15 fix: 尊重 DUCTILE_DATA——selftest 探针/隔离 E2E 设置它就是期望库落在
+    // 隔离目录，但本函数从未读过它，导致所有"隔离"写入全部落进真库
+    // （l4 探针断言 log_only 被真库污染成 enforcing 才暴露）。
+    if let Some(data) = std::env::var_os("DUCTILE_DATA") {
+        let dir = PathBuf::from(&data);
+        let _ = fs::create_dir_all(&dir);
+        return dir.join("ductile.db");
+    }
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| {
@@ -159,7 +167,17 @@ pub const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS pipelines (
             created_at  TEXT DEFAULT '',
             closed_at   TEXT DEFAULT ''
         );
-        CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status);";
+        CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status);
+        CREATE TABLE IF NOT EXISTS l4_reviews (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            pipeline    TEXT NOT NULL,
+            verdict     TEXT NOT NULL,
+            evidence    TEXT DEFAULT '',
+            label       TEXT NOT NULL DEFAULT '',
+            run_id      INTEGER,
+            reviewed_at TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_l4_reviews_pipeline ON l4_reviews(pipeline);";
 
 pub fn init_db() {
     let conn = open();
@@ -243,6 +261,16 @@ pub struct IncidentRow {
 
 /// v0.15 canary 行（canary.rs 的查询载体）
 #[derive(Debug, Clone)]
+pub struct L4ReviewRow {
+    pub id: i64,
+    pub pipeline: String,
+    pub verdict: String,
+    pub evidence: String,
+    pub label: String,
+    pub run_id: Option<i64>,
+    pub reviewed_at: String,
+}
+
 pub struct CanaryRow {
     pub id: i64,
     pub pipeline: String,
@@ -1363,5 +1391,17 @@ mod conn_tests {
         assert_eq!(compositions, 1);
         assert_eq!(pipelines, 0);
         assert_eq!(procs, 0);
+    }
+
+    #[test]
+    fn db_path_respects_ductile_data() {
+        // v0.15 fix 回归钉：DUCTILE_DATA 必须决定库路径，否则隔离探针污染真库
+        let tmp = std::env::temp_dir().join(format!("dt_data_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        std::env::set_var("DUCTILE_DATA", &tmp);
+        let p = db_path();
+        std::env::remove_var("DUCTILE_DATA");
+        assert_eq!(p, tmp.join("ductile.db"), "db must live under DUCTILE_DATA");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
