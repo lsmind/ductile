@@ -14,7 +14,7 @@ Pipeline("devcycle", "devcycle 路由：start:* → 开工；否则 → 落盘")
   .proc("route")
     .desc("按 topic 前缀分流")
     .plan(
-      r -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && export PATH=\"${CARGO_TARGET_DIR:+$CARGO_TARGET_DIR/debug:}${CARGO_TARGET_DIR:+$CARGO_TARGET_DIR/release:}$ROOT/target/debug:$ROOT/target/release:$PATH\" && TOPIC='{topic}' && case \"$TOPIC\" in start:*) REST=\"${TOPIC#start:}\" && REST=\"${REST# }\" && ductile run workflows/devcycle-start.pipeline \"$REST\" 2>&1 | tee /tmp/devcycle-route.log | tail -40 && echo ROUTE-START ;; *) ductile run workflows/devcycle-land.pipeline \"$TOPIC\" 2>&1 | tee /tmp/devcycle-route.log | tail -40 && echo ROUTE-LAND ;; esac")
+      r -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && mkdir -p target/devcycle && TOPIC='{topic}' && case \"$TOPIC\" in start:*) REST=\"${TOPIC#start:}\" && REST=\"${REST# }\" && ductile run workflows/devcycle-start.pipeline \"$REST\" 2>&1 | tee target/devcycle/route.log | tail -40 && echo ROUTE-START ;; *) ductile run workflows/devcycle-land.pipeline \"$TOPIC\" 2>&1 | tee target/devcycle/route.log | tail -40 && echo ROUTE-LAND ;; esac")
         .tags(#route)
     )
   .proc("gate")

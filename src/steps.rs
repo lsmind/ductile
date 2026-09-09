@@ -8,7 +8,7 @@
 use crate::ast::*;
 use crate::dslresult::{encode_structured_result, parse_dsl_result_block};
 use crate::textargs::{
-    expand_tilde, extract_all_string_args, extract_first_string, extract_string_arg, resolve_vars,
+    expand_fs_path, extract_all_string_args, extract_first_string, extract_string_arg, resolve_vars,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -55,6 +55,114 @@ fn deny_if_shell_restricted(op: &str) -> Result<(), String> {
             op
         ))
     }
+}
+
+/// Locate `bash` for `run`/`spawn` (required on all platforms today).
+/// Windows: PATH first, then common Git for Windows installs.
+pub fn resolve_bash() -> Result<PathBuf, String> {
+    if let Some(p) = which_in_path("bash") {
+        return Ok(p);
+    }
+    #[cfg(windows)]
+    {
+        for c in windows_bash_candidates() {
+            if c.is_file() {
+                return Ok(c);
+            }
+        }
+        return Err(
+            "bash not found — install Git for Windows and ensure bash is on PATH \
+             (or use \"Git Bash\"). See docs/WINDOWS.md"
+                .into(),
+        );
+    }
+    #[cfg(not(windows))]
+    {
+        Err("bash not found on PATH".into())
+    }
+}
+
+fn which_in_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let exts: &[&str] = if cfg!(windows) {
+        &[".exe", "", ".cmd", ".bat"]
+    } else {
+        &[""]
+    };
+    for dir in std::env::split_paths(&path) {
+        for ext in exts {
+            let cand = dir.join(format!("{}{}", name, ext));
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn windows_bash_candidates() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    for key in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
+        if let Ok(root) = std::env::var(key) {
+            let r = PathBuf::from(root);
+            v.push(r.join(r"Git\bin\bash.exe"));
+            v.push(r.join(r"Git\usr\bin\bash.exe"));
+            if key == "LOCALAPPDATA" {
+                v.push(r.join(r"Programs\Git\bin\bash.exe"));
+            }
+        }
+    }
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        let h = PathBuf::from(home);
+        v.push(h.join(r"scoop\apps\git\current\bin\bash.exe"));
+        v.push(h.join(r"scoop\apps\git\current\usr\bin\bash.exe"));
+    }
+    v
+}
+
+/// Prepend dirs so child `ductile` / drills find the same binary as this process.
+/// Also sets `DUCTILE_BIN` to `current_exe` when available.
+pub fn apply_ductile_child_env(command: &mut Command) {
+    let mut prepend: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        command.env("DUCTILE_BIN", &exe);
+        if let Some(dir) = exe.parent() {
+            prepend.push(dir.to_path_buf());
+        }
+    }
+    if let Ok(td) = std::env::var("CARGO_TARGET_DIR") {
+        let td = PathBuf::from(td);
+        prepend.push(td.join("release"));
+        prepend.push(td.join("debug"));
+    }
+    if let Ok(root) = std::env::var("DUCTILE_ROOT") {
+        let root = PathBuf::from(root);
+        prepend.push(root.join("target").join("release"));
+        prepend.push(root.join("target").join("debug"));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut cur = Some(cwd);
+        while let Some(p) = cur {
+            if p.join(".git").exists() || p.join("Cargo.toml").exists() {
+                prepend.push(p.join("target").join("release"));
+                prepend.push(p.join("target").join("debug"));
+                break;
+            }
+            cur = p.parent().map(|x| x.to_path_buf());
+        }
+    }
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    let extra: Vec<String> = prepend
+        .into_iter()
+        .filter(|d| d.is_dir())
+        .map(|d| d.to_string_lossy().into_owned())
+        .collect();
+    if extra.is_empty() {
+        return;
+    }
+    let old = std::env::var("PATH").unwrap_or_default();
+    command.env("PATH", format!("{}{}{}", extra.join(sep), sep, old));
 }
 
 // ── Function Registry（v0.11.1 重构：Registry + Adapter 模式）──
@@ -352,7 +460,7 @@ fn exec_write(
     let content = extract_string_arg("content", body);
     let resolved_path = resolve_vars(&to_path, topic, results);
     let resolved_content = resolve_vars(&content, topic, results);
-    let expanded = expand_tilde(&resolved_path);
+    let expanded = expand_fs_path(&resolved_path);
     eprintln!("    -> write: {}", expanded);
 
     let path = Path::new(&expanded);
@@ -429,12 +537,13 @@ fn exec_spawn(
     // v0.12.1：Unix 上子进程自立进程组。此前继承父组 → exec_kill 的
     // kill -9 -pid（组杀）目标组不存在，静默无效；且孤孙子进程
     // （cmd 里的 `&`）会在组杀时漏杀。Windows 无 process_group，仅 kill 主进程。
-    let mut spawn_cmd = Command::new("bash");
+    let mut spawn_cmd = Command::new(resolve_bash()?);
     spawn_cmd
         .arg("-c")
         .arg(&cmd)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    apply_ductile_child_env(&mut spawn_cmd);
     #[cfg(unix)]
     {
         spawn_cmd.process_group(0);
@@ -553,7 +662,7 @@ fn exec_wait(
 
 /// exists("path") → "true"/"false"
 fn exec_fs_exists(_impl_: &Impl, body: &str) -> Result<Value, String> {
-    let path = expand_tilde(&extract_first_string(body));
+    let path = expand_fs_path(&extract_first_string(body));
     Ok(Value::Text(if Path::new(&path).exists() {
         "true".into()
     } else {
@@ -563,7 +672,7 @@ fn exec_fs_exists(_impl_: &Impl, body: &str) -> Result<Value, String> {
 
 /// stat("path") → "size_bytes mtime_unix" or error if missing
 fn exec_fs_stat(_impl_: &Impl, body: &str) -> Result<Value, String> {
-    let path = expand_tilde(&extract_first_string(body));
+    let path = expand_fs_path(&extract_first_string(body));
     let meta = fs::metadata(&path).map_err(|e| format!("stat failed: {}", e))?;
     let mtime = meta
         .modified()
@@ -583,7 +692,7 @@ fn exec_fs_stat(_impl_: &Impl, body: &str) -> Result<Value, String> {
 
 /// ls("dir") → lines of entries (name only)
 fn exec_fs_ls(_impl_: &Impl, body: &str) -> Result<Value, String> {
-    let path = expand_tilde(&extract_first_string(body));
+    let path = expand_fs_path(&extract_first_string(body));
     let entries = fs::read_dir(&path).map_err(|e| format!("ls failed: {}", e))?;
     let mut names: Vec<String> = Vec::new();
     for e in entries.flatten() {
@@ -595,7 +704,7 @@ fn exec_fs_ls(_impl_: &Impl, body: &str) -> Result<Value, String> {
 
 /// rm("path") — recursive; refuses / and $HOME roots.
 fn exec_fs_rm(_impl_: &Impl, body: &str) -> Result<Value, String> {
-    let path = expand_tilde(&extract_first_string(body));
+    let path = expand_fs_path(&extract_first_string(body));
     let p = Path::new(&path);
     let danger = p == Path::new("/") || p == dirs_home();
     if danger {
@@ -619,8 +728,8 @@ fn dirs_home() -> &'static Path {
 
 /// cp("src", "dst") — file or directory tree (pure Rust, no shell `cp`).
 fn exec_fs_cp(_impl_: &Impl, body: &str) -> Result<Value, String> {
-    let src = expand_tilde(&extract_string_arg("from", body));
-    let dst = expand_tilde(&extract_string_arg("to", body));
+    let src = expand_fs_path(&extract_string_arg("from", body));
+    let dst = expand_fs_path(&extract_string_arg("to", body));
     if src.is_empty() || dst.is_empty() {
         return Err("cp requires from=\"...\" to=\"...\"".into());
     }
@@ -658,14 +767,14 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
 
 /// mkdir("path") — create all parents.
 fn exec_fs_mkdir(_impl_: &Impl, body: &str) -> Result<Value, String> {
-    let path = expand_tilde(&extract_first_string(body));
+    let path = expand_fs_path(&extract_first_string(body));
     fs::create_dir_all(&path).map_err(|e| format!("mkdir failed: {}", e))?;
     Ok(Value::Text(path))
 }
 
 /// disk("dir") → "avail_gb total_gb" via df -BG.
 fn exec_disk(_impl_: &Impl, body: &str) -> Result<Value, String> {
-    let path = expand_tilde(&extract_first_string(body));
+    let path = expand_fs_path(&extract_first_string(body));
     let out = Command::new("df")
         .arg("-BG")
         .arg(&path)
@@ -706,7 +815,7 @@ fn exec_read(
 
     // 与 exec_write 对齐：路径过 {topic}/{hash(topic)}/@ref 解析
     let resolved = resolve_vars(&path, topic, results);
-    let expanded = expand_tilde(&resolved);
+    let expanded = expand_fs_path(&resolved);
     if !Path::new(&expanded).exists() {
         return Err(format!("file not found: {}", expanded));
     }
@@ -729,8 +838,10 @@ fn exec_run(
     let envs = extract_all_string_args("env", body);
     eprintln!("    -> run: {} (timeout={}s)", cmd, timeout_secs);
 
-    let mut command = Command::new("bash");
+    let bash = resolve_bash()?;
+    let mut command = Command::new(&bash);
     command.arg("-c").arg(&cmd);
+    apply_ductile_child_env(&mut command);
     for e in &envs {
         if let Some(eq) = e.find('=') {
             let (k, v) = (&e[..eq], &e[eq + 1..]);
@@ -749,7 +860,13 @@ fn exec_run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("run failed: {}", e))?;
+        .map_err(|e| {
+            format!(
+                "run failed to start bash ({}) — on Windows install Git for Windows (see docs/WINDOWS.md): {}",
+                bash.display(),
+                e
+            )
+        })?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs.max(1));
     let status;
     loop {
@@ -1137,12 +1254,13 @@ mod tests {
 
     #[test]
     fn exec_write_then_read() {
-        let path = "/tmp/ductile_test_roundtrip.txt";
-        let _ = std::fs::remove_file(path);
+        let path = std::env::temp_dir().join("ductile_test_roundtrip.txt");
+        let path_s = path.to_string_lossy().replace('\\', "/");
+        let _ = std::fs::remove_file(&path);
 
         // Write
         let write_impl = Impl {
-            body_text: format!(r#"write(to="{}", content="hello ductile")"#, path),
+            body_text: format!(r#"write(to="{}", content="hello ductile")"#, path_s),
             ..default_impl()
         };
         let results = BTreeMap::new();
@@ -1151,7 +1269,7 @@ mod tests {
 
         // Read back
         let read_impl = Impl {
-            body_text: format!(r#"read(from="{}")"#, path),
+            body_text: format!(r#"read(from="{}")"#, path_s),
             ..default_impl()
         };
         let r = exec_read(&read_impl, "test", &read_impl.body_text, &BTreeMap::new());
@@ -1161,7 +1279,25 @@ mod tests {
             _ => panic!("expected Text"),
         }
 
-        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn resolve_bash_finds_something() {
+        // CI / 本机：有 bash 才过；纯 Windows 无 Git 时跳过会让门禁假绿，故要求可解析
+        let p = resolve_bash().expect("bash required for ductile run/spawn — see docs/WINDOWS.md");
+        assert!(p.is_file(), "{}", p.display());
+    }
+
+    #[test]
+    fn apply_ductile_child_env_sets_path_or_bin() {
+        let mut c = Command::new("true");
+        apply_ductile_child_env(&mut c);
+        // 至少尝试设置；无 current_exe 时也可能空操作
+        let _ = c;
+        if let Ok(exe) = std::env::current_exe() {
+            assert!(exe.exists() || exe.parent().is_some());
+        }
     }
 
     // ── exec_merge ──

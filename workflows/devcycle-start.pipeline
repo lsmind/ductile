@@ -27,7 +27,7 @@ Pipeline("devcycle_start", "指令→计划→预检→handoff 落盘")
   .proc("preflight")
     .desc("仓库预检：状态 + 超图复用提示")
     .plan(
-      p -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && export PATH=\"${CARGO_TARGET_DIR:+$CARGO_TARGET_DIR/debug:}${CARGO_TARGET_DIR:+$CARGO_TARGET_DIR/release:}$ROOT/target/debug:$ROOT/target/release:$PATH\" && mkdir -p target/devcycle && echo plan='@plan' >/dev/null && { echo '## git'; git status -sb; echo; echo '## hyper similar (soft)'; ductile hyper similar examples/hyper/unstructured_extract.hyper --json examples/hyper 2>/dev/null | head -c 2000 || echo 'hyper-skip'; } > target/devcycle/preflight.txt && echo preflight-ok")
+      p -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && mkdir -p target/devcycle && echo plan='@plan' >/dev/null && { echo '## git'; git status -sb; echo; echo '## hyper similar (soft)'; ductile hyper similar examples/hyper/unstructured_extract.hyper --json examples/hyper 2>/dev/null | head -c 2000 || echo 'hyper-skip'; } > target/devcycle/preflight.txt && echo preflight-ok")
         .tags(#git, #scan)
     )
   .proc("handoff")

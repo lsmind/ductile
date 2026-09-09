@@ -226,6 +226,25 @@ pub fn expand_tilde(path: &str) -> String {
     }
 }
 
+/// 文件系统路径：tilde 展开；Windows 上将 `/tmp` 与 `/tmp/...` 映射到系统临时目录。
+/// （引擎 `write`/`read`/`cp` 走原生路径；Git Bash 内的 `/tmp` 仍由 bash 自己解析。）
+pub fn expand_fs_path(path: &str) -> String {
+    let p = expand_tilde(path);
+    #[cfg(windows)]
+    {
+        let norm = p.replace('\\', "/");
+        if norm == "/tmp" || norm.starts_with("/tmp/") {
+            let rest = norm.trim_start_matches("/tmp").trim_start_matches('/');
+            let mut t = std::env::temp_dir();
+            if !rest.is_empty() {
+                t.push(rest);
+            }
+            return t.to_string_lossy().into_owned();
+        }
+    }
+    p
+}
+
 /// djb2-xor 64 位哈希，8 位十六进制。
 pub fn short_hash(s: &str) -> String {
     let mut hash: u64 = 5381;
@@ -416,6 +435,23 @@ mod tests {
     fn extract_all_string_args_substring_guard() {
         let body = r#"run("x", envx="A=1")"#;
         assert!(extract_all_string_args("env", body).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn expand_fs_path_maps_tmp_on_windows() {
+        let p = expand_fs_path("/tmp/ductile_win_path_probe.txt");
+        assert!(!p.starts_with("/tmp"), "got {}", p);
+        assert!(p.contains("ductile_win_path_probe.txt"), "got {}", p);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn expand_fs_path_keeps_tmp_on_unix() {
+        assert_eq!(
+            expand_fs_path("/tmp/ductile_unix_path_probe.txt"),
+            "/tmp/ductile_unix_path_probe.txt"
+        );
     }
 
     #[test]

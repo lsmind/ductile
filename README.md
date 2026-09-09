@@ -41,6 +41,14 @@
 pip install ductile
 ```
 
+从源码（需 [Rust](https://rustup.rs/)）：
+
+```bash
+cargo build --release
+```
+
+Windows：`run`/`spawn` 依赖 Git Bash；说明见 [docs/WINDOWS.md](docs/WINDOWS.md)。
+
 ## 30 秒看懂
 
 写一个 `.pipeline` 文件：
