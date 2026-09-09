@@ -107,6 +107,7 @@ const PAT_CONTRACT: &[&str] = &[
     "invalid script name",
     "protected root",
     "param '",
+    "contract violation", // v0.15 节点契约卡（executor::check_contract）——L1 缺字段/L2 谓词违例
     // "param '" 较宽，但 contract 在判定链首位且与 not in contract/missing required
     // 同现——引擎真实输出是 "param 'x' not in contract of 'y'"，
     // 外部脚本错误几乎不会以 "param '" 开头形态出现。见 contract_param_quote_pattern 测试。
@@ -1147,6 +1148,19 @@ mod tests {
         assert_eq!(classify("missing parameter: width"), ErrCode::Contract);
         assert_eq!(classify("missing required param: text"), ErrCode::Contract);
         assert_eq!(classify("unknown parameter passed"), ErrCode::Crash);
+    }
+
+    #[test]
+    fn contract_violation_pattern_v015() {
+        // v0.15 节点契约卡：executor::check_contract 的两种违例形态都归 Contract
+        assert_eq!(
+            classify("contract violation: proc 'judge' invariant failed: @self.score >= 80"),
+            ErrCode::Contract
+        );
+        assert_eq!(
+            classify("contract violation: proc 'gen' missing required output field 'path'"),
+            ErrCode::Contract
+        );
     }
 
     // ── 关键节点判定（v0.14b） ──

@@ -117,12 +117,23 @@ pub struct Check {
     pub msg: String,
 }
 
+/// v0.15 节点契约卡（cognition spec §7 P0）：执行后校验的确定性信号源。
+/// outputs — L1 形式层：##DSL_RESULT 必须携带的字段（存在性）。
+/// invariants — L2 语义层：跨字段谓词（when.rs 求值器，`@self.field` 自引用）。
+///   违例 → Err 带 "contract violation:" 前缀 → errflow Contract 类 → Exit。
+#[derive(Debug, Clone, Default)]
+pub struct Contract {
+    pub outputs: Vec<String>,
+    pub invariants: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Proc {
     pub name: String,
-    pub description: String, // v0.4.1: human-readable description (.desc("..."))
+    pub description: String, // v0.4.1: human-readable description (.desc("...")
     pub plan: Vec<Impl>,
     pub checks: Vec<Check>,
+    pub contract: Contract, // v0.15: .contract(outputs=..., invariants=...)
     pub deliver: bool,
     pub foreach: Option<String>, // source proc name
     /// v0.14b：deliver 引用（`.deliver(@report)` 的 @report）——关键节点集的根。
@@ -352,6 +363,7 @@ mod tests {
                         ..default_impl()
                     }],
                     checks: vec![],
+                contract: Default::default(),
                     deliver: false,
                     deliver_refs: vec![],
                     foreach: None,
@@ -367,6 +379,7 @@ mod tests {
                         ..default_impl()
                     }],
                     checks: vec![],
+                contract: Default::default(),
                     deliver: false,
                     deliver_refs: vec![],
                     foreach: None,
@@ -396,6 +409,7 @@ mod tests {
                     ..default_impl()
                 }],
                 checks: vec![],
+                contract: Default::default(),
                 deliver: false,
                 deliver_refs: vec![],
                 foreach: None,

@@ -104,6 +104,7 @@ mod tests {
             name: name.into(),
             plan,
             checks: vec![],
+            contract: Default::default(),
             deliver: false,
             deliver_refs: vec![],
             foreach: None,

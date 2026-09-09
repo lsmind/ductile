@@ -865,6 +865,7 @@ mod tests {
             description: String::new(),
             plan: impls,
             checks: vec![],
+                contract: Default::default(),
             deliver: false,
             deliver_refs: vec![],
             foreach: None,

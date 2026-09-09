@@ -15,6 +15,7 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -125,7 +126,7 @@ def resolve_settings(args: argparse.Namespace) -> tuple[str, str, str, int]:
     return base, key, model, timeout
 
 
-def chat_completions(base: str, key: str, model: str, messages: list, timeout: int = 120) -> str:
+def chat_completions(base: str, key: str, model: str, messages: list, timeout: int = 120) -> tuple[str, dict]:
     url = base.rstrip("/") + "/chat/completions"
     payload: dict = {
         "model": model,
@@ -154,9 +155,20 @@ def chat_completions(base: str, key: str, model: str, messages: list, timeout: i
     except urllib.error.URLError as e:
         raise SystemExit(f"llm network error: {e}") from e
     try:
-        return data["choices"][0]["message"]["content"]
+        choice = data["choices"][0]
+        content = choice["message"]["content"]
     except (KeyError, IndexError, TypeError) as e:
         raise SystemExit(f"llm bad response shape: {data!r}") from e
+    # L0.5 溯源 META（cognition spec A1/A2）：桥丢掉的恰恰是归因需要的证据。
+    # finish_reason=length ⇒ 尾字段静默截断（score=10 实为 100 事故）；
+    # bridge_hash ⇒ 旧桥劫持检测（--prompt 被当字面量事故）。
+    meta = {
+        "finish_reason": choice.get("finish_reason") or "",
+        "model_id": data.get("model") or model,
+        "prompt_tokens": data.get("usage", {}).get("prompt_tokens", 0),
+        "completion_tokens": data.get("usage", {}).get("completion_tokens", 0),
+    }
+    return content, meta
 
 
 def extract_json_object(text: str):
@@ -198,7 +210,13 @@ def build_messages(prompt: str, system: str, template: str, schema: str | None) 
     return messages
 
 
-def emit_dsl_result(fields: dict, raw: str) -> None:
+def bridge_hash() -> str:
+    """本文件 sha256 前 12 位——L0.5 溯源：实际执行的是哪个桥。"""
+    with open(__file__, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()[:12]
+
+
+def emit_dsl_result(fields: dict, raw: str, meta: dict | None = None) -> None:
     print(raw.rstrip())
     print()
     print("##DSL_RESULT")
@@ -208,6 +226,13 @@ def emit_dsl_result(fields: dict, raw: str) -> None:
             continue
         val = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
         print(f"{k}={val}")
+    if meta is not None:
+        # META 块（cognition spec §7 P0）：finish_reason/usage/bridge_hash/model_id
+        print(f"meta_finish_reason={meta.get('finish_reason', '')}")
+        print(f"meta_model_id={meta.get('model_id', '')}")
+        print(f"meta_prompt_tokens={meta.get('prompt_tokens', 0)}")
+        print(f"meta_completion_tokens={meta.get('completion_tokens', 0)}")
+        print(f"meta_bridge_hash={bridge_hash()}")
     print("##DSL_END")
 
 
@@ -263,7 +288,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     schema = (args.schema or "").strip() or None
     messages = build_messages(prompt, args.system or "", args.template or "", schema)
-    content = chat_completions(base, key, model, messages, timeout=timeout)
+    content, meta = chat_completions(base, key, model, messages, timeout=timeout)
     if schema:
         obj = extract_json_object(content)
         if not obj:
@@ -273,9 +298,18 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        emit_dsl_result(obj, content)
+        emit_dsl_result(obj, content, meta=meta)
     else:
         print(content.rstrip())
+        print()
+        print("##DSL_RESULT")
+        print("ok=1")
+        print(f"meta_finish_reason={meta.get('finish_reason', '')}")
+        print(f"meta_model_id={meta.get('model_id', '')}")
+        print(f"meta_prompt_tokens={meta.get('prompt_tokens', 0)}")
+        print(f"meta_completion_tokens={meta.get('completion_tokens', 0)}")
+        print(f"meta_bridge_hash={bridge_hash()}")
+        print("##DSL_END")
     return 0
 
 

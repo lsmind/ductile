@@ -441,8 +441,17 @@ fn exec_proc(
     // v0.14b 关键性（errflow::critical_set）：主链节点值得更努力——重试预算 ×2；
     // 旁路节点基础预算。零 DSL 面：关键性由 deliver 引用闭包自动判定。
     let critical = errflow::critical_set(pl).contains(&proc.name);
+    // v0.15 节点契约卡（cognition spec §7 P0）：执行后确定性校验。
+    // L1 outputs 存在性 + L2 invariants 谓词（when.rs 求值器，@self.field 自引用）。
+    // 违例 → "contract violation:" 前缀 → errflow Contract 类 → Exit（不重试：
+    // 契约错不是瞬态错，重跑同一 impl 只会再违例）。
     let mut raw = match exec_proc_inner(proc, topic, params, results, pl) {
-        Ok(v) => return Ok(v),
+        Ok(v) => {
+            if let Err(e) = check_contract(proc, &v) {
+                return Err(e);
+            }
+            return Ok(v);
+        }
         Err(e) => e,
     };
     let code = errflow::classify(&raw);
@@ -460,12 +469,59 @@ fn exec_proc(
             );
             std::thread::sleep(std::time::Duration::from_secs(delay));
             match exec_proc_inner(proc, topic, params, results, pl) {
-                Ok(v) => return Ok(v),
+                Ok(v) => {
+                    if let Err(e) = check_contract(proc, &v) {
+                        return Err(e);
+                    }
+                    return Ok(v);
+                }
                 Err(e) => raw = e,
             }
         }
     }
     Err(raw)
+}
+
+/// v0.15 契约校验（cognition spec §7 P0）。纯函数：proc 契约 × 结果值 → Ok/Err。
+/// 错误消息以 "contract violation:" 开头（errflow PAT_CONTRACT 判定链首位命中）。
+pub fn check_contract(proc: &Proc, value: &Value) -> Result<(), String> {
+    let c = &proc.contract;
+    if c.outputs.is_empty() && c.invariants.is_empty() {
+        return Ok(());
+    }
+    // 裸文本结果无字段可查：fail-closed——声明了契约就必须有结构化输出
+    let text = match value {
+        Value::Text(t) => t.as_str(),
+        _ => {
+            return Err(format!(
+                "contract violation: proc '{}' declared outputs/invariants but result is not text-structured",
+                proc.name
+            ))
+        }
+    };
+    // L1 outputs：字段存在性
+    for f in &c.outputs {
+        if crate::dslresult::extract_field(f, text).is_none() {
+            return Err(format!(
+                "contract violation: proc '{}' missing required output field '{}'",
+                proc.name, f
+            ));
+        }
+    }
+    // L2 invariants：when.rs 求值器，@self.field 自引用本 proc 结果
+    let mut self_results: BTreeMap<String, Value> = BTreeMap::new();
+    self_results.insert(proc.name.clone(), value.clone());
+    for inv in &c.invariants {
+        // @self → 本 proc 名（语法糖：契约谓词天然自指）
+        let cond = inv.replace("@self.", &format!("@{}.", proc.name));
+        if !crate::when::eval_cond_str(&cond, &BTreeMap::new(), &self_results) {
+            return Err(format!(
+                "contract violation: proc '{}' invariant failed: {}",
+                proc.name, inv
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn exec_proc_inner(
@@ -935,6 +991,7 @@ mod tests {
                     description: String::new(),
                 }],
                 checks: vec![],
+                contract: Default::default(),
                 deliver: false,
                 deliver_refs: vec![],
                 foreach: None,

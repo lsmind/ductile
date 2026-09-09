@@ -152,6 +152,7 @@ mod tests {
                 ensure: vec![],
             }],
             checks: vec![],
+            contract: Default::default(),
             deliver: false,
             deliver_refs: vec![],
             foreach: None,

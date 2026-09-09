@@ -203,6 +203,7 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
     let mut pick_by = "cost + history".to_string();
     let mut description = String::new();
     let mut proc_when: Option<String> = None;
+    let mut contract: Option<crate::ast::Contract> = None;
 
     // Parse proc body: .plan(...) .pick .check(...) .foreach(...) .deliver(...) .desc(...)
     while idx < lines.len() {
@@ -295,6 +296,63 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
             continue;
         }
 
+        // .contract(outputs="a,b", invariants="...", invariants="...")
+        // v0.15 节点契约卡（cognition spec §7 P0）：outputs/invariants 可重复，
+        // outputs 逗号分隔多字段。解析后入 Proc.contract，执行后校验。
+        if trimmed.starts_with(".contract(") || trimmed.starts_with(".contract (") {
+            let after = trimmed
+                .find(".contract(")
+                .map(|p| &trimmed[p + ".contract(".len()..])
+                .unwrap_or_else(|| {
+                    let p = trimmed.find(".contract (").unwrap();
+                    &trimmed[p + ".contract (".len()..]
+                });
+            let close = find_matching_paren(&format!("({}", after))
+                .map(|i| i.saturating_sub(1))
+                .ok_or_else(|| ParseError {
+                    line: idx + 1,
+                    col: 1,
+                    msg: "unbalanced parens in .contract(...)".into(),
+                    line_text: raw.to_string(),
+                })?;
+            let inner = &after[..close];
+            let mut outputs: Vec<String> = Vec::new();
+            let mut invariants: Vec<String> = Vec::new();
+            for part in split_kv_args(inner) {
+                let (k, v) = part;
+                match k.as_str() {
+                    "outputs" => {
+                        for f in v.split(',') {
+                            let f = f.trim();
+                            if !f.is_empty() {
+                                outputs.push(f.to_string());
+                            }
+                        }
+                    }
+                    "invariants" => {
+                        let v = v.trim();
+                        if !v.is_empty() {
+                            invariants.push(v.to_string());
+                        }
+                    }
+                    _ => {
+                        return Err(ParseError {
+                            line: idx + 1,
+                            col: 1,
+                            msg: format!(
+                                "unknown .contract() key {:?} — expected outputs= or invariants=",
+                                k
+                            ),
+                            line_text: raw.to_string(),
+                        });
+                    }
+                }
+            }
+            contract = Some(crate::ast::Contract { outputs, invariants });
+            idx += 1;
+            continue;
+        }
+
         // .foreach(source=@proc, var=item)
         if trimmed.starts_with(".foreach(") || trimmed.starts_with(".foreach (") {
             let (src, var) = parse_foreach_line(trimmed)?;
@@ -351,6 +409,7 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
             description: description.clone(),
             plan,
             checks,
+            contract: contract.unwrap_or_default(),
             deliver: is_deliver,
             deliver_refs,
             foreach: foreach_src,
@@ -359,6 +418,92 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
         },
         idx,
     ))
+}
+
+/// .contract(...) 内的 k=v 参数切分：引号感知（值可含逗号/空格），
+/// 无引号值取到下一个 ` key=` 或结尾。返回 (key, value) 序列。
+fn split_kv_args(inner: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let chars: Vec<char> = inner.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        // skip whitespace/commas
+        while i < chars.len() && (chars[i] == ' ' || chars[i] == ',') {
+            i += 1;
+        }
+        if i >= chars.len() {
+            break;
+        }
+        // key = identifier chars up to '='
+        let kstart = i;
+        while i < chars.len() && chars[i] != '=' && chars[i] != ',' && chars[i] != ' ' {
+            i += 1;
+        }
+        if i >= chars.len() || chars[i] != '=' {
+            // malformed or trailing junk — skip one char to guarantee progress
+            i = kstart + 1;
+            continue;
+        }
+        let key: String = chars[kstart..i].iter().collect();
+        i += 1; // past '='
+        // skip spaces
+        while i < chars.len() && chars[i] == ' ' {
+            i += 1;
+        }
+        if i < chars.len() && chars[i] == '"' {
+            // quoted value: take until closing quote (escape-aware)
+            i += 1;
+            let vstart = i;
+            let mut esc = false;
+            while i < chars.len() {
+                if esc {
+                    esc = false;
+                    i += 1;
+                    continue;
+                }
+                if chars[i] == '\\' {
+                    esc = true;
+                    i += 1;
+                    continue;
+                }
+                if chars[i] == '"' {
+                    break;
+                }
+                i += 1;
+            }
+            let val: String = chars[vstart..i.min(chars.len())].iter().collect();
+            if i < chars.len() {
+                i += 1; // past closing quote
+            }
+            // DSL 转义还原（与 extract_first_string 同语义）：\"→"，\\→\，
+            // 其余 \X 保字面量（Windows 路径兼容）
+            let mut unescaped = String::with_capacity(val.len());
+            let mut esc = false;
+            for ch in val.chars() {
+                if esc {
+                    if ch != '"' && ch != '\\' {
+                        unescaped.push('\\');
+                    }
+                    unescaped.push(ch);
+                    esc = false;
+                } else if ch == '\\' {
+                    esc = true;
+                } else {
+                    unescaped.push(ch);
+                }
+            }
+            out.push((key, unescaped));
+        } else {
+            // bare value: until ',' (no nesting in this context)
+            let vstart = i;
+            while i < chars.len() && chars[i] != ',' {
+                i += 1;
+            }
+            let val: String = chars[vstart..i].iter().collect();
+            out.push((key, val.trim().to_string()));
+        }
+    }
+    out
 }
 
 // ── Parse .plan(...) block — extract impl entries ──
@@ -1615,5 +1760,60 @@ mod prim_tests {
         // 串未闭而 plan 结束 → fail-closed 硬错误，不静默截断
         let src = "Pipeline(\"t\", \"unterminated\")\n  .proc(\"p\")\n    .plan(\n      x -> run(\"echo never-closed)\n    )\n";
         assert!(parse_pipeline(src).is_err());
+    }
+
+    #[test]
+    fn contract_card_parse_outputs_and_invariants() {
+        // v0.15 节点契约卡：outputs 逗号展开、invariants 可重复、引号值转义还原
+        let src = "Pipeline(\"t\")\n  .proc(\"judge\")\n    .plan(j -> run(\"echo ok\"))\n    .contract(outputs=\"score, note\", invariants=\"@self.score >= 80\", invariants=\"@self.city != \\\"\\\"\")\n";
+        let pl = parse_pipeline(src).unwrap();
+        let p = &pl.procs[0];
+        assert_eq!(p.contract.outputs, vec!["score", "note"]);
+        assert_eq!(p.contract.invariants.len(), 2);
+        assert_eq!(p.contract.invariants[0], "@self.score >= 80");
+        assert_eq!(p.contract.invariants[1], "@self.city != \"\"");
+    }
+
+    #[test]
+    fn contract_card_unknown_key_is_hard_error() {
+        let src = "Pipeline(\"t\")\n  .proc(\"p\")\n    .plan(x -> run(\"echo ok\"))\n    .contract(bogus=\"x\")\n";
+        let err = parse_pipeline(src).unwrap_err();
+        assert!(err.msg.contains("unknown .contract() key"), "got: {}", err.msg);
+    }
+
+    #[test]
+    fn contract_check_l1_missing_field_and_l2_invariant() {
+        // executor::check_contract 纯函数级：L1 缺字段 / L2 谓词违例 / 全通过
+        use crate::executor::check_contract;
+        use crate::ast::Contract;
+        let mk = |outputs: Vec<&str>, invariants: Vec<&str>| crate::ast::Proc {
+            name: "p".into(),
+            description: String::new(),
+            plan: vec![],
+            checks: vec![],
+            contract: Contract {
+                outputs: outputs.into_iter().map(String::from).collect(),
+                invariants: invariants.into_iter().map(String::from).collect(),
+            },
+            deliver: false,
+            deliver_refs: vec![],
+            foreach: None,
+            foreach_var: String::new(),
+            pick_by: String::new(),
+        };
+        // L1 通过 + L2 通过
+        let ok_val = Value::Text("§§FIELDS§§score=85§§note=x§§RAW§§raw".into());
+        assert!(check_contract(&mk(vec!["score"], vec!["@self.score >= 80"]), &ok_val).is_ok());
+        // L1 缺字段
+        let missing = Value::Text("§§FIELDS§§other=1§§RAW§§raw".into());
+        let e = check_contract(&mk(vec!["path"], vec![]), &missing).unwrap_err();
+        assert!(e.starts_with("contract violation:"), "got: {}", e);
+        // L2 违例（截断事故形态：score=10 合法整数但 < 80）
+        let trunc = Value::Text("§§FIELDS§§score=10§§RAW§§raw".into());
+        let e = check_contract(&mk(vec!["score"], vec!["@self.score >= 80"]), &trunc).unwrap_err();
+        assert!(e.contains("invariant failed"), "got: {}", e);
+        // 裸文本 + 声明了契约 → fail-closed
+        let bare = Value::Text("plain output".into());
+        assert!(check_contract(&mk(vec!["score"], vec![]), &bare).is_err());
     }
 }

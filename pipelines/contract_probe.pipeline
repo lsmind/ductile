@@ -1,0 +1,21 @@
+Pipeline("contract_probe", "v0.15 节点契约卡端到端探针")
+  .proc("gen")
+    .desc("产出结构化字段 score")
+    .plan(
+      g -> run("printf '%s\n' '##DSL_RESULT' 'score=85' 'note=good' '##DSL_END'")
+    )
+    .contract(outputs="score, note", invariants="@self.score >= 80")
+  .proc("bad_invariant")
+    .desc("故意违例：score=10 但评语说完美（截断事故形态）")
+    .plan(
+      b -> run("printf '%s\n' '##DSL_RESULT' 'score=10' 'note=完美' '##DSL_END'")
+    )
+    .contract(outputs="score", invariants="@self.score >= 80")
+  .proc("bad_missing_field")
+    .desc("故意缺字段：声明要 path 但没输出")
+    .plan(
+      m -> run("printf '%s\n' '##DSL_RESULT' 'other=1' '##DSL_END'")
+    )
+    .contract(outputs="path")
+  .proc("deliver")
+    .deliver(@gen)
