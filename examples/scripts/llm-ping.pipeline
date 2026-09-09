@@ -1,6 +1,7 @@
 #!/usr/bin/env -S ductile run
 // llm-ping.pipeline — LLM 桥接健康检查：探测 → 失败换路 → 结果落盘
 // 直跑：./llm-ping.pipeline
+// 需要 config.toml [llm] 或 OPENAI_API_KEY（可选 OPENAI_BASE_URL / OPENAI_MODEL；Ollama：base_url=http://127.0.0.1:11434/v1）
 Pipeline("llm_ping", "LLM 桥接健康检查：主路探测 + 失败自动换备选桥")
   .proc("probe")
     .desc("探测 LLM 桥")

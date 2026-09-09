@@ -553,6 +553,50 @@ pub fn script_call_json(name: &str, args: Option<BTreeMap<String, String>>) -> P
     script_call_json_core(name, args).map_err(pyerr)
 }
 
+/// Structural reuse lookup for LLM graph builders (`hyper similar --json`).
+pub fn hyper_similar_json_core(query_path: &str, roots: Option<Vec<String>>) -> Result<String, String> {
+    let roots = roots.unwrap_or_default();
+    crate::hyper::similar_json(query_path, &roots)
+}
+
+#[pyfunction]
+#[pyo3(signature = (query_path, roots=None))]
+pub fn hyper_similar_json(query_path: &str, roots: Option<Vec<String>>) -> PyResult<String> {
+    hyper_similar_json_core(query_path, roots).map_err(pyerr)
+}
+
+/// Node/proc reuse lookup (`hyper nodes --json`).
+pub fn hyper_nodes_json_core(
+    query: &str,
+    roots: Option<Vec<String>>,
+    role: Option<String>,
+    op: Option<String>,
+) -> Result<String, String> {
+    let roots = roots.unwrap_or_default();
+    let filter = if role.is_some() || op.is_some() {
+        Some(crate::hyper::NodeQuery {
+            role,
+            op,
+            in_arity: None,
+            gated: None,
+        })
+    } else {
+        None
+    };
+    crate::hyper::nodes_json(query, &roots, filter.as_ref())
+}
+
+#[pyfunction]
+#[pyo3(signature = (query="", roots=None, role=None, op=None))]
+pub fn hyper_nodes_json(
+    query: &str,
+    roots: Option<Vec<String>>,
+    role: Option<String>,
+    op: Option<String>,
+) -> PyResult<String> {
+    hyper_nodes_json_core(query, roots, role, op).map_err(pyerr)
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(scripts_json, m)?)?;
     m.add_function(wrap_pyfunction!(procs_json, m)?)?;
@@ -561,6 +605,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pipeline_json, m)?)?;
     m.add_function(wrap_pyfunction!(run_json, m)?)?;
     m.add_function(wrap_pyfunction!(script_call_json, m)?)?;
+    m.add_function(wrap_pyfunction!(hyper_similar_json, m)?)?;
+    m.add_function(wrap_pyfunction!(hyper_nodes_json, m)?)?;
     Ok(())
 }
 

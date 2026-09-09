@@ -1,0 +1,6 @@
+Hyper("legacy_gate")
+  .require(judge=true)
+  .stage("ingest", role=source)
+  .stage("nlp", after=ingest)
+  .stage("judge", role=judge, after=nlp)
+  .stage("save", role=sink, after=nlp, gated_by=judge)

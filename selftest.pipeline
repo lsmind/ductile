@@ -1,9 +1,9 @@
 #!/usr/bin/env -S ductile run
-// selftest.pipeline — ductile 自测（狗粮门禁）：单测+正负探针+脚本回归
+// selftest.pipeline — ductile 自测（狗粮门禁）：单测+正负探针+脚本回归+hyper 复用
 // 直跑：./selftest.pipeline   全绿输出 SELFTEST-PASS（exit 0）；任一失败 → report 判死 → exit 1
 // 注意：llm-ping 依赖外部 LLM 桥，不进自测（避免网络抖动误杀门禁）
 // 仓库根：优先 $DUCTILE_ROOT，否则 git rev-parse
-Pipeline("selftest", "ductile 用 ductile 自测：unit → 正向/负向探针 → 脚本回归 → 汇总门禁")
+Pipeline("selftest", "ductile 用 ductile 自测：unit → 正向/负向探针 → 脚本回归 → hyper → 汇总门禁")
   .proc("unit")
     .desc("Rust 单元测试")
     .plan(
@@ -14,30 +14,37 @@ Pipeline("selftest", "ductile 用 ductile 自测：unit → 正向/负向探针 
   .proc("pos")
     .desc("正向探针：成功路径必须 success")
     .plan(
-      p -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && ductile run pipelines/nocost_probe.pipeline regression 2>&1 | grep -c 'executed successfully'")
+      p -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && export PATH=\"${CARGO_TARGET_DIR:+$CARGO_TARGET_DIR/debug:}${CARGO_TARGET_DIR:+$CARGO_TARGET_DIR/release:}$ROOT/target/debug:$ROOT/target/release:$PATH\" && ductile run pipelines/nocost_probe.pipeline regression 2>&1 | grep -c 'executed successfully'")
         .tags(#test)
         .desc("nocost_probe 计数=1")
     )
   .proc("neg")
     .desc("负向探针：ghost/disabled 必须硬错（v0.11 回归钉）")
     .plan(
-      n -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && ductile check pipelines/weights_probe.pipeline >/dev/null 2>&1 && echo BAD-ghost-should-fail || echo ghost-ok; ductile check examples/full_syntax.pipeline >/dev/null 2>&1 && echo BAD-disabled-should-fail || echo disabled-ok")
+      n -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && export PATH=\"${CARGO_TARGET_DIR:+$CARGO_TARGET_DIR/debug:}${CARGO_TARGET_DIR:+$CARGO_TARGET_DIR/release:}$ROOT/target/debug:$ROOT/target/release:$PATH\" && ductile check pipelines/weights_probe.pipeline >/dev/null 2>&1 && echo BAD-ghost-should-fail || echo ghost-ok; ductile check examples/full_syntax.pipeline >/dev/null 2>&1 && echo BAD-disabled-should-fail || echo disabled-ok")
         .tags(#test)
         .desc("两行输出都应是 *-ok")
     )
   .proc("scripts")
-    .desc("可执行脚本回归（shebang 直跑三件）")
+    .desc("可执行脚本回归（三件；disk-watch 限小 HOME 防 Windows 全盘 du 卡死）")
     .plan(
-      s -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT/examples/scripts\" && ./daily-digest.pipeline >/dev/null 2>&1 && ./disk-watch.pipeline >/dev/null 2>&1 && ./errflow-drill.pipeline >/dev/null 2>&1 && echo scripts-ok")
+      s -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && export PATH=\"${CARGO_TARGET_DIR:+$CARGO_TARGET_DIR/debug:}${CARGO_TARGET_DIR:+$CARGO_TARGET_DIR/release:}$ROOT/target/debug:$ROOT/target/release:$PATH\" && export DUCTILE_HOME=\"${DUCTILE_HOME:-$ROOT/examples}\" DUCTILE_DATA=\"${DUCTILE_DATA:-$ROOT/examples}\" && ductile run examples/scripts/daily-digest.pipeline >/dev/null 2>&1 && ductile run examples/scripts/disk-watch.pipeline >/dev/null 2>&1 && ductile run examples/scripts/errflow-drill.pipeline >/dev/null 2>&1 && echo scripts-ok")
         .tags(#test)
-        .desc("三个 +x 脚本全 exit 0")
+        .desc("三脚本 ductile run 全 exit 0")
+    )
+  .proc("hyper")
+    .desc("超图层/节点复用场景（parse/build/check/similar/nodes）")
+    .plan(
+      h -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && export PATH=\"${CARGO_TARGET_DIR:+$CARGO_TARGET_DIR/debug:}${CARGO_TARGET_DIR:+$CARGO_TARGET_DIR/release:}$ROOT/target/debug:$ROOT/target/release:$PATH\" && bash examples/scripts/hyper_reuse_drill.sh 2>&1 | tee /tmp/hyper-reuse-drill.log | grep -q HYPER-REUSE-PASS && echo hyper-ok")
+        .tags(#test, #hyper)
+        .desc("HYPER-REUSE-PASS")
     )
   .proc("report")
     .desc("汇总门禁：全绿才 PASS，任一失败整流 exit 1（critical 链放大）")
     .plan(
-      r -> run("echo '@unit' | grep -q '; 0 failed' && echo '@pos' | grep -q '^1$' && echo '@neg' | grep -q 'ghost-ok' && echo '@neg' | grep -q 'disabled-ok' && echo '@scripts' | grep -q 'scripts-ok' && echo SELFTEST-PASS || (echo SELFTEST-FAIL; exit 1)")
+      r -> run("echo '@unit' | grep -q '; 0 failed' && echo '@pos' | grep -q '^1$' && echo '@neg' | grep -q 'ghost-ok' && echo '@neg' | grep -q 'disabled-ok' && echo '@scripts' | grep -q 'scripts-ok' && echo '@hyper' | grep -q 'hyper-ok' && echo SELFTEST-PASS || (echo SELFTEST-FAIL; exit 1)")
         .tags(#gate)
-        .desc("五重 grep 门禁")
+        .desc("六重 grep 门禁（含 hyper）")
     )
   .proc("deliver")
     .plan(d -> run("echo done"))

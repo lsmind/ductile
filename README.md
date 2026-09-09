@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-316%2B%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/Tests-325%2B%20passed-brightgreen.svg)](#测试)
 [![PyPI](https://img.shields.io/badge/PyPI-0.13.1-blue.svg)](https://pypi.org/project/ductile/)
 [![CI](https://github.com/lsmind/ductile/actions/workflows/ci.yml/badge.svg)](https://github.com/lsmind/ductile/actions/workflows/ci.yml)
 
@@ -26,6 +26,7 @@
 | CSE（等价 proc 只跑一次） | ✅ v0.10 | ❌ | ❌ | ❌ |
 | 运行时自适应惩罚 | ✅ 独家 | ❌ | ❌ | ❌ |
 | 同构发现 + 打散重组 | ✅ | ❌ | ❌ | ❌ |
+| 超图层指导建图（`.hyper`） | ✅ | ⚠️ 代码建图 | ⚠️ DAG 定义 | ❌ |
 | 热补丁（不改源文件） | ✅ | ❌ | ❌ | ❌ |
 | SQLite 统一存储 | ✅ 单文件 | ❌ | ✅ 外部 DB | ❌ |
 | 版本快照 | ✅ 内置 | ❌ | ❌ | ❌ |
@@ -82,6 +83,39 @@ web 路径失败 → 自动滑到 mcp；裁判打分 < 80 → deliver 被门住�
 
 ## 核心能力
 
+### 超图层 = 有序/类型化关联超图（compile-time）
+
+顶点 + **typed hedges**，投影成可执行 DAG。不是经典无向超图，也不是「stage 列表」马甲；运行时不跑超边。
+
+```bash
+ductile hyper parse examples/hyper/unstructured_extract.hyper
+ductile hyper build examples/hyper/unstructured_extract.hyper -o out.pipeline
+ductile hyper check examples/hyper/unstructured_extract.hyper examples/scripts/unstructured-extract.pipeline
+ductile hyper similar examples/hyper/unstructured_extract.hyper --json examples/
+```
+
+```
+HyperGraph("demo")
+  .vertex("load", role=source)
+  .vertex("work", role=default)
+  .vertex("judge", role=judge)
+  .vertex("out", role=sink)
+  .hedge("flow", kind=chain, load, work, out)
+  .hedge("q", kind=gate, judge=judge, producers=work, consumers=out)
+  .deliver(out)
+```
+
+| kind | 含义 |
+|------|------|
+| `chain` | 有序路径 → 数据边 |
+| `gate` | 显式 `judge=` / `producers=` / `consumers=`：when-门，**不**把 judge 灌进 consumer 数据依赖 |
+| `bundle` | 共现；`hyper check` 强制成员都在 |
+| `xor` | slot=首成员；alts 不投影为 stage；slot 多 impl |
+
+复用：`hyper↔hyper` 看 `hypergraph_key`；对 pipeline 只看 `dag_key`。语义回归：`bash examples/scripts/hyper_semantics_drill.sh`。
+
+**约束边界**：超图层强制「点/边/门/共现/备选槽齐套」（`hyper check`）；**不**管运行时选路、自由环、HITL、when 阈值对错。详见 [SPEC §2.4b 约束面](SPEC.md)。
+
 ### e-graph 等价类 + 受限熔合（v0.10 新增）
 
 `.pick(egraph)` 一行开启。等价 proc 自动并入同一 e-class（同构合并、merge 交换/结合律、write→read 对消），执行时每 class 只跑一个代表，其余 CSE 共享结果。实现为 **union-only**（不合成新节点，可证终止），不是完整 egg 式 equality saturation；并行组目前只做拓扑分层，层内仍串行。**when-载体守卫（v0.11.1）**：挂 `.when()` 裁判路由的 impl 不参与熔合——否则 judge→consumer 依赖边会被抹掉，deliver 抢跑、判决落空。
@@ -126,7 +160,19 @@ DUCTILE_RESTRICT_SHELL=1 ductile run app.pipeline   # 或：ductile run app.pipe
 # 临时放开：DUCTILE_UNSAFE_SHELL=1
 ```
 
-受限模式下 shell 算子 fail-closed；`write`/`read`/`ls` 等非 shell 算子不受影响。
+受限模式下 shell 算子 fail-closed；`write`/`read`/`ls`/`llm` 等非 shell 算子不受影响。
+
+### LLM 非结构化 → 结构化
+
+```bash
+cp config.toml.example config.toml   # 填写 [llm] api_key / base_url / model
+# 或：export OPENAI_API_KEY=...   （环境变量优先于文件）
+ductile run examples/scripts/unstructured-extract.pipeline
+```
+
+`llm(prompt=@raw, schema="title,url,topic")` 经 `bridge/llm_bridge.py` 调用模型；带 `schema` 时 stdout 附 `##DSL_RESULT`，下游用 `@extract.title` / `.when`。竞品同场景草图见 [`docs/COMPETITORS.md`](docs/COMPETITORS.md)（LangGraph / CrewAI / AutoGen / Prefect 离线矩阵：`python benches/competitors/run_compare.py`）。
+
+配置解析见引擎 [`src/config.rs`](src/config.rs)（与 bridge 共用同一套查找顺序与优先级）。
 
 ### 同构发现 + 打散重组
 
@@ -204,10 +250,14 @@ src/
 ├── db.rs         # SQLite（*_conn 注入内核，测试用内存库）
 ├── script.rs     # v0.12 脚本契约（脚本即 API）
 ├── api.rs        # v0.13 富 API 层（core+pyo3 薄壳双形态，LangChain 共用）
+├── hyper.rs      # 超图层：有序/类型化 HyperGraph → 投影/校验 .pipeline
+├── config.rs     # config.toml 解析（[llm] 等）
 └── cli.rs        # 命令分发 + 纯参数解析
+bridge/
+└── llm_bridge.py # OpenAI 兼容 LLM 桥（schema → ##DSL_RESULT）
 ```
 
-17 模块各带单元测试；Windows 本机 **316** 通过（bash 相关测例 `cfg(unix)`）；Linux CI 跑全量含 shell 集成测。`cargo test --lib` 一条命令全跑。
+17 模块各带单元测试；Windows 本机 **325** 通过（bash 相关测例 `cfg(unix)`）；Linux CI 跑全量含 shell 集成测。`cargo test --lib` 一条命令全跑。
 
 ## 设计哲学
 
@@ -221,7 +271,7 @@ src/
 cargo test --lib
 ```
 
-316 个测试本机通过（Linux CI 另含 bash 集成测）。覆盖：解析原语、##DSL_RESULT 协议、内存库 CRUD/TTL 回路、偏好学习收敛、e-graph 熔合守卫、errflow、fs/进程算子、JSON 解析器（含 UTF-16 代理对）。
+325 个测试本机通过（Linux CI 另含 bash 集成测）。覆盖：解析原语、##DSL_RESULT 协议、内存库 CRUD/TTL 回路、偏好学习收敛、e-graph 熔合守卫、errflow、fs/进程算子、JSON 解析器（含 UTF-16 代理对）。
 
 ## License
 

@@ -1,0 +1,9 @@
+// Fixture B — isomorphic source/read (different name/path, same node_key)
+Pipeline("node_reuse_b", "node reuse fixture B")
+  .proc("ingest")
+    .plan(
+      p -> read(from="examples/scripts/fixtures/search_blurb.txt")
+        .tags(#file)
+    )
+  .proc("deliver")
+    .deliver(@ingest)

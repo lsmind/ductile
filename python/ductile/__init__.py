@@ -17,6 +17,8 @@ from ._ductile import (  # re-exported native functions
     pipeline_json,
     run_json,
     script_call_json,
+    hyper_similar_json,
+    hyper_nodes_json,
     cli_main,
 )
 
@@ -24,7 +26,8 @@ __version__ = _ductile.__version__
 __all__ = [
     "check", "parse", "graph", "run",
     "scripts_json", "procs_json", "runs_json", "db_stats_json",
-    "pipeline_json", "run_json", "script_call_json", "cli_main",
+    "pipeline_json", "run_json", "script_call_json",
+    "hyper_similar_json", "hyper_nodes_json", "cli_main",
     "langchain_tools", "get_tools",
     "__version__",
 ]
@@ -114,6 +117,36 @@ def langchain_tools(pipeline_dir: str = "pipelines"):
                     argv[k.strip()] = v.strip()
         return _ductile.script_call_json(name, argv)
 
+    @tool
+    def ductile_hyper_similar(query_path: str, roots: str = "") -> str:
+        """BEFORE inventing a new .hyper/.pipeline topology: WHOLE-GRAPH structural reuse.
+        query_path is a .hyper or .pipeline. roots = optional comma-separated dirs.
+        isomorphic=true → reuse_pipeline. Tags soft only."""
+        root_list = None
+        roots = (roots or "").strip()
+        if roots:
+            root_list = [r.strip() for r in roots.split(",") if r.strip()]
+        return _ductile.hyper_similar_json(query_path, root_list)
+
+    @tool
+    def ductile_node_similar(query: str = "", roots: str = "", role: str = "", op: str = "") -> str:
+        """BEFORE writing a new proc/stage: NODE-level reuse lookup (not whole workflow).
+        query = 'file.pipeline:proc' or 'file.hyper:stage' or '' when filtering by role/op.
+        roots = comma-separated dirs. role e.g. judge|source|sink|default. op e.g. llm|read|write|run.
+        Returns JSON hits with body_preview. isomorphic=true → reuse_action=reuse_node (copy that proc plan).
+        same role+op → adapt_ports. Prefer pipeline-proc hits. Never reuse on tags alone.
+        Use ductile_hyper_similar for whole-graph reuse; use this for single-node reuse."""
+        root_list = None
+        roots = (roots or "").strip()
+        if roots:
+            root_list = [r.strip() for r in roots.split(",") if r.strip()]
+        return _ductile.hyper_nodes_json(
+            query or "",
+            root_list,
+            role or None,
+            op or None,
+        )
+
     tools = [
         ductile_list_scripts,
         ductile_list_procs,
@@ -122,6 +155,8 @@ def langchain_tools(pipeline_dir: str = "pipelines"):
         ductile_recent_runs,
         ductile_run,
         ductile_call_script,
+        ductile_hyper_similar,
+        ductile_node_similar,
     ]
 
     # ── One tool per registered script contract ──────────────

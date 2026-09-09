@@ -1,0 +1,5 @@
+HyperGraph("gate_bad")
+  .vertex("a")
+  .vertex("j", role=judge)
+  .vertex("c")
+  .hedge("q", kind=gate, a, j, c)

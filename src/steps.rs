@@ -189,40 +189,111 @@ fn exec_llm(
     body: &str,
     results: &BTreeMap<String, Value>,
 ) -> Result<Value, String> {
-    let prompt = extract_string_arg("input", body);
+    // prompt= aliases input= (examples historically used prompt=)
+    let prompt_raw = {
+        let p = extract_string_arg("prompt", body);
+        if p.is_empty() {
+            extract_string_arg("input", body)
+        } else {
+            p
+        }
+    };
     let template = extract_string_arg("template", body);
+    let model = extract_string_arg("model", body);
+    let system = extract_string_arg("system", body);
+    let schema = extract_string_arg("schema", body);
     let count = extract_string_arg("count", body);
-    let resolved_prompt = resolve_vars(&prompt, topic, results);
+    let resolved_prompt = resolve_vars(&prompt_raw, topic, results);
+    let resolved_template = resolve_vars(&template, topic, results);
+    let resolved_system = resolve_vars(&system, topic, results);
+    let resolved_schema = resolve_vars(&schema, topic, results);
+    let resolved_model = resolve_vars(&model, topic, results);
+    if resolved_prompt.is_empty() {
+        return Err("llm requires prompt=\"...\" or input=\"...\"".into());
+    }
     eprintln!(
-        "    -> llm: template={}, input.len={}",
-        template,
+        "    -> llm: model={} schema={} input.len={}",
+        if resolved_model.is_empty() {
+            "(default)"
+        } else {
+            &resolved_model
+        },
+        !resolved_schema.is_empty(),
         resolved_prompt.len()
     );
 
     let bridge = find_bridge("llm_bridge.py");
-    let count_arg = if count.is_empty() { "5" } else { &count };
+    if !Path::new(&bridge).exists() {
+        return Err(format!(
+            "llm bridge not found at '{}' (place bridge/llm_bridge.py in repo or ~/.local/share/ductile/bridge/)",
+            bridge
+        ));
+    }
 
-    let output = Command::new("python3")
-        .arg(&bridge)
-        .arg(&resolved_prompt)
-        .arg(&template)
-        .arg(count_arg)
-        .output()
-        .map_err(|e| format!("llm bridge launch failed: {}", e))?;
+    let mut args: Vec<String> = Vec::new();
+    args.push("--prompt".into());
+    args.push(resolved_prompt.clone());
+    if !resolved_template.is_empty() {
+        args.push("--template".into());
+        args.push(resolved_template);
+    }
+    if !resolved_model.is_empty() {
+        args.push("--model".into());
+        args.push(resolved_model);
+    }
+    if !resolved_system.is_empty() {
+        args.push("--system".into());
+        args.push(resolved_system);
+    }
+    if !resolved_schema.is_empty() {
+        args.push("--schema".into());
+        args.push(resolved_schema);
+    }
+    if !count.is_empty() {
+        args.push("--count".into());
+        args.push(count);
+    }
+
+    let output = run_python_bridge(&bridge, &args)?;
 
     if output.status.success() {
-        Ok(Value::Text(
-            String::from_utf8_lossy(&output.stdout).to_string(),
-        ))
+        let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
+        if let Some(kvs) = parse_dsl_result_block(&stdout_text) {
+            if !kvs.is_empty() {
+                eprintln!("    -> llm result: {} fields", kvs.len());
+                return Ok(Value::Text(encode_structured_result(&kvs, &stdout_text)));
+            }
+        }
+        Ok(Value::Text(stdout_text))
     } else {
         Err(format!(
             "llm failed: {}",
             String::from_utf8_lossy(&output.stderr)
                 .chars()
-                .take(200)
+                .take(300)
                 .collect::<String>()
         ))
     }
+}
+
+/// Prefer `python3`, fall back to `python` (Windows).
+/// Injects [llm] from config.toml into child env when process env lacks OPENAI_*.
+fn run_python_bridge(
+    bridge: &str,
+    args: &[String],
+) -> Result<std::process::Output, String> {
+    let cfg = crate::config::load_llm_config();
+    for py in ["python3", "python"] {
+        let mut cmd = Command::new(py);
+        cmd.arg(bridge).args(args);
+        crate::config::apply_llm_env_from_config(&mut cmd, &cfg);
+        match cmd.output() {
+            Ok(o) => return Ok(o),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("llm bridge launch failed ({py}): {e}")),
+        }
+    }
+    Err("llm bridge launch failed: neither python3 nor python found on PATH".into())
 }
 
 fn exec_merge(
@@ -1368,6 +1439,57 @@ mod tests {
         assert!(shell_allowed());
         std::env::remove_var("DUCTILE_RESTRICT_SHELL");
         std::env::remove_var("DUCTILE_UNSAFE_SHELL");
+    }
+
+    #[test]
+    fn llm_requires_prompt_or_input() {
+        let err = exec_llm(
+            &default_impl(),
+            "t",
+            r#"llm(model="gpt-4o-mini")"#,
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert!(err.contains("prompt") || err.contains("input"), "{}", err);
+    }
+
+    #[test]
+    fn llm_prompt_alias_reaches_bridge() {
+        // Isolate from user config.toml / env so missing key is deterministic.
+        let dir = std::env::temp_dir().join(format!("ductile-llm-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let cfg_path = dir.join("config.toml");
+        std::fs::write(&cfg_path, "[llm]\napi_key = \"\"\n").unwrap();
+        let prev_cfg = std::env::var("DUCTILE_CONFIG").ok();
+        let prev_key = std::env::var("OPENAI_API_KEY").ok();
+        std::env::set_var("DUCTILE_CONFIG", &cfg_path);
+        std::env::remove_var("OPENAI_API_KEY");
+        let err = exec_llm(
+            &default_impl(),
+            "t",
+            r#"llm(prompt="ping", model="gpt-4o-mini")"#,
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+        if let Some(k) = prev_key {
+            std::env::set_var("OPENAI_API_KEY", k);
+        } else {
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+        if let Some(c) = prev_cfg {
+            std::env::set_var("DUCTILE_CONFIG", c);
+        } else {
+            std::env::remove_var("DUCTILE_CONFIG");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            err.contains("api_key")
+                || err.contains("OPENAI_API_KEY")
+                || err.contains("llm failed")
+                || err.contains("bridge"),
+            "{}",
+            err
+        );
     }
 
     // ── write 边界 ──

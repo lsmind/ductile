@@ -1,6 +1,6 @@
 # Ductile（铸渠）总体设计文档
 
-> 版本 **v0.13.1** · 2026-09-07 整理 · ~13.4k LOC / 325+ Rust 测试 · 含 v0.14 errflow
+> 版本 **v0.13.1** · 2026-09-09 整理 · ~13.4k LOC / 325+ Rust 测试 · 含 v0.14 errflow · 超图层语义定稿
 > 配套文档：README.md（产品视角）· SPEC.md（API 规格，供 AI 调用者）· docs/v0.11_decouple_spec.md · docs/v0.14_error_flow_spec.md
 
 ---
@@ -46,6 +46,7 @@
 ├────────────────────────────────────────────────────┤
 │ DSL 层  parser(~1400) / ast(~390) / typecheck      │
 │         when(~390, Interpreter 条件路由)            │
+│         hyper — 有序/类型化超图：.hyper → 投影/校验 .pipeline   │
 ├────────────────────────────────────────────────────┤
 │ 编排层  executor(~870) / ranking / eval /          │
 │         egraph(~1225, union-only 等价类+CSE) /     │
@@ -68,6 +69,34 @@
 ---
 
 ## 4. 核心机制设计
+
+### 4.0 超图层（hyper.rs — compile-time）
+
+**问题**：建图时需要「多点关系」（裁判介入、互斥备选、共现约束），但执行引擎只吃 DAG `.pipeline`。
+
+**模型**：有序/类型化关联超图 `HyperGraph(V, E)`——**不是**经典无向超图。
+
+| 要素 | 含义 |
+|------|------|
+| Vertex | 命名节点 + `role` / `tags` |
+| Hedge `chain` | 有序元组 → 投影为两两数据边 |
+| Hedge `gate` | 显式端口 `judge` / `producers` / `consumers`：producers→judge 数据；consumers 仅 `.when(@judge)` |
+| Hedge `bundle` | 共现约束；`hyper check` 强制 |
+| Hedge `xor` | slot=首成员；alts 抑制；抬高 slot `min_impls` |
+
+**投影纪律**：gate 不把 judge 塞进 consumer 的数据 `after`（避免与 when-门双重耦合）。  
+**降糖**：legacy `.stage(..., after=, gated_by=)` → vertex + 最长 chain + 显式 gate；与手写 `.hedge` 共享 `hypergraph_key`。  
+**复用**：`hyper↔hyper` 用 incidence `hypergraph_key`；对 pipeline 用 `dag_key`（`.when(@j.score)` 只计 gate 不计数据边）。坏文件扫描跳过。
+
+**约束面（能 / 不能）**
+
+| 能（compile-time） | 不能 |
+|--------------------|------|
+| 齐套 stage、数据 `@ref`、`.when(@judge)`、`min_impls`、`bundle` 共现、`require.judge`、xor 只留 slot | 运行时改图 / 自由环 / HITL |
+| 拒绝不诚实的 gate 裸成员；指导 similar 复用 | 校验 when 阈值或业务对错；禁止管线超集 proc |
+| 把拓扑意图投影成可 check 的 DAG | 解释超边、选哪条 impl、替 errflow 降级 |
+
+细节表见 SPEC §2.4b「约束面」。命令与夹具：`examples/hyper/semantics/`；回归 `hyper_semantics_drill` / `hyper_reuse_drill`。
 
 ### 4.1 声明式 DSL（.pipeline）
 
@@ -245,12 +274,13 @@ executor 巨石拆四模块（textargs/dslresult/steps/ranking，re-export 兼�
 | v0.13 | API/集成 | api.rs core+薄壳；LangChain 插件；实测端到端 |
 | v0.13.1 | 收敛 | 删 Web 前端与 serve（用户裁定）；测试 325+；文档全对齐 |
 | v0.13.1+ | 硬化 | Windows 可编译；egraph 失败语义对齐 fatal_left；typecheck 未知函数；CI |
+| v0.13.1+ | 超图层 | 有序/类型化 hedges；显式 gate；xor/bundle；key 分层；semantics drill |
 
 ## 8. 当前状态与边界
 
 - **代码**：~23 模块 ~13.4k 行；325+ Rust 测试 + 11 pytest；Linux CI
 - **制品**：二进制 `ductile`；wheel 0.13.1（PyPI badge 已对齐；远端发布视 token）
-- **明确不做**：Web 控制台（不成熟，已删可找回）；嵌入式脚本（DSL 只链接不嵌脚本，v0.12 裁定）
+- **明确不做**：Web 控制台（不成熟，已删可找回）；嵌入式脚本（DSL 只链接不嵌脚本，v0.12 裁定）；超图层运行时自由环 / HITL（编译期投影 + 多 impl 降级）
 - **平台**：Linux 一等公民（bash/`process_group`）；Windows 可编译，shell 算子需 PATH 上有 bash
-- **设计取舍备忘**：评价与流程分离是宪法级原则——任何把 cost/门槛写回 `.pipeline` 的提案都是倒退
+- **设计取舍备忘**：评价与流程分离是宪法级原则——任何把 cost/门槛写回 `.pipeline` 的提案都是倒退；超图正名「有序/类型化关联」，勿宣传为经典无向超图同构
 - **安全**：默认允许 `run`/`sh`/`spawn`（本地可信）；`DUCTILE_RESTRICT_SHELL=1` 或 `--restrict-shell` 封锁 shell；`DUCTILE_UNSAFE_SHELL=1` 可覆盖。非多租户沙箱。

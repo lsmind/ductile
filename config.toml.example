@@ -1,0 +1,13 @@
+# Ductile local config — copy to config.toml (gitignored) and fill in secrets.
+# Lookup: $DUCTILE_CONFIG > ./config.toml > ./ductile.toml >
+#         ~/.config/ductile/config.toml > ~/.local/share/ductile/config.toml
+#
+# Precedence: llm() CLI args > env OPENAI_* > this file > defaults
+
+[llm]
+# OpenAI-compatible endpoint (Ollama example below)
+base_url = "https://api.openai.com/v1"
+# base_url = "http://127.0.0.1:11434/v1"
+api_key = ""
+model = "gpt-4o-mini"
+timeout_secs = 120

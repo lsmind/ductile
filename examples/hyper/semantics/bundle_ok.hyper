@@ -1,0 +1,7 @@
+HyperGraph("bundle_ok")
+  .vertex("a", role=source)
+  .vertex("b", role=default)
+  .vertex("c", role=sink)
+  .hedge("flow", kind=chain, a, b, c)
+  .hedge("pack", kind=bundle, a, b, c)
+  .deliver(c)

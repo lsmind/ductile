@@ -1,0 +1,9 @@
+// hyper-semantics-drill.pipeline — 超图语义对照门禁
+Pipeline("hyper-semantics-drill", "gate/xor/bundle/iso/legacy semantics")
+  .proc("run")
+    .plan(
+      s -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && bash examples/scripts/hyper_semantics_drill.sh")
+        .tags(#test,#hyper)
+    )
+  .proc("deliver")
+    .deliver(@run)

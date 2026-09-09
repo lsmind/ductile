@@ -1,0 +1,15 @@
+// Ordered typed hypergraph: vertices V + hedges E (chain / explicit gate), projected to .pipeline DAG.
+// Build: ductile hyper build examples/hyper/unstructured_extract.hyper -o out.pipeline
+// Check: ductile hyper check examples/hyper/unstructured_extract.hyper examples/scripts/unstructured-extract.pipeline
+HyperGraph("unstructured_extract")
+  .goal("blurb -> title,url,topic")
+  .require(judge=true, min_impls=1)
+  .vertex("load", role=source, tags=#read,#file)
+  .vertex("extract", role=default, tags=#llm,#extract)
+  .vertex("gate", role=judge, tags=#gate)
+  .vertex("report", role=sink, tags=#write,#file)
+  // chain: ordered incidence → pairwise DAG (data path)
+  .hedge("flow", kind=chain, load, extract, report)
+  // gate: explicit ports — producers→judge data; consumers .when(@judge) only
+  .hedge("quality", kind=gate, judge=gate, producers=extract, consumers=report)
+  .deliver(report)

@@ -1,0 +1,38 @@
+#!/usr/bin/env -S ductile run
+// unstructured-extract.pipeline — 非结构化搜索摘要 → 结构化字段（对照 benches/competitors）
+// 直跑：./unstructured-extract.pipeline
+// 需要 [llm] api_key（config.toml）或 OPENAI_API_KEY；无 key 时 extract 失败可由备选 stub 降级
+Pipeline("unstructured_extract", "非结构化 blurb → title/url/topic 结构化字段")
+  .proc("load")
+    .desc("读入非结构化 fixture")
+    .plan(
+      f -> read(from="examples/scripts/fixtures/search_blurb.txt")
+        .tags(#read, #file)
+        .desc("fixture 文本")
+    )
+  .proc("extract")
+    .desc("LLM 抽取结构化字段")
+    .plan(
+      live -> llm(prompt=@load, system="你是信息抽取助手。只输出 JSON。", schema="title,url,topic,count", model="gpt-4o-mini")
+        .tags(#llm, #extract)
+        .desc("OpenAI 兼容 bridge + ##DSL_RESULT"),
+      offline -> run("printf '%s\\n' '##DSL_RESULT' 'ok=1' 'title=Transformer模型详解' 'url=https://example.com/transformer' 'topic=大模型基础设施' 'count=2' '##DSL_END'")
+        .tags(#run, #stub)
+        .desc("无 API 时的确定性降级（对照竞品离线草图）")
+    )
+  .proc("gate")
+    .desc("字段齐全才放行")
+    .plan(
+      g -> run("test -n '@extract.title' && test -n '@extract.url' && echo PASS || (echo FAIL; exit 1)")
+        .tags(#gate)
+        .desc("title/url 非空")
+    )
+  .proc("report")
+    .desc("落盘")
+    .when(@gate.score >= 80)
+    .plan(
+      w -> write(to="/tmp/unstructured_extract.txt", content="title=@extract.title url=@extract.url topic=@extract.topic gate=@gate")
+        .tags(#write, #file)
+    )
+  .proc("deliver")
+    .deliver(@report)

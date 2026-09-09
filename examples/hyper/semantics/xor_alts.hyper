@@ -1,0 +1,7 @@
+HyperGraph("xor_alts")
+  .vertex("live", role=default, tags=#llm)
+  .vertex("stub", role=default, tags=#stub)
+  .vertex("out", role=sink, tags=#write)
+  .hedge("alts", kind=xor, live, stub)
+  .hedge("flow", kind=chain, live, out)
+  .deliver(out)

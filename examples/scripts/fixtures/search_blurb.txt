@@ -1,0 +1,4 @@
+搜索结果：
+1. Transformer模型详解 - https://example.com/transformer
+2. 注意力机制原理解析 - https://example.com/attention
+相关主题：大模型基础设施

@@ -5,6 +5,7 @@
 
 pub mod api;
 pub mod ast;
+pub mod config;
 pub mod db;
 pub mod dslresult;
 pub mod egraph;
@@ -13,6 +14,7 @@ pub mod eval;
 pub mod executor;
 pub mod grow;
 pub mod harvest;
+pub mod hyper;
 pub mod learn;
 pub mod parser;
 pub mod promote;

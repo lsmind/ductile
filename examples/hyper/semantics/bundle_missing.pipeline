@@ -1,0 +1,7 @@
+Pipeline("bundle_missing_a")
+  .proc("b")
+    .plan(p -> write(to="/tmp/b.txt", content="b"))
+  .proc("c")
+    .plan(p -> write(to="/tmp/c.txt", content=@b))
+  .proc("deliver")
+    .deliver(@c)

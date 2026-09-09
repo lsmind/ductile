@@ -47,6 +47,9 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         "graph" if args.len() >= 3 => cmd_graph(&args[2]),
         "parse" if args.len() >= 3 => cmd_parse(&args[2]),
 
+        // Hyper layer — guide graph generation (compile-time), not runtime cycles
+        "hyper" if args.len() >= 3 => cmd_hyper(&args[2..]),
+
         // Database
         "import" if args.len() >= 3 => cmd_import(&args[2..]),
         "search" if args.len() >= 3 => cmd_search(&args[2]),
@@ -262,6 +265,11 @@ fn print_usage() {
     eprintln!("                         --restrict-shell blocks run/sh/spawn (or set DUCTILE_RESTRICT_SHELL=1)");
     eprintln!("  graph <file>           Show e-graph structure");
     eprintln!("  parse <file>           Parse only (show structure)");
+    eprintln!("  hyper build <f.hyper> [-o out.pipeline]  Emit pipeline from hyper layer");
+    eprintln!("  hyper check <f.hyper> <f.pipeline>       Check pipeline vs hyper constraints");
+    eprintln!("  hyper parse <f.hyper>  Show hyper stages / requires");
+    eprintln!("  hyper similar <f.hyper|f.pipeline> [--json] [dirs]  Workflow structural reuse");
+    eprintln!("  hyper nodes <f>[:node]|--role X [--op Y] [--json]  Node/proc reuse lookup");
     eprintln!();
     eprintln!("Database:");
     eprintln!("  import <dir|file>      Import pipelines into SQLite");
@@ -521,6 +529,453 @@ fn cmd_parse(path: &str) -> Result<i32, String> {
     Ok(0)
 }
 
+// ── hyper (graph-generation guide layer) ──
+
+fn cmd_hyper(args: &[String]) -> Result<i32, String> {
+    if args.is_empty() {
+        eprintln!("Usage: ductile hyper <build|check|parse> ...");
+        return Ok(1);
+    }
+    match args[0].as_str() {
+        "parse" if args.len() >= 2 => {
+            let h = hyper::parse_hyper_file(&args[1]).map_err(|e| e.to_string())?;
+            println!("HyperGraph: {}", h.name);
+            if !h.goal.is_empty() {
+                println!("Goal: {}", h.goal);
+            }
+            println!(
+                "Require: judge={} min_impls={}",
+                h.require.judge, h.require.min_impls
+            );
+            println!("Hypergraph key: {}", h.hypergraph_key());
+            println!("Vertices ({}):", h.vertices.len());
+            for v in &h.vertices {
+                let tags: Vec<String> = v.tags.iter().map(|t| format!("#{}", t)).collect();
+                println!(
+                    "  {} role={} tags=[{}]",
+                    v.name,
+                    v.role.as_str(),
+                    tags.join(",")
+                );
+            }
+            println!("Hyperedges ({}):", h.hedges.len());
+            for e in &h.hedges {
+                if e.kind == crate::hyper::HedgeKind::Gate {
+                    println!(
+                        "  {} kind=gate judge={:?} producers={:?} consumers={:?}",
+                        e.name,
+                        e.judge.as_deref().unwrap_or("?"),
+                        e.producers,
+                        e.consumers
+                    );
+                } else {
+                    println!(
+                        "  {} kind={} members={:?}",
+                        e.name,
+                        e.kind.as_str(),
+                        e.members
+                    );
+                }
+            }
+            println!("Projected DAG stages:");
+            for s in &h.stages {
+                println!(
+                    "  {} after={:?} gated_by={:?}",
+                    s.name, s.after, s.gated_by
+                );
+            }
+            if let Some(d) = &h.deliver {
+                println!("Deliver: @{}", d);
+            }
+            Ok(0)
+        }
+        "build" if args.len() >= 2 => {
+            let (out_path, hyper_path) = parse_hyper_build_args(&args[1..])?;
+            let h = hyper::parse_hyper_file(hyper_path).map_err(|e| e.to_string())?;
+            // Validate emit before write
+            let text = hyper::emit_pipeline(&h);
+            let pl = parse_pipeline(&text).map_err(|e| format!("emitted pipeline parse: {}", e))?;
+            let terrs = check_pipeline(&pl);
+            if !terrs.is_empty() {
+                eprintln!("Emitted pipeline failed typecheck:");
+                for e in &terrs {
+                    eprintln!("  {}", e);
+                }
+                return Ok(1);
+            }
+            let herrs = hyper::check_pipeline_against(&h, &pl);
+            if !herrs.is_empty() {
+                eprintln!("Emitted pipeline failed hyper check:");
+                for e in &herrs {
+                    eprintln!("  {}", e);
+                }
+                return Ok(1);
+            }
+            match out_path {
+                Some(path) => {
+                    hyper::write_pipeline_file(&h, path)?;
+                    println!("Wrote {} (from {})", path, hyper_path);
+                }
+                None => print!("{}", text),
+            }
+            Ok(0)
+        }
+        "check" if args.len() >= 3 => {
+            let h = hyper::parse_hyper_file(&args[1]).map_err(|e| e.to_string())?;
+            let pl = parse_pipeline_file(&args[2]).map_err(|e| e.to_string())?;
+            let errs = hyper::check_pipeline_against(&h, &pl);
+            if errs.is_empty() {
+                println!("Hyper check passed ({} stages)", h.stages.len());
+                Ok(0)
+            } else {
+                eprintln!("Hyper check failed:");
+                for e in &errs {
+                    eprintln!("  {}", e);
+                }
+                Ok(1)
+            }
+        }
+        "similar" if args.len() >= 2 => {
+            let (as_json, query_path, roots) = parse_hyper_similar_args(&args[1..])?;
+            if as_json {
+                let raw = hyper::similar_json(query_path, &roots)?;
+                println!("{}", raw);
+                return Ok(0);
+            }
+            let (qsig, qname) = if query_path.ends_with(".hyper") {
+                let h = hyper::parse_hyper_file(query_path).map_err(|e| e.to_string())?;
+                (hyper::struct_sig_from_hyper(&h), h.name)
+            } else if query_path.ends_with(".pipeline") {
+                let pl = parse_pipeline_file(query_path).map_err(|e| e.to_string())?;
+                (hyper::struct_sig_from_pipeline(&pl), pl.name)
+            } else {
+                return Err("hyper similar expects .hyper or .pipeline".into());
+            };
+            let scan = if roots.is_empty() {
+                vec![
+                    "examples".into(),
+                    "examples/hyper".into(),
+                    "examples/scripts".into(),
+                ]
+            } else {
+                roots
+            };
+            println!("Query: {} ({})", qname, query_path);
+            println!("Structure key: {}", qsig.structure_key());
+            println!("Scan: {:?}", scan);
+            println!("(Match key = role+edges+gates; tags are soft rank only)\n");
+            let hits = hyper::find_similar(&qsig, &qname, &scan)?;
+            let mut shown = 0;
+            for h in &hits {
+                if h.path.replace('\\', "/") == query_path.replace('\\', "/") {
+                    continue; // skip self
+                }
+                // Show structural hits and near (same roles); hide tag-only noise
+                if !h.structure_match && !h.note.starts_with("same role sequence") {
+                    continue;
+                }
+                let mark = if h.structure_match { "✓ ISO" } else { "~ near" };
+                println!(
+                    "{} [{}] {} ({})  tag_jaccard={:.2}",
+                    mark, h.kind, h.name, h.path, h.tag_jaccard
+                );
+                println!("    {}", h.note);
+                if h.structure_match {
+                    println!("    → LLM: reuse_action=reuse_pipeline  path={}", h.path);
+                } else {
+                    println!("    → LLM: reuse_action=adapt_topology  path={}", h.path);
+                }
+                shown += 1;
+                if shown >= 20 {
+                    break;
+                }
+            }
+            if shown == 0 {
+                println!("No structural reuse candidates in scan roots.");
+            }
+            Ok(0)
+        }
+        "nodes" => cmd_hyper_nodes(&args[1..]),
+        _ => {
+            eprintln!("Usage:");
+            eprintln!("  ductile hyper build <file.hyper> [-o out.pipeline]");
+            eprintln!("  ductile hyper check <file.hyper> <file.pipeline>");
+            eprintln!("  ductile hyper parse <file.hyper>");
+            eprintln!("  ductile hyper similar <file.hyper|file.pipeline> [--json] [dirs]");
+            eprintln!("  ductile hyper nodes <file>[:node] [--json] [dirs]");
+            eprintln!("  ductile hyper nodes --role judge [--op run] [--json] [dirs]");
+            Ok(1)
+        }
+    }
+}
+
+fn cmd_hyper_nodes(args: &[String]) -> Result<i32, String> {
+    let opts = parse_hyper_nodes_args(args)?;
+    let scan = if opts.roots.is_empty() {
+        vec![
+            "examples".into(),
+            "examples/hyper".into(),
+            "examples/scripts".into(),
+        ]
+    } else {
+        opts.roots.clone()
+    };
+    let filter = if opts.role.is_some() || opts.op.is_some() {
+        Some(hyper::NodeQuery {
+            role: opts.role.clone(),
+            op: opts.op.clone(),
+            in_arity: opts.in_arity,
+            gated: opts.gated,
+        })
+    } else {
+        None
+    };
+
+    if opts.as_json {
+        let raw = hyper::nodes_json(opts.query.as_deref().unwrap_or(""), &scan, filter.as_ref())?;
+        println!("{}", raw);
+        return Ok(0);
+    }
+
+    if let Some(f) = &filter {
+        if opts.query.is_none() {
+            let hits = hyper::find_nodes_by_filter(f, &scan)?;
+            println!(
+                "Node filter: role={:?} op={:?}  ({} hits)",
+                f.role, f.op, hits.len()
+            );
+            for h in hits.iter().take(30) {
+                println!(
+                    "  [{}] {}:{}  key={}  {}",
+                    h.kind, h.path, h.node_name, h.node_key, h.body_preview
+                );
+            }
+            if hits.is_empty() {
+                println!("No nodes matched.");
+            }
+            return Ok(0);
+        }
+    }
+
+    let q = opts
+        .query
+        .as_deref()
+        .ok_or_else(|| "hyper nodes needs <file>[:node] or --role/--op".to_string())?;
+    let (path, node_opt) = {
+        if let Some(i) = q.rfind(':') {
+            let (left, right) = q.split_at(i);
+            let node = &right[1..];
+            if !node.is_empty()
+                && !node.contains('/')
+                && !node.contains('\\')
+                && !node.contains('.')
+                && (left.ends_with(".pipeline") || left.ends_with(".hyper"))
+            {
+                (left, Some(node))
+            } else {
+                (q, None)
+            }
+        } else {
+            (q, None)
+        }
+    };
+
+    let targets: Vec<(String, hyper::NodeSig, String)> = if path.ends_with(".pipeline") {
+        let pl = parse_pipeline_file(path).map_err(|e| e.to_string())?;
+        let mut v = Vec::new();
+        for proc in &pl.procs {
+            if proc.deliver || proc.name == "deliver" {
+                continue;
+            }
+            if let Some(n) = node_opt {
+                if proc.name != n {
+                    continue;
+                }
+            }
+            let sig = hyper::node_sig_from_proc(proc);
+            v.push((proc.name.clone(), sig, path.to_string()));
+        }
+        if v.is_empty() {
+            return Err(format!("no matching proc in {}", path));
+        }
+        v
+    } else if path.ends_with(".hyper") {
+        let h = hyper::parse_hyper_file(path).map_err(|e| e.to_string())?;
+        let mut v = Vec::new();
+        for s in &h.stages {
+            if let Some(n) = node_opt {
+                if s.name != n {
+                    continue;
+                }
+            }
+            let sig = hyper::node_sig_from_stage(s);
+            v.push((s.name.clone(), sig, path.to_string()));
+        }
+        if v.is_empty() {
+            return Err(format!("no matching stage in {}", path));
+        }
+        v
+    } else {
+        return Err("hyper nodes expects .hyper or .pipeline".into());
+    };
+
+    for (name, sig, p) in &targets {
+        println!("Node {}:{}  key={}", p, name, sig.node_key());
+        let hits = hyper::find_similar_nodes(sig, &scan, Some((p, name)))?;
+        let mut shown = 0;
+        for h in &hits {
+            if !h.structure_match && !h.note.starts_with("same role+op") {
+                continue;
+            }
+            let mark = if h.structure_match {
+                "✓ NODE"
+            } else {
+                "~ near"
+            };
+            println!(
+                "  {} [{}] {}:{}  tag={:.2}",
+                mark, h.kind, h.path, h.node_name, h.tag_jaccard
+            );
+            println!("      {}", h.note);
+            if !h.body_preview.is_empty() {
+                println!("      body: {}", h.body_preview);
+            }
+            if h.structure_match {
+                println!("      → LLM: reuse_action=reuse_node");
+            } else {
+                println!("      → LLM: reuse_action=adapt_ports");
+            }
+            shown += 1;
+            if shown >= 15 {
+                break;
+            }
+        }
+        if shown == 0 {
+            println!("  (no node reuse candidates)");
+        }
+        println!();
+    }
+    Ok(0)
+}
+
+#[derive(Default)]
+struct HyperNodesOpts {
+    as_json: bool,
+    query: Option<String>,
+    roots: Vec<String>,
+    role: Option<String>,
+    op: Option<String>,
+    in_arity: Option<usize>,
+    gated: Option<bool>,
+}
+
+fn parse_hyper_nodes_args(args: &[String]) -> Result<HyperNodesOpts, String> {
+    let mut opts = HyperNodesOpts::default();
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--json" {
+            opts.as_json = true;
+            i += 1;
+            continue;
+        }
+        if a == "--role" {
+            opts.role = Some(
+                args.get(i + 1)
+                    .ok_or("--role needs a value")?
+                    .clone(),
+            );
+            i += 2;
+            continue;
+        }
+        if a == "--op" {
+            opts.op = Some(args.get(i + 1).ok_or("--op needs a value")?.clone());
+            i += 2;
+            continue;
+        }
+        if a == "--in" {
+            opts.in_arity = Some(
+                args.get(i + 1)
+                    .ok_or("--in needs a number")?
+                    .parse()
+                    .map_err(|_| "bad --in")?,
+            );
+            i += 2;
+            continue;
+        }
+        if a == "--gated" {
+            let v = args.get(i + 1).ok_or("--gated needs true|false")?;
+            opts.gated = Some(v == "true" || v == "1");
+            i += 2;
+            continue;
+        }
+        if opts.query.is_none() && !a.starts_with("--") {
+            if a.ends_with(".hyper")
+                || a.ends_with(".pipeline")
+                || a.contains(".pipeline:")
+                || a.contains(".hyper:")
+            {
+                opts.query = Some(a.clone());
+            } else {
+                opts.roots.push(a.clone());
+            }
+            i += 1;
+            continue;
+        }
+        if !a.starts_with("--") {
+            opts.roots.push(a.clone());
+            i += 1;
+            continue;
+        }
+        return Err(format!("unknown arg {}", a));
+    }
+    Ok(opts)
+}
+
+fn parse_hyper_build_args(args: &[String]) -> Result<(Option<&str>, &str), String> {
+    // hyper build <file.hyper> [-o out.pipeline]
+    let mut out: Option<&str> = None;
+    let mut hyper_path: Option<&str> = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "-o" || args[i] == "--output" {
+            let p = args
+                .get(i + 1)
+                .ok_or_else(|| format!("{} needs a path", args[i]))?;
+            out = Some(p.as_str());
+            i += 2;
+            continue;
+        }
+        if hyper_path.is_none() {
+            hyper_path = Some(args[i].as_str());
+            i += 1;
+            continue;
+        }
+        return Err(format!("unexpected arg {:?}", args[i]));
+    }
+    let hyper_path = hyper_path.ok_or_else(|| "hyper build needs <file.hyper>".to_string())?;
+    Ok((out, hyper_path))
+}
+
+fn parse_hyper_similar_args(args: &[String]) -> Result<(bool, &str, Vec<String>), String> {
+    let mut as_json = false;
+    let mut query: Option<&str> = None;
+    let mut roots = Vec::new();
+    for a in args {
+        if a == "--json" {
+            as_json = true;
+            continue;
+        }
+        if query.is_none() {
+            query = Some(a.as_str());
+        } else {
+            roots.push(a.clone());
+        }
+    }
+    let query = query.ok_or_else(|| "hyper similar needs <file.hyper|file.pipeline>".to_string())?;
+    Ok((as_json, query, roots))
+}
+
 // ── import ──
 
 fn cmd_import(paths: &[String]) -> Result<i32, String> {
@@ -665,13 +1120,15 @@ fn cmd_discover(file: Option<&str>) -> Result<i32, String> {
     let groups = db::isomorphic_groups();
     let all_procs = db::all_procs();
     let with_tags: Vec<&db::ProcRow> = all_procs.iter().filter(|p| !p.tags.is_empty()).collect();
-    println!("Proc Registry — Isomorphism Discovery");
+    println!("Proc Registry — Tag overlap groups (soft hint, not structural iso)");
     println!("=====================================");
     println!("\nTotal registered procs: {}", all_procs.len());
-    println!("Isomorphic groups (≥2 pipelines): {}\n", groups.len());
+    println!("Tag-identical groups (≥2 pipelines): {}\n", groups.len());
     if groups.is_empty() {
-        println!("No isomorphic groups found.");
+        println!("No tag-overlap groups found.");
+        println!("For structural reuse: ductile hyper similar <file.hyper>");
     } else {
+        println!("(Reliable reuse → ductile hyper similar; tags here are retrieval only)\n");
         for g in &groups {
             let tag_str: Vec<String> = g.tags.iter().map(|t| format!("#{}", t)).collect();
             println!("\n  {{{}}} — {} procs", tag_str.join(", "), g.members.len());

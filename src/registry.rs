@@ -1,8 +1,8 @@
 //! Registry — proc 注册 + 同构发现。
 //!
-//! 基于 tag 集合匹配：tag 集相同的 proc 视为同构。
-//! parse/run/discover 时提示用户可复用。
-//! 注册数据统一走 SQLite（db::import_pipeline 自动注册）。
+//! **Tag 集合匹配是软提示，不是可靠同构**（易撞车/漏标）。
+//! 结构性复用请用 `ductile hyper similar`（role + 边 + gate；tags 仅排序）。
+//! parse/run/discover 时仍可能提示 tag 重合，仅作检索线索。
 
 use crate::ast::*;
 use crate::db;

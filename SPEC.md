@@ -105,15 +105,23 @@ Pipeline("name", "optional description")
 |------|--------------|------|
 | `web_search` | `web_search(query="...")` | 网页搜索 |
 | `mcp_search` | `mcp_search(query="...", engine=zai)` | MCP 搜索 |
-| `llm` | `llm(input=@prev, template="...", count=5)` | LLM 调用 |
+| `llm` | `llm(prompt=@prev, model="gpt-4o-mini", system="...", schema="title,url")` | OpenAI 兼容 LLM；`prompt`/`input` 同义；`schema` 时 stdout 含 `##DSL_RESULT` |
 | `write` | `write(to="path", content=@prev)` | 写文件 |
 | `read` | `read(from="path")` | 读文件 |
 | `run` | `run("shell command")` | 执行 shell 命令 |
 | `sh` | `sh("shell command")` | run 的别名 |
 | `merge` | `merge(@a, @b, dedup)` | 合并结果（可选去重） |
-| 其他 | 原样返回 `<noop: func_name>` | 不报错 |
+| 其他 | — | 未知函数 fail-closed（硬错误，不再 `<noop>`） |
 
-`run` / `sh` 的输出如果包含 `##DSL_RESULT` 块，自动解析为结构化数据（见第 7 节）。
+`run` / `sh` / `llm`（带 `schema`）的输出如果包含 `##DSL_RESULT` 块，自动解析为结构化数据（见第 7 节）。
+
+`llm` 通过仓库内 [`bridge/llm_bridge.py`](bridge/llm_bridge.py) 调用 OpenAI 兼容 API。
+
+**配置优先级**（高→低）：`llm()` 参数（如 `model=`）→ 环境变量 `OPENAI_BASE_URL` / `OPENAI_API_KEY` / `OPENAI_MODEL` → [`config.toml`](config.toml.example) 的 `[llm]` → 内置默认。
+
+`config.toml` 查找顺序：`$DUCTILE_CONFIG` → `./config.toml` → `./ductile.toml` → `~/.config/ductile/config.toml` → `~/.local/share/ductile/config.toml`。
+
+无 key 时该 impl 失败，可走 `.plan` 备选路径。
 
 ---
 
@@ -163,6 +171,141 @@ ductile parse <file.pipeline>
 
 - 动作：仅解析，展示 AST 结构 + 同构提示
 - 不执行，不写 SQLite
+
+### 2.4b hyper（超图层 — 指导图生成）
+
+编译期元层：用**有序/类型化关联超图**声明拓扑意图与约束，**生成或校验** `.pipeline`。运行时只执行投影后的 DAG，不解释超边；与 LangGraph 式自由动态环分离。
+
+> **正名**：不是经典无向超图。边有方向/顺序与 `kind`；同构键按 incidence 规范化。
+
+```bash
+ductile hyper parse <file.hyper>                     # 看 V / E / 投影 stages / keys
+ductile hyper build <file.hyper> [-o out.pipeline]   # 发射骨架 pipeline
+ductile hyper check <file.hyper> <file.pipeline>     # 校验（含 bundle 共现、gate when、min_impls）
+ductile hyper similar <file.hyper|file.pipeline> [--json] [dirs...]
+ductile hyper nodes <file>[:node]|--role X [--op Y] [--json] [dirs]
+```
+
+分层：`.hyper` 投影 → `.pipeline` DAG → e-graph（谁跑）→ ranking/errflow（怎么跑）。
+
+#### 约束面：能做什么 / 不能做什么
+
+超图层只在**编译期**约束「图长什么样、管线是否齐套」；**不**在运行时改图、选路或判分。
+
+**能做（声明 + `hyper build` 投影 + `hyper check` 强制）**
+
+| 约束 | 机制 | 失败表现 |
+|------|------|----------|
+| 工序齐套 | 每个投影 stage 须有同名 proc | `missing proc for hyper stage` |
+| 数据依赖 | `chain` / `after` → body 或 `@ref` 须引用上游 | `should depend on … via @ref` |
+| 裁判门 | `gate` → consumer 须 `.when(@judge…)` | `should be gated_by …` |
+| 裁判存在 | `.require(judge=true)` → 须有 `role=judge` 或 gate hedge | parse / check 报错 |
+| 备选压力 | `.require(min_impls=N)`；`xor` 抬高 **slot** | `need min_impls=N` |
+| 共现 | `bundle` 成员都须出现为 proc | `bundle … requires proc` |
+| 交付 | 应有 deliver / 终端 deliver 标记 | check 软提示缺 deliver |
+| 互斥备选形状 | `xor`：只投影 slot，alts **不**进 DAG | parse 后 stages 无 alt 名 |
+| 门端口诚实 | `gate` **必须** `judge=` + `consumers=`（`producers=` 可选） | 拒绝裸成员列表 |
+| 结构复用 | `similar` / `nodes` 按 key 对齐，指导「复用勿重造」 | 非强制，agent 纪律 |
+
+**不能做（明确非目标——请用别层）**
+
+| 非目标 | 应交给 |
+|--------|--------|
+| 运行时自由环、动态加边、子图热切换 | 不支持；不是 LangGraph |
+| HITL 暂停 / 人工改道一等公民 | 产品外；可用外部编排包一层 |
+| 哪条 impl 实际跑赢、失败怎么滑 | ranking + errflow（执行期） |
+| 分数阈值、业务规则对错（`score>=80` 是否合理） | judge 脚本 / `.when` 条件本身；check **只查有没有** `@judge` when，**不**校验阈值 |
+| 禁止管线里「多出来」的 proc | check 不管超集；只要求超图 stages ⊆ pipeline |
+| 强制 tags / op / prompt / schema 内容 | tags 仅软排序；body 语义不审 |
+| 运行时解释 `.hedge` | 引擎只跑投影后的 `.pipeline` |
+| 经典无向超图同构、任意高阶关联演算 | 仅有序/类型化 incidence |
+| 用超边代替多 impl 降级 | `xor` 只抬 `min_impls`；真降级仍靠 `.plan` 多路径 |
+| 分布式调度 / 队列 / 权限沙箱 | 非本层职责 |
+
+**一句划分**：`.hyper` = 「必须有这些点、边、门、共现、备选槽」；`.pipeline` 执行 = 「在这些形状里怎么跑、怎么降级」。
+
+#### 推荐写法：`HyperGraph` + `.vertex` / `.hedge`
+
+```
+HyperGraph("unstructured_extract")
+  .goal("blurb -> title,url,topic")
+  .require(judge=true, min_impls=1)
+  .vertex("load", role=source, tags=#read,#file)
+  .vertex("extract", role=default, tags=#llm,#extract)
+  .vertex("gate", role=judge, tags=#gate)
+  .vertex("report", role=sink, tags=#write,#file)
+  .hedge("flow", kind=chain, load, extract, report)
+  .hedge("quality", kind=gate, judge=gate, producers=extract, consumers=report)
+  .deliver(report)
+```
+
+| kind | 语法 | 投影 / 校验 |
+|------|------|-------------|
+| `chain` | `.hedge("…", kind=chain, v0, v1, …)` | 有序：`v_i → v_{i+1}` 数据边 |
+| `gate` | `.hedge("…", kind=gate, judge=j, producers=a+b, consumers=c)` | `producers→judge` 数据；`consumers` **仅** `.when(@judge.score…)`（**不加** judge 进 consumer 的数据 `after`）。**禁止**裸成员列表启发式 |
+| `bundle` | `.hedge("…", kind=bundle, a, b, c)` | 不增边；`hyper check` 要求每个成员都有对应 proc |
+| `xor` | `.hedge("…", kind=xor, live, stub)` | **slot=首成员**投影为 stage；其余 alt **抑制**（不进 DAG）；slot.`min_impls` ≥ \|members\| |
+
+`producers=` / `consumers=` 多值用 `a+b` 或 `"a,b"`。
+
+| 字段 | 含义 |
+|------|------|
+| `.vertex` / `role` | `source` / `judge` / `sink` / `default`（影响骨架 body 与默认 tags） |
+| `.require(judge=)` | 必须有裁判 vertex 或 gate hedge |
+| `.require(min_impls=)` | 每投影 stage 至少 N 条 impl（xor 只额外抬高 slot） |
+| `.deliver` | 交付顶点（须在投影 stages 内） |
+
+#### 兼容写法：`.stage`（内部降糖）
+
+```
+Hyper("name")
+  .require(judge=true, min_impls=2)
+  .stage("load", role=source, tags=#read,#file)
+  .stage("extract", tags=#llm, after=load)
+  .stage("gate", role=judge, tags=#gate, after=extract)
+  .stage("report", role=sink, tags=#write, after=extract, gated_by=gate)
+  .deliver(report)
+```
+
+| 字段 | 降糖 |
+|------|------|
+| `.stage` + `after=` | → vertex；边合并为最长 `chain`（唯一后继路径） |
+| `gated_by=` | → 显式 `gate` 端口（`producers=after\{judge}`） |
+| gate 已占用的 `producers→judge` | **不再**重复成 chain，使 legacy 与显式写法共享同一 `hypergraph_key` |
+
+#### 复用匹配（给 LLM / agent）
+
+| 对比 | 键 | 说明 |
+|------|----|------|
+| `.hyper` ↔ `.hyper` | `hypergraph_key` | 投影 stage 角色计数 + typed hedges incidence |
+| 任一端为 `.pipeline` | `dag_key` | roles + 数据边 + gates；**不得**称 hypergraph iso |
+| tags | 软排序 | 同标签不同拓扑 ≠ 同构 |
+
+`similar --json` 同时给出 `dag_key` / `hypergraph_key` / `match_rule`。扫描目录时**跳过**无法解析的坏文件（不整次失败）。  
+`.when(@judge.score…)` 只计 gate，**不计** judge→consumer 数据边（与超图投影一致）。
+
+| 工具 | 粒度 | 命中后 |
+|------|------|--------|
+| `hyper similar` / `ductile_hyper_similar` | 整张图 | `reuse_pipeline` / `adapt_topology` |
+| `hyper nodes` / `ductile_node_similar` | 单节点 | `reuse_node`（含 `body_preview`）/ `adapt_ports` |
+| `list_procs`（纯 tag） | 检索 | **不得**当同构证明 |
+
+节点指纹 `node_key` = `role + op + in_arity + gated + impl_bucket`（tags 软分）。
+
+#### 示例与回归
+
+- 主示例：`examples/hyper/unstructured_extract.hyper`
+- 语义夹具：`examples/hyper/semantics/`（gate / xor / bundle / iso / legacy）
+- 复用回归：`bash examples/scripts/hyper_reuse_drill.sh`（或 `ductile run examples/scripts/hyper-reuse-drill.pipeline`）
+- 语义对照：`bash examples/scripts/hyper_semantics_drill.sh`（reuse drill 第 10 步；或 `ductile run examples/scripts/hyper-semantics-drill.pipeline`）
+
+```bash
+# 整图复用
+ductile hyper similar draft.hyper --json examples/
+# 节点复用
+ductile hyper nodes examples/scripts/unstructured-extract.pipeline:extract --json examples/
+ductile hyper nodes --role judge --op run --json examples/
+```
 
 ### 2.4 graph
 

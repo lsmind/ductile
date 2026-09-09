@@ -1,0 +1,9 @@
+// Fixture A — source/read node for hyper nodes ISO demo
+Pipeline("node_reuse_a", "node reuse fixture A")
+  .proc("load")
+    .plan(
+      p -> read(from="examples/scripts/fixtures/search_blurb.txt")
+        .tags(#read)
+    )
+  .proc("deliver")
+    .deliver(@load)

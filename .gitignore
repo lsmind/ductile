@@ -8,3 +8,5 @@ dist/
 build/
 .venv/
 .serena/
+config.toml
+ductile.toml
