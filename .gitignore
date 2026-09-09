@@ -10,3 +10,4 @@ build/
 .serena/
 config.toml
 ductile.toml
+target/ship-msg.txt
