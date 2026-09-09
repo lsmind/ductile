@@ -27,6 +27,9 @@ pub mod typecheck;
 pub mod version;
 pub mod when;
 
+pub mod canary;
+pub mod incident;
+
 pub mod cli;
 
 pub use ast::*;

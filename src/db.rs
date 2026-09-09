@@ -37,6 +37,16 @@ pub fn open() -> Connection {
     conn
 }
 
+/// 非致命版 open：打不开/没权限返回 Err（incident 记录等旁路写入用，
+/// 失败静默降级——事故记录不能反过来搞死主管线）。
+pub fn open_try() -> Result<Connection, String> {
+    let path = db_path();
+    let conn = Connection::open(&path).map_err(|e| format!("open ductile.db: {e}"))?;
+    conn.execute_batch("PRAGMA journal_mode=WAL;").ok();
+    conn.execute_batch(SCHEMA_DDL).ok();
+    Ok(conn)
+}
+
 /// 全部表结构 DDL（幂等 CREATE IF NOT EXISTS）。init_db 与测试内存库共用。
 pub const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS pipelines (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -118,7 +128,38 @@ pub const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS pipelines (
             timeout_secs INTEGER NOT NULL DEFAULT 300,
             retries     INTEGER NOT NULL DEFAULT 0,
             attached_at TEXT DEFAULT (datetime('now'))
-        );";
+        );
+        CREATE TABLE IF NOT EXISTS canaries (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            pipeline  TEXT NOT NULL,
+            proc_name TEXT NOT NULL,
+            input     TEXT NOT NULL,
+            expect    TEXT NOT NULL DEFAULT '@self.ok == 1',
+            note      TEXT DEFAULT '',
+            saved_at  TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_canaries_proc ON canaries(proc_name);
+        CREATE TABLE IF NOT EXISTS canary_runs (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            pipeline  TEXT NOT NULL,
+            proc_name TEXT NOT NULL,
+            pass      INTEGER NOT NULL,
+            detail    TEXT DEFAULT '',
+            ran_at    TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_canary_runs_proc ON canary_runs(pipeline, proc_name);
+        CREATE TABLE IF NOT EXISTS incidents (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            pipeline    TEXT NOT NULL,
+            proc_name   TEXT NOT NULL,
+            signals     TEXT NOT NULL DEFAULT '',
+            err_code    TEXT DEFAULT '',
+            evidence    TEXT DEFAULT '',
+            status      TEXT NOT NULL DEFAULT 'open',
+            created_at  TEXT DEFAULT '',
+            closed_at   TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status);";
 
 pub fn init_db() {
     let conn = open();
@@ -184,6 +225,32 @@ pub struct RunRow {
     pub recorded_at: String,
     pub rate_tokens: i64,
     pub est_loss: f64,
+}
+
+/// v0.15 incident 行（incident.rs 的查询载体）
+#[derive(Debug, Clone)]
+pub struct IncidentRow {
+    pub id: i64,
+    pub pipeline: String,
+    pub proc_name: String,
+    pub signals: String,
+    pub err_code: String,
+    pub evidence: String,
+    pub status: String,
+    pub created_at: String,
+    pub closed_at: String,
+}
+
+/// v0.15 canary 行（canary.rs 的查询载体）
+#[derive(Debug, Clone)]
+pub struct CanaryRow {
+    pub id: i64,
+    pub pipeline: String,
+    pub proc_name: String,
+    pub input: String,
+    pub expect: String,
+    pub note: String,
+    pub saved_at: String,
 }
 
 // ── Import pipeline ──

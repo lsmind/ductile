@@ -1,0 +1,20 @@
+#!/usr/bin/env -S ductile run
+// diagnose_hyper.pipeline — 狗粮诊断：hyper drill 挂点逐条定位
+// 十步 drill 逐步复跑，哪步挂了带出 step 号 + 真实错误输出
+Pipeline("diagnose_hyper", "hyper_reuse_drill 十步逐条定位挂点")
+  .proc("steps")
+    .desc("逐步复跑 drill 命令，全部走 || true 保流不死，输出带 step 标记")
+    .plan(
+      s1 -> run("cd ~/projects/ductile && BIN=target/release/ductile && { echo \"S1:$($BIN hyper parse examples/hyper/unstructured_extract.hyper 2>&1 | head -3 | tr '\\n' ' ' || echo S1-FAIL)\"; echo \"S2:$($BIN check /tmp/ductile_hyper_drill_1.pipeline 2>&1 | head -2 | tr '\\n' ' ' || echo S2-FAIL)\"; echo \"S3:$($BIN hyper check examples/hyper/unstructured_extract.hyper examples/scripts/unstructured-extract.pipeline 2>&1 | head -3 | tr '\\n' ' ' || echo S3-FAIL)\"; echo \"S4:$($BIN hyper similar /tmp/ductile_hyper_drill_1.pipeline --json /tmp 2>&1 | head -3 | tr '\\n' ' ' || echo S4-FAIL)\"; echo \"S5:$($BIN hyper nodes examples/scripts/unstructured-extract.pipeline:extract --json examples/scripts examples/hyper 2>&1 | head -3 | tr '\\n' ' ' || echo S5-FAIL)\"; echo \"S6:$($BIN hyper nodes --role judge --op run --json examples/scripts 2>&1 | head -3 | tr '\\n' ' ' || echo S6-FAIL)\"; } 2>&1")
+        .tags(#diagnose)
+        .desc("1-6 步：parse/check/similar/nodes 逐条带出首行输出")
+    )
+  .proc("runner_check")
+    .desc("嫌疑最大的入口：runner 是否把 canary/incident 路由臂挡了参数")
+    .plan(
+      r -> run("cd ~/projects/ductile && grep -n 'args\\[2\\] == \"add\"\\|args\\[2\\] == \"list\"\\|args\\[2\\] == \"parse\"' src/cli.rs | head -8; echo '---'; grep -n 'fn cmd_hyper\\|\"hyper\" =>' src/cli.rs | head -5")
+        .tags(#diagnose)
+        .desc("路由臂顺序 vs hyper 子命令参数形态")
+    )
+  .proc("deliver")
+    .deliver(@steps)

@@ -117,6 +117,20 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         }
 
         // v0.12 script contract line — 脚本即 API
+        // v0.15 canary 输入库（cognition spec §7 缺口 #2）
+        "canary" if args.len() >= 3 && args[2] == "list" => cmd_canary_list(args.get(3).map(|s| s.as_str())),
+        "canary" if args.len() >= 3 && args[2] == "add" && args.len() >= 6 => cmd_canary_add(&args[3..]),
+        "canary" if args.len() >= 3 && args[2] == "rm" && args.len() >= 4 => cmd_canary_rm(&args[3]),
+        "canary" if args.len() >= 3 && args[2] == "pass" && args.len() >= 5 => {
+            cmd_canary_pass(&args[3], &args[4])
+        }
+        // v0.15 incident 一等实体（缺口 #3）
+        "incident" if args.len() >= 3 && args[2] == "list" => {
+            cmd_incident_list(args.get(3).map(|s| s.as_str()))
+        }
+        "incident" if args.len() >= 3 && args[2] == "close" && args.len() >= 5 => {
+            cmd_incident_close(&args[3], &args[4..].join(" "))
+        }
         "script" if args.len() >= 3 && args[2] == "attach" && args.len() >= 4 => {
             cmd_script_attach(&args[3])
         }
@@ -139,6 +153,84 @@ pub fn run(args: &[String]) -> Result<i32, String> {
 }
 
 // ── v0.12 script contract line — 脚本即 API ──
+
+// ── v0.15 canary / incident CLI（cognition spec §7 缺口 #2/#3）──
+
+fn cmd_canary_list(proc_name: Option<&str>) -> Result<i32, String> {
+    let conn = db::open_try()?;
+    let rows = canary::list_canaries_conn(&conn, proc_name);
+    if rows.is_empty() {
+        println!("(no canaries{})", proc_name.map(|p| format!(" for '{p}'")).unwrap_or_default());
+        return Ok(0);
+    }
+    for r in rows {
+        let has_pass = canary::has_canary_pass_conn(&conn, &r.pipeline, &r.proc_name);
+        println!(
+            "#{} [{}] {}::{} expect=`{}` pass_record={} note={} input=`{}`",
+            r.id,
+            if has_pass { "PASS-REC" } else { "NO-REC" },
+            r.pipeline,
+            r.proc_name,
+            r.expect,
+            has_pass,
+            r.note,
+            crate::trunc_chars(&r.input, 60)
+        );
+    }
+    Ok(0)
+}
+
+/// canary add <pipeline> <proc> <input> [expect] [note]
+fn cmd_canary_add(rest: &[String]) -> Result<i32, String> {
+    if rest.len() < 3 {
+        return Err("canary add <pipeline> <proc> <input> [expect] [note...]".into());
+    }
+    let conn = db::open_try()?;
+    let expect = rest.get(3).cloned().unwrap_or_default();
+    let note = rest.get(4..).map(|v| v.join(" ")).unwrap_or_default();
+    let id = canary::add_canary_conn(&conn, &rest[0], &rest[1], &rest[2], &expect, &note)?;
+    println!("canary #{} saved (expect=`{}`)", id, canary::normalize_expect(&expect));
+    Ok(0)
+}
+
+fn cmd_canary_rm(id_str: &str) -> Result<i32, String> {
+    let id: i64 = id_str.parse().map_err(|_| format!("bad id: {id_str}"))?;
+    let n = canary::rm_canary_conn(&db::open_try()?, id)?;
+    println!("removed {n} canary");
+    Ok(0)
+}
+
+/// canary pass <pipeline> <proc> — 手动登记一次 canary 通过（真跑由
+/// canary run 子命令/工作流承担，这里先落硬门禁的通过记录面）。
+fn cmd_canary_pass(pipeline: &str, proc_name: &str) -> Result<i32, String> {
+    let conn = db::open_try()?;
+    canary::record_canary_run_conn(&conn, pipeline, proc_name, true, "manual")?;
+    println!("canary pass recorded: {pipeline}::{proc_name}");
+    Ok(0)
+}
+
+fn cmd_incident_list(status: Option<&str>) -> Result<i32, String> {
+    let rows = incident::list_incidents_conn(&db::open_try()?, status);
+    if rows.is_empty() {
+        println!("(no incidents{})", status.map(|s| format!(" [{s}]")).unwrap_or_default());
+        return Ok(0);
+    }
+    for r in rows {
+        println!(
+            "#{} [{}] {}::{} code={} signals={} at={}",
+            r.id, r.status, r.pipeline, r.proc_name, r.err_code, r.signals, r.created_at
+        );
+        println!("    {}", crate::trunc_chars(&r.evidence, 110));
+    }
+    Ok(0)
+}
+
+fn cmd_incident_close(id_str: &str, resolution: &str) -> Result<i32, String> {
+    let id: i64 = id_str.parse().map_err(|_| format!("bad id: {id_str}"))?;
+    incident::close_incident_conn(&db::open_try()?, id, resolution)?;
+    println!("incident #{id} closed: {resolution}");
+    Ok(0)
+}
 
 fn cmd_script_attach(path: &str) -> Result<i32, String> {
     let source =

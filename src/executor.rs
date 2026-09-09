@@ -448,6 +448,7 @@ fn exec_proc(
     let mut raw = match exec_proc_inner(proc, topic, params, results, pl) {
         Ok(v) => {
             if let Err(e) = check_contract(proc, &v) {
+                record_incident(pl, proc, &e);
                 return Err(e);
             }
             return Ok(v);
@@ -480,6 +481,14 @@ fn exec_proc(
         }
     }
     Err(raw)
+}
+
+/// v0.15 incident 落库（旁路写入，失败静默——事故记录不能搞死主管线）。
+fn record_incident(pl: &Pipeline, proc: &Proc, err: &str) {
+    if let Ok(conn) = crate::db::open_try() {
+        let code = errflow::classify(err).code().to_string();
+        crate::incident::record_incident_conn(&conn, &pl.name, &proc.name, &code, err, "");
+    }
 }
 
 /// v0.15 契约校验（cognition spec §7 P0）。纯函数：proc 契约 × 结果值 → Ok/Err。
@@ -595,6 +604,8 @@ fn exec_proc_inner(
                     latency_ms,
                 );
                 db::record_pref(&proc.name, &impl_.name, false);
+                // v0.15 incident 一等实体：失败信号束成事故候选落库（聚合去重）
+                record_incident(pl, proc, &err);
                 // v0.14 根因透传：最终 Err 携带最后 impl 的原始错误（非包装串），
                 // 分类层据此定 code，策略层据此决策。
                 raw_err = Some(err);

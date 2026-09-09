@@ -2474,12 +2474,20 @@ fn collect_graph_files(root: &Path, out: &mut Vec<std::path::PathBuf>) -> Result
     if !root.is_dir() {
         return Ok(());
     }
+    // v0.15 fix: 扫描根本身不可读 → Err（调用方给的是明确路径，读不到是真错误）；
+    // 但**子目录**不可读只跳过（/tmp 下 systemd-private-* 是常态，
+    // 一个权限目录毒死整条 similar 扫描 = drill [4] 挂点根因）。
     let entries = std::fs::read_dir(root).map_err(|e| format!("read_dir {}: {}", root.display(), e))?;
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name == "target" || name == ".git" || name == "node_modules" {
+                continue;
+            }
+            // 不可读子目录：跳过不递归（symlink 环与权限目录都归这类）
+            let readable = std::fs::read_dir(&p);
+            if readable.is_err() {
                 continue;
             }
             collect_graph_files(&p, out)?;
