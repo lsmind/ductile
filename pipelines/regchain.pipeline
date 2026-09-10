@@ -1,0 +1,38 @@
+// regchain.pipeline — v0.17 auto-prompt 回归链：五段全无 prompt=
+// 固化 tier_bench 五段链为仓库回归探针。llm(agent) 全部裸用（无 prompt=），
+// 走 auto-prompt 八段合成（身份/主题/上游预览/继承约束/下游/guide/错误记忆/契约）。
+// 前置：DUCTILE_CONFIG 指向含五 agent 的配置；DUCTILE_DATA 隔离数据目录。
+// 用法：DUCTILE_DATA=/tmp/regchain_data ductile run pipelines/regchain.pipeline "<中文用户故事>"
+// 门禁：m 5 个 .when 结构化字段门（must_have/modules/tickets/score/title），
+//       auto-prompt 若退化（漏上游/漏 guide/漏契约），字段缺失即断链。
+Pipeline("regchain", "auto-prompt 回归链：五段裸 agent + 结构化字段门", cwd="/tmp/regchain_data")
+
+  .proc("req", llm(req_analyst))
+    .desc("S0 需求提炼：从模糊用户故事提取结构化需求（must_have/constraints/scale/users/out_of_scope）")
+  .proc("arch", llm(architect))
+    .desc("S1 架构设计：基于结构化需求做模块划分与选型，needs_verify 标注没把握项")
+    .when(@req.must_have)
+
+  .proc("brk", llm(breaker))
+    .desc("S2 任务拆解：把架构拆成开发任务单（tickets/deps/total_est）")
+    .when(@arch.modules)
+
+  .proc("audit", llm(auditor))
+    .desc("S3 审计门：对照原始用户描述审查任务单覆盖度（score 0-100 + missing）")
+    .when(@brk.tickets)
+
+  .proc("d_req", write(to="/tmp/regchain_data/reg_req.txt", content=@req))
+    .desc("落盘 S0 产物")
+    .when(@req.must_have)
+  .proc("d_arch", write(to="/tmp/regchain_data/reg_arch.txt", content=@arch))
+    .desc("落盘 S1 产物")
+    .when(@arch.modules)
+  .proc("d_brk", write(to="/tmp/regchain_data/reg_brk.txt", content=@brk))
+    .desc("落盘 S2 产物")
+    .when(@brk.tickets)
+  .proc("m", write(to="/tmp/regchain_data/reg_audit.txt", content=@audit))
+    .desc("落盘审计产物")
+    .when(@audit.score)
+
+  .proc("deliver")
+    .deliver(@m)

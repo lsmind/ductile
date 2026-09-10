@@ -1,0 +1,33 @@
+#!/usr/bin/env -S ductile run
+// regjudge.pipeline — 回归盲评（匿名材料→独立裁判，防 auto-prompt 质量退化）
+Pipeline("regjudge", "回归盲评", cwd="/tmp/regchain_data")
+
+  .proc("mat0", read(from="/tmp/regchain_data/reg_s0.txt"))
+  .proc("j0", llm(blind_judge, prompt="{@mat0}"))
+    .desc("S0 三方盲评")
+
+  .proc("mat1", read(from="/tmp/regchain_data/reg_s1.txt"))
+    .when(@j0.scores)
+  .proc("j1", llm(blind_judge, prompt="{@mat1}"))
+    .desc("S1 三方盲评")
+
+  .proc("mat2", read(from="/tmp/regchain_data/reg_s2.txt"))
+    .when(@j1.scores)
+  .proc("j2", llm(blind_judge, prompt="{@mat2}"))
+    .desc("S2 三方盲评")
+
+  .proc("mat3", read(from="/tmp/regchain_data/reg_s3.txt"))
+    .when(@j2.scores)
+  .proc("j3", llm(blind_judge, prompt="{@mat3}"))
+    .desc("S3 三方盲评")
+
+  .proc("d0", write(to="/tmp/regchain_data/verdict_s0.txt", content=@j0))
+    .when(@j0.scores)
+  .proc("d1", write(to="/tmp/regchain_data/verdict_s1.txt", content=@j1))
+    .when(@j1.scores)
+  .proc("d2", write(to="/tmp/regchain_data/verdict_s2.txt", content=@j2))
+    .when(@j2.scores)
+  .proc("d3", write(to="/tmp/regchain_data/verdict_s3.txt", content=@j3))
+    .when(@j3.scores)
+  .proc("deliver")
+    .deliver(@d3)
