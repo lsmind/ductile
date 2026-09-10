@@ -2,22 +2,29 @@
 // unstructured-extract.pipeline — 非结构化搜索摘要 → 结构化字段（对照 benches/competitors）
 // 直跑：./unstructured-extract.pipeline
 // 需要 [llm] api_key（config.toml）或 OPENAI_API_KEY；无 key 时 extract 失败可由备选 stub 降级
-// v0.16 糖化：单 impl proc 内联糖 + tags 动词推导；extract 双路保留 .plan 箭头
+// v0.16 糖化：内联糖 + tags 动词推导 + llm agent 引用（system/schema 移入
+// [agents.extractor]，model 缺省回落 [llm]）；gate 改 .when 引擎内求值
+// （旧 test -n '@extract.title' 是 LLM 输出进 bash——AGENTS.md 铁律 #7 违反）
 Pipeline("unstructured_extract", "非结构化 blurb → title/url/topic 结构化字段")
   .proc("load", read(from="examples/scripts/fixtures/search_blurb.txt"))
     .desc("读入非结构化 fixture")
   .proc("extract")
     .desc("LLM 抽取结构化字段")
     .plan(
-      live -> llm(prompt=@load, system="你是信息抽取助手。只输出 JSON。", schema="title,url,topic,count", model="gpt-4o-mini").tags(#extract)
-        .desc("OpenAI 兼容 bridge + ##DSL_RESULT"),
+      live -> llm(extractor, prompt=@load)
+        .desc("agent=extractor：system/schema 来自 [agents.extractor]，##DSL_RESULT 结构化"),
       offline -> run("printf '%s\\n' '##DSL_RESULT' 'ok=1' 'title=Transformer模型详解' 'url=https://example.com/transformer' 'topic=大模型基础设施' 'count=2' '##DSL_END'").tags(#stub)
         .desc("无 API 时的确定性降级（对照竞品离线草图）")
     )
-  .proc("gate", run("test -n '@extract.title' && test -n '@extract.url' && echo PASS || (echo FAIL; exit 1)").tags(#gate))
-    .desc("字段齐全才放行 — title/url 非空")
-  .proc("report", write(to="/tmp/unstructured_extract.txt", content="title=@extract.title url=@extract.url topic=@extract.topic gate=@gate"))
+  .proc("gate")
+    .desc("字段齐全才放行 — title/url 非空（.when 引擎内求值，fail-closed）")
+    .plan(
+      check -> run("printf '%s\n' '##DSL_RESULT' 'ok=1' '##DSL_END'")
+        .when(@extract.title)
+        .when(@extract.url)
+    )
+  .proc("report", write(to="/tmp/unstructured_extract.txt", content="title=@extract.title url=@extract.url topic=@extract.topic gate=@gate.ok"))
     .desc("落盘")
-    .when(@gate.score >= 80)
+    .when(@gate.ok == 1)
   .proc("deliver")
     .deliver(@report)
