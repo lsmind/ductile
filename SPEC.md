@@ -81,6 +81,22 @@ Pipeline("name", "optional description", cwd="...", env=["K=V", ...])
 >    （有界 Reroute）；阶梯耗尽 → 汇总错误。`model=` 实参完全旁路阶梯（探测
 >    场景）。阶梯引用未定义档位 / `tier=` 不在阶梯内 → 硬错误（fail-closed）。
 >    结果自动附 `meta_tier`/`meta_model_id` 字段。档位是语义能力级，非裸模型名。
+> 6. **auto-prompt 认知上下文合成（v0.17）**：`llm(agent)` 不写 `prompt=` 时，
+>    引擎按节点在图中的位置/属性/功能自动合成 prompt（认知上下文管理，
+>    cognition spec §4 pull 模型）。八段结构：**身份**（管线+节点+desc）→
+>    **主题**（topic 原文）→ **上游输入**（refs/.when 引用的上游 §§FIELDS§§
+>    字段预览，值截断 200 字符，RAW 不进，最多 8 个）→ **继承约束**（本节点
+>    `.when` 门禁 + 上游契约 outputs/invariants）→ **下游消费者**（引用本节点
+>    的后续节点——产出粒度为它们负责）→ **开放动作**（`[agents.x]` 新增
+>    `guide` 字段：检索方式/命令/示例）→ **错误记忆**（同节点 open incidents
+>    指针卡：id+信号+证据摘要，最近 3 条；pull 模型，全文 `ductile incident`
+>    展开）→ **输出契约**（schema 字段+示例 JSON）。历史统计（近 20 次 runs
+>    成功率/时延带）≥3 条时注入（L3 冷启动只记不判）。无 agent 或无身份
+>    信息（desc/system 全空）→ 硬错误（fail-closed，合成器是糖不是承重墙）。
+>    `[models.x]` 新增 `max_tokens`（思考型模型预算，显式值覆盖
+>    OPENAI_MAX_TOKENS）。示例：`/tmp` 探针 `autoprompt_probe.pipeline`。
+>    e2e 实测：中文场景产出直接引用用户原话痛点，隐含约束全捕获——
+>    盲评中"英文 system 干中文活"的 10+ 分坑被自动填平。
 >
 > **v0.11 退役语法**（仍可解析但警告+忽略，不入 AST）：`.cost(latency=..., ...)`、
 > `.ensure(result => ..., "...")`、`.check(result => ..., "...")`。
