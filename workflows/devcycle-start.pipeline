@@ -2,19 +2,16 @@
 // workflows/devcycle-start.pipeline — 从用户指令到 agent handoff（编码前）
 // 用法：ductile run workflows/devcycle-start.pipeline "用户自然语言指令"
 // 产出：target/devcycle/plan.md + handoff.md；有 LLM 则结构化抽取，否则 stub
-// v0.16 糖化：内联糖 + 管线 cwd（ROOT= 前缀消失，相对路径锚到仓库根）
+// v0.16 糖化：内联糖 + 管线 cwd + llm agent 引用（system/schema 移入
+// ~/.config/ductile/config.toml [agents.planner]，DSL 只写角色名）
 Pipeline("devcycle_start", "指令→计划→预检→handoff 落盘", cwd="${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)}")
   .proc("intake", run("mkdir -p target/devcycle && printf '%s\n' '{topic}' > target/devcycle/instruction.txt && cat target/devcycle/instruction.txt").tags(#intent))
     .desc("固化指令；输出=指令原文（cat 落盘文件，不走 echo 引号解析）")
   .proc("plan")
     .desc("结构化计划（LLM 优先，stub 兜底）")
     .plan(
-      live -> llm(
-        prompt=@intake,
-        system="你是 ductile 仓库工程助手。把用户指令收成短计划。commit_msg 用中文或英文 feat/fix/docs 前缀，一行。needs_hyper/needs_docs 填 true 或 false。",
-        schema="summary,kind,commit_msg,needs_hyper,needs_docs,touch_hint,risks"
-      )
-        .desc("结构化抽取"),
+      live -> llm(planner, prompt=@intake)
+        .desc("agent=planner：system/schema 来自 config.toml [agents.planner]"),
       stub -> run("printf '%s\n' '##DSL_RESULT' 'summary=stub-plan-from-topic' 'kind=feat' \"commit_msg={topic}\" 'needs_hyper=false' 'needs_docs=true' 'touch_hint=see-git-status' 'risks=no-llm-config' '##DSL_END'")
         .tags(#stub)
         .desc("无 API 时本地计划（不 echo @ref——topic 引号不进 bash）")
