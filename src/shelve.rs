@@ -70,7 +70,9 @@ pub fn resolve_shelved_conn(conn: &Connection, id: i64, resolution: &str) -> Res
         )
         .map_err(|_| format!("shelved #{id} not found"))?;
     if status != "open" {
-        return Err(format!("shelved #{id} already resolved — verdicts are immutable"));
+        return Err(format!(
+            "shelved #{id} already resolved — verdicts are immutable"
+        ));
     }
     let now = now_str();
     let n = conn
@@ -123,7 +125,10 @@ pub fn list_shelved_conn(conn: &Connection, status: Option<&str>) -> Vec<Shelved
 pub fn render_shelved_conn(conn: &Connection, status: Option<&str>) -> String {
     let rows = list_shelved_conn(conn, status);
     if rows.is_empty() {
-        return format!("(no shelved items{})", status.map(|s| format!(" [{s}]")).unwrap_or_default());
+        return format!(
+            "(no shelved items{})",
+            status.map(|s| format!(" [{s}]")).unwrap_or_default()
+        );
     }
     let mut out = String::new();
     for r in rows {
@@ -151,7 +156,8 @@ mod tests {
 
     fn mem() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(include_str!("shelve_schema.sql")).unwrap();
+        conn.execute_batch(include_str!("shelve_schema.sql"))
+            .unwrap();
         conn
     }
 
@@ -170,7 +176,14 @@ mod tests {
     #[test]
     fn ambiguous_shelves_and_resolves() {
         let conn = mem();
-        let id = shelve_conn(&conn, "p", "node", "ambiguous canary rate 0.5", "canary 1/2 pass").unwrap();
+        let id = shelve_conn(
+            &conn,
+            "p",
+            "node",
+            "ambiguous canary rate 0.5",
+            "canary 1/2 pass",
+        )
+        .unwrap();
         let rows = list_shelved_conn(&conn, Some("open"));
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].reason, "ambiguous canary rate 0.5");

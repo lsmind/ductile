@@ -369,7 +369,7 @@ mod tests {
                         ..default_impl()
                     }],
                     checks: vec![],
-                contract: Default::default(),
+                    contract: Default::default(),
                     deliver: false,
                     deliver_refs: vec![],
                     foreach: None,
@@ -385,7 +385,7 @@ mod tests {
                         ..default_impl()
                     }],
                     checks: vec![],
-                contract: Default::default(),
+                    contract: Default::default(),
                     deliver: false,
                     deliver_refs: vec![],
                     foreach: None,

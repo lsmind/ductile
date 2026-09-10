@@ -9,10 +9,10 @@ use crate::db;
 use crate::egraph;
 use crate::errflow;
 use crate::ranking::rank_impls_named;
-use crate::steps::PipelineCtx;
 pub use crate::ranking::ImplPrefs;
 pub use crate::steps::exec_script_call;
 pub use crate::steps::known_functions;
+use crate::steps::PipelineCtx;
 use crate::steps::{is_probe_stub, step_registry};
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
@@ -427,7 +427,10 @@ pub fn exec_pipeline(
         // v0.15 L4 复核（log-only；enforcing 时 fail verdict 升格为管线失败）
         if let Some(l4_err) = l4_finalize(&pl, &results, Some(&root_msg)) {
             return ExecResult::Failed {
-                error: format!("critical proc '{}' failed: {}; {}", fatal_proc, root_msg, l4_err),
+                error: format!(
+                    "critical proc '{}' failed: {}; {}",
+                    fatal_proc, root_msg, l4_err
+                ),
                 partial: results,
             };
         }
@@ -458,6 +461,10 @@ fn exec_proc(
     results: &BTreeMap<String, Value>,
     pl: &Pipeline,
 ) -> Result<Value, String> {
+    // v0.17 auto-prompt：per-proc 图上下文中继（PipelineCtx 同款 thread_local）。
+    // exec_llm 在 steps 层拿不到 Pipeline/Proc——穿签名会动 StepFn 全家，
+    // 中继与 cwd/env 方案一致（不进全局 env，无并行竞态）。
+    let _node_guard = crate::steps::NodeCtx::set(pl, proc);
     // Handle foreach
     if let Some(ref src) = proc.foreach {
         return exec_foreach_proc(proc, src, topic, params, results, pl);
@@ -522,13 +529,21 @@ fn record_incident(pl: &Pipeline, proc: &Proc, err: &str) {
 /// DUCTILE_L4=1 开启；Success→pass（deliver 摘要），Failed→fail（致命错误）。
 /// 旁路写入（open_try 失败静默）——复核记录不能搞死主管线。
 /// enforcing 阶段（≥8 标签且一致率≥70%）升格：fail verdict 回写为 pipeline 错误。
-fn l4_finalize(pl: &Pipeline, results: &BTreeMap<String, Value>, fatal: Option<&str>) -> Option<String> {
+fn l4_finalize(
+    pl: &Pipeline,
+    results: &BTreeMap<String, Value>,
+    fatal: Option<&str>,
+) -> Option<String> {
     // cfg!(test) 守卫：cargo test 继承 shell 的 DUCTILE_L4=1 时曾把单测的
     // exec_pipeline 复核写进真库（环境泄漏脚枪）
     if cfg!(test) {
         return None;
     }
-    if std::env::var("DUCTILE_L4").map(|v| v == "1").unwrap_or(false) != true {
+    if std::env::var("DUCTILE_L4")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+        != true
+    {
         return None;
     }
     let Ok(conn) = crate::db::open_try() else {
@@ -544,22 +559,37 @@ fn l4_finalize(pl: &Pipeline, results: &BTreeMap<String, Value>, fatal: Option<&
     let deliver_summary: String = results
         .iter()
         .filter(|(k, _)| deliver_target.contains(k))
-        .map(|(k, v)| format!("{}: {}", k, v.as_text().chars().take(200).collect::<String>()))
+        .map(|(k, v)| {
+            format!(
+                "{}: {}",
+                k,
+                v.as_text().chars().take(200).collect::<String>()
+            )
+        })
         .collect::<Vec<_>>()
         .join(" | ");
     let (verdict, evidence) = match fatal {
-        Some(msg) => ("fail", format!("critical: {}", msg.chars().take(200).collect::<String>())),
-        None => ("pass", if deliver_summary.is_empty() {
-            "no deliver proc; all procs completed".to_string()
-        } else {
-            deliver_summary.chars().take(200).collect::<String>()
-        }),
+        Some(msg) => (
+            "fail",
+            format!("critical: {}", msg.chars().take(200).collect::<String>()),
+        ),
+        None => (
+            "pass",
+            if deliver_summary.is_empty() {
+                "no deliver proc; all procs completed".to_string()
+            } else {
+                deliver_summary.chars().take(200).collect::<String>()
+            },
+        ),
     };
     let _ = crate::l4::record_review_conn(&conn, &pl.name, verdict, &evidence, None);
     eprintln!("  [l4] review recorded: {} (log-only)", verdict);
     // enforcing 阶段：fail verdict 不再容忍
     if verdict == "fail" && crate::l4::phase_for_conn(&conn) == crate::l4::L4Phase::Enforcing {
-        return Some(format!("L4 enforcing: end-to-end review failed — {}", evidence));
+        return Some(format!(
+            "L4 enforcing: end-to-end review failed — {}",
+            evidence
+        ));
     }
     None
 }

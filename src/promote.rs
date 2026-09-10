@@ -295,4 +295,3 @@ mod tests {
         assert_ne!(t2, "cargo");
     }
 }
-

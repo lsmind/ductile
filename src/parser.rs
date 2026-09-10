@@ -143,7 +143,10 @@ fn parse_header_kv(line: &str) -> (Option<String>, Vec<String>) {
     (cwd, env)
 }
 
-fn parse_header(line: &str, line_num: usize) -> Result<(String, String, Option<String>, Vec<String>), ParseError> {
+fn parse_header(
+    line: &str,
+    line_num: usize,
+) -> Result<(String, String, Option<String>, Vec<String>), ParseError> {
     let lower: String = line.to_lowercase();
     if lower.trim_start().starts_with("pipeline(") || lower.trim_start().starts_with("pipeline (") {
         // OK
@@ -428,7 +431,10 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
                     }
                 }
             }
-            contract = Some(crate::ast::Contract { outputs, invariants });
+            contract = Some(crate::ast::Contract {
+                outputs,
+                invariants,
+            });
             idx += 1;
             continue;
         }
@@ -563,7 +569,7 @@ fn split_kv_args(inner: &str) -> Vec<(String, String)> {
         }
         let key: String = chars[kstart..i].iter().collect();
         i += 1; // past '='
-        // skip spaces
+                // skip spaces
         while i < chars.len() && chars[i] == ' ' {
             i += 1;
         }
@@ -688,7 +694,8 @@ fn parse_plan_block(
         return Err(ParseError {
             line: idx,
             col: 1,
-            msg: "unbalanced quotes inside .plan(...) — a DSL string literal is never closed".into(),
+            msg: "unbalanced quotes inside .plan(...) — a DSL string literal is never closed"
+                .into(),
             line_text: lines[idx.saturating_sub(1)].to_string(),
         });
     }
@@ -1873,8 +1880,15 @@ mod prim_tests {
         let route = &pl.procs[0];
         assert_eq!(route.plan.len(), 1);
         // body 必须完整到达 esac，未被字符串内的 ) 截断
-        assert!(route.plan[0].body_text.contains("esac"), "body truncated: {:?}", route.plan[0].body_text);
-        assert!(route.plan[0].body_text.contains("*)"), "case wildcard arm lost");
+        assert!(
+            route.plan[0].body_text.contains("esac"),
+            "body truncated: {:?}",
+            route.plan[0].body_text
+        );
+        assert!(
+            route.plan[0].body_text.contains("*)"),
+            "case wildcard arm lost"
+        );
     }
 
     #[test]
@@ -1900,14 +1914,18 @@ mod prim_tests {
     fn contract_card_unknown_key_is_hard_error() {
         let src = "Pipeline(\"t\")\n  .proc(\"p\")\n    .plan(x -> run(\"echo ok\"))\n    .contract(bogus=\"x\")\n";
         let err = parse_pipeline(src).unwrap_err();
-        assert!(err.msg.contains("unknown .contract() key"), "got: {}", err.msg);
+        assert!(
+            err.msg.contains("unknown .contract() key"),
+            "got: {}",
+            err.msg
+        );
     }
 
     #[test]
     fn contract_check_l1_missing_field_and_l2_invariant() {
         // executor::check_contract 纯函数级：L1 缺字段 / L2 谓词违例 / 全通过
-        use crate::executor::check_contract;
         use crate::ast::Contract;
+        use crate::executor::check_contract;
         let mk = |outputs: Vec<&str>, invariants: Vec<&str>| crate::ast::Proc {
             name: "p".into(),
             description: String::new(),
@@ -1981,7 +1999,11 @@ mod prim_tests {
         let imp = &pl.procs[0].plan[0];
         assert_eq!(imp.when.as_deref(), Some("@gen.score < 80"));
         // 裁判 @ref 并入 refs（egraph 建边依赖）
-        assert!(imp.refs.contains(&"gen".to_string()), "refs: {:?}", imp.refs);
+        assert!(
+            imp.refs.contains(&"gen".to_string()),
+            "refs: {:?}",
+            imp.refs
+        );
     }
 
     #[test]
@@ -2002,7 +2024,10 @@ mod prim_tests {
         // 未知动词 → 不激活（fail-closed 交给执行层报错，不产生幽灵 impl）
         let src = "Pipeline(\"t\")\n  .proc(\"p\", bogus_verb(\"x\"))\n";
         let pl = parse_pipeline(src).unwrap();
-        assert!(pl.procs[0].plan.is_empty(), "should not desugar unknown verb");
+        assert!(
+            pl.procs[0].plan.is_empty(),
+            "should not desugar unknown verb"
+        );
         // 箭头形态 → 留给 .plan 语义
         let src2 = "Pipeline(\"t\")\n  .proc(\"p\", a -> run(\"echo x\"))\n";
         let pl2 = parse_pipeline(src2).unwrap();

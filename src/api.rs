@@ -554,7 +554,10 @@ pub fn script_call_json(name: &str, args: Option<BTreeMap<String, String>>) -> P
 }
 
 /// Structural reuse lookup for LLM graph builders (`hyper similar --json`).
-pub fn hyper_similar_json_core(query_path: &str, roots: Option<Vec<String>>) -> Result<String, String> {
+pub fn hyper_similar_json_core(
+    query_path: &str,
+    roots: Option<Vec<String>>,
+) -> Result<String, String> {
     let roots = roots.unwrap_or_default();
     crate::hyper::similar_json(query_path, &roots)
 }

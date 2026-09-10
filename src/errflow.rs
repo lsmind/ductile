@@ -108,9 +108,9 @@ const PAT_CONTRACT: &[&str] = &[
     "protected root",
     "param '",
     "contract violation", // v0.15 节点契约卡（executor::check_contract）——L1 缺字段/L2 谓词违例
-    // "param '" 较宽，但 contract 在判定链首位且与 not in contract/missing required
-    // 同现——引擎真实输出是 "param 'x' not in contract of 'y'"，
-    // 外部脚本错误几乎不会以 "param '" 开头形态出现。见 contract_param_quote_pattern 测试。
+                          // "param '" 较宽，但 contract 在判定链首位且与 not in contract/missing required
+                          // 同现——引擎真实输出是 "param 'x' not in contract of 'y'"，
+                          // 外部脚本错误几乎不会以 "param '" 开头形态出现。见 contract_param_quote_pattern 测试。
 ];
 
 const PAT_TIMEOUT: &[&str] = &["timed out", "timeouterror", "timeout expired"];

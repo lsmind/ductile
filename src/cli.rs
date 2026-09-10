@@ -118,9 +118,15 @@ pub fn run(args: &[String]) -> Result<i32, String> {
 
         // v0.12 script contract line — 脚本即 API
         // v0.15 canary 输入库（cognition spec §7 缺口 #2）
-        "canary" if args.len() >= 3 && args[2] == "list" => cmd_canary_list(args.get(3).map(|s| s.as_str())),
-        "canary" if args.len() >= 3 && args[2] == "add" && args.len() >= 6 => cmd_canary_add(&args[3..]),
-        "canary" if args.len() >= 3 && args[2] == "rm" && args.len() >= 4 => cmd_canary_rm(&args[3]),
+        "canary" if args.len() >= 3 && args[2] == "list" => {
+            cmd_canary_list(args.get(3).map(|s| s.as_str()))
+        }
+        "canary" if args.len() >= 3 && args[2] == "add" && args.len() >= 6 => {
+            cmd_canary_add(&args[3..])
+        }
+        "canary" if args.len() >= 3 && args[2] == "rm" && args.len() >= 4 => {
+            cmd_canary_rm(&args[3])
+        }
         "canary" if args.len() >= 3 && args[2] == "pass" && args.len() >= 5 => {
             cmd_canary_pass(&args[3], &args[4])
         }
@@ -176,7 +182,10 @@ fn cmd_canary_list(proc_name: Option<&str>) -> Result<i32, String> {
     let conn = db::open_try()?;
     let rows = canary::list_canaries_conn(&conn, proc_name);
     if rows.is_empty() {
-        println!("(no canaries{})", proc_name.map(|p| format!(" for '{p}'")).unwrap_or_default());
+        println!(
+            "(no canaries{})",
+            proc_name.map(|p| format!(" for '{p}'")).unwrap_or_default()
+        );
         return Ok(0);
     }
     for r in rows {
@@ -205,7 +214,11 @@ fn cmd_canary_add(rest: &[String]) -> Result<i32, String> {
     let expect = rest.get(3).cloned().unwrap_or_default();
     let note = rest.get(4..).map(|v| v.join(" ")).unwrap_or_default();
     let id = canary::add_canary_conn(&conn, &rest[0], &rest[1], &rest[2], &expect, &note)?;
-    println!("canary #{} saved (expect=`{}`)", id, canary::normalize_expect(&expect));
+    println!(
+        "canary #{} saved (expect=`{}`)",
+        id,
+        canary::normalize_expect(&expect)
+    );
     Ok(0)
 }
 
@@ -228,7 +241,10 @@ fn cmd_canary_pass(pipeline: &str, proc_name: &str) -> Result<i32, String> {
 fn cmd_incident_list(status: Option<&str>) -> Result<i32, String> {
     let rows = incident::list_incidents_conn(&db::open_try()?, status);
     if rows.is_empty() {
-        println!("(no incidents{})", status.map(|s| format!(" [{s}]")).unwrap_or_default());
+        println!(
+            "(no incidents{})",
+            status.map(|s| format!(" [{s}]")).unwrap_or_default()
+        );
         return Ok(0);
     }
     for r in rows {
@@ -286,7 +302,9 @@ fn cmd_l4_review(pipeline: &str, verdict: &str, evidence: &str) -> Result<i32, S
     let phase = l4::phase_for_conn(&conn);
     println!(
         "l4 review #{} recorded [{}] phase={} (log-only 阶段不拦截)",
-        id, verdict, phase.as_str()
+        id,
+        verdict,
+        phase.as_str()
     );
     Ok(0)
 }
@@ -756,10 +774,7 @@ fn cmd_hyper(args: &[String]) -> Result<i32, String> {
             }
             println!("Projected DAG stages:");
             for s in &h.stages {
-                println!(
-                    "  {} after={:?} gated_by={:?}",
-                    s.name, s.after, s.gated_by
-                );
+                println!("  {} after={:?} gated_by={:?}", s.name, s.after, s.gated_by);
             }
             if let Some(d) = &h.deliver {
                 println!("Deliver: @{}", d);
@@ -851,7 +866,11 @@ fn cmd_hyper(args: &[String]) -> Result<i32, String> {
                 if !h.structure_match && !h.note.starts_with("same role sequence") {
                     continue;
                 }
-                let mark = if h.structure_match { "✓ ISO" } else { "~ near" };
+                let mark = if h.structure_match {
+                    "✓ ISO"
+                } else {
+                    "~ near"
+                };
                 println!(
                     "{} [{}] {} ({})  tag_jaccard={:.2}",
                     mark, h.kind, h.name, h.path, h.tag_jaccard
@@ -919,7 +938,9 @@ fn cmd_hyper_nodes(args: &[String]) -> Result<i32, String> {
             let hits = hyper::find_nodes_by_filter(f, &scan)?;
             println!(
                 "Node filter: role={:?} op={:?}  ({} hits)",
-                f.role, f.op, hits.len()
+                f.role,
+                f.op,
+                hits.len()
             );
             for h in hits.iter().take(30) {
                 println!(
@@ -1057,11 +1078,7 @@ fn parse_hyper_nodes_args(args: &[String]) -> Result<HyperNodesOpts, String> {
             continue;
         }
         if a == "--role" {
-            opts.role = Some(
-                args.get(i + 1)
-                    .ok_or("--role needs a value")?
-                    .clone(),
-            );
+            opts.role = Some(args.get(i + 1).ok_or("--role needs a value")?.clone());
             i += 2;
             continue;
         }
@@ -1149,7 +1166,8 @@ fn parse_hyper_similar_args(args: &[String]) -> Result<(bool, &str, Vec<String>)
             roots.push(a.clone());
         }
     }
-    let query = query.ok_or_else(|| "hyper similar needs <file.hyper|file.pipeline>".to_string())?;
+    let query =
+        query.ok_or_else(|| "hyper similar needs <file.hyper|file.pipeline>".to_string())?;
     Ok((as_json, query, roots))
 }
 
@@ -1740,8 +1758,7 @@ mod tests {
 
     #[test]
     fn run_args_restrict_shell_flag() {
-        let (topic, policy, restrict) =
-            split_run_args(&s(&["hello", "--restrict-shell"])).unwrap();
+        let (topic, policy, restrict) = split_run_args(&s(&["hello", "--restrict-shell"])).unwrap();
         assert_eq!(topic, "hello");
         assert!(policy.is_none());
         assert!(restrict);

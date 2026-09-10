@@ -148,7 +148,7 @@ pub fn extract_first_bare_arg(body: &str) -> Option<String> {
         return None;
     }
     i += 1; // past '('
-    // 跳过空白
+            // 跳过空白
     while i < chars.len() && chars[i].is_whitespace() {
         i += 1;
     }
@@ -392,7 +392,10 @@ mod tests {
     #[test]
     fn first_bare_arg_none_for_kv_or_quoted() {
         // 首参 k=v → None
-        assert_eq!(extract_first_bare_arg("llm(prompt=\"hi\", model=\"x\")"), None);
+        assert_eq!(
+            extract_first_bare_arg("llm(prompt=\"hi\", model=\"x\")"),
+            None
+        );
         // 首参引号串 → None
         assert_eq!(extract_first_bare_arg("llm(\"plain prompt\")"), None);
         // 空 → None

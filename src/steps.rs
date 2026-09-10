@@ -137,7 +137,6 @@ fn windows_bash_candidates() -> Vec<PathBuf> {
 // Pipeline(..., cwd="...", env=["K=V"]) 的 thread_local 中继。
 // exec_pipeline 入口 set（guard Drop 清理），steps 层 Command 构造时读取。
 // 不进全局 env（并行测试竞态），不穿签名（StepFn 面太广）。
-
 use std::cell::RefCell;
 
 thread_local! {
@@ -150,6 +149,352 @@ struct PipelineCtxInner {
 }
 
 pub struct PipelineCtx;
+
+/// v0.17 auto-prompt 的 per-proc 上下文中继：exec_proc 进门 set，
+/// exec_llm 合成 prompt 时读。guard Drop 清理（递归 exec_pipeline 安全）。
+pub struct NodeCtxGuard;
+
+impl Drop for NodeCtxGuard {
+    fn drop(&mut self) {
+        NODE_CTX.with(|c| *c.borrow_mut() = None);
+    }
+}
+
+thread_local! {
+    static NODE_CTX: RefCell<Option<NodeCtxInner>> = const { RefCell::new(None) };
+}
+
+struct NodeCtxInner {
+    pipeline_name: String,
+    pipeline_desc: String,
+    proc_name: String,
+    proc_desc: String,
+    /// 本 proc 声明序之前、且被本 proc（或其 .when）引用过的上游 proc 集合。
+    upstream_summaries: Vec<(String, String)>, // (name, desc)
+    /// 本 proc 全部 impl 的 .when 条件（继承约束段用）。
+    when_conds: Vec<String>,
+    /// 上游契约（outputs/invariants）。
+    upstream_contracts: Vec<String>,
+    /// 下游消费者（引用本 proc 的后续节点）——位置信息：你的产出给谁用。
+    downstream: Vec<String>,
+}
+
+pub struct NodeCtx;
+
+impl NodeCtx {
+    /// exec_proc 入口调用；guard Drop 清理。所有字符串预提取（inner 不借引用，
+    /// 生命周期与 guard 绑定，无悬垂）。
+    pub fn set(pl: &crate::ast::Pipeline, proc: &crate::ast::Proc) -> NodeCtxGuard {
+        let refs_set: std::collections::BTreeSet<String> = proc
+            .plan
+            .iter()
+            .flat_map(|i| i.refs.iter().cloned())
+            .collect();
+        // .when 里的 @ref 也算上游（门禁引用即数据依赖）
+        let mut upstream = Vec::new();
+        for p in &pl.procs {
+            if p.name == proc.name {
+                break;
+            }
+            if refs_set.contains(&p.name) || when_refs(&p, &proc.plan) {
+                upstream.push((p.name.clone(), p.description.clone()));
+            }
+        }
+        let upstream_contracts = pl
+            .procs
+            .iter()
+            .take_while(|p| p.name != proc.name)
+            .filter(|p| refs_set.contains(&p.name))
+            .flat_map(|p| {
+                let mut v = Vec::new();
+                if !p.contract.outputs.is_empty() {
+                    v.push(format!(
+                        "上游「{}」契约要求输出字段：{}",
+                        p.name,
+                        p.contract.outputs.join(", ")
+                    ));
+                }
+                for inv in &p.contract.invariants {
+                    v.push(format!("上游「{}」不变式：{}", p.name, inv));
+                }
+                v
+            })
+            .collect();
+        let when_conds = proc
+            .plan
+            .iter()
+            .filter_map(|i| i.when.clone())
+            .filter(|w| !w.trim().is_empty())
+            .collect();
+        // 下游消费者：声明序在本 proc 之后、refs/when 引用本 proc 的节点。
+        // 位置语义：你的产出是它们的上游——字段稳定性和粒度要为它们负责。
+        let downstream: Vec<String> = pl
+            .procs
+            .iter()
+            .skip_while(|p| p.name != proc.name)
+            .skip(1)
+            .filter(|p| {
+                p.plan
+                    .iter()
+                    .any(|i| i.refs.iter().any(|r| r == &proc.name))
+                    || p.plan.iter().any(|i| {
+                        i.when
+                            .as_ref()
+                            .map(|w| w.contains(&format!("@{}", proc.name)))
+                            .unwrap_or(false)
+                    })
+            })
+            .map(|p| {
+                if p.description.is_empty() {
+                    p.name.clone()
+                } else {
+                    format!("{}（{}）", p.name, p.description)
+                }
+            })
+            .collect();
+        NODE_CTX.with(|c| {
+            *c.borrow_mut() = Some(NodeCtxInner {
+                pipeline_name: pl.name.clone(),
+                pipeline_desc: pl.description.clone(),
+                proc_name: proc.name.clone(),
+                proc_desc: proc.description.clone(),
+                upstream_summaries: upstream,
+                when_conds,
+                upstream_contracts,
+                downstream,
+            })
+        });
+        NodeCtxGuard
+    }
+
+    /// exec_llm 调用：读取当前节点上下文合成 auto-prompt。
+    /// 返回 None = 无上下文（不在 exec_proc 内）或信息不足不合成。
+    pub fn synthesize_auto_prompt(
+        topic: &str,
+        results: &BTreeMap<String, Value>,
+        schema: &str,
+        guide: &str,
+        system: &str,
+    ) -> Option<String> {
+        NODE_CTX.with(|c| match &*c.borrow() {
+            None => None,
+            Some(inner) => {
+                let mut b: Vec<String> = Vec::new();
+                // 1. 身份
+                if inner.proc_desc.is_empty() && system.is_empty() {
+                    return None; // 无身份可提炼 → 不合成
+                }
+                b.push(format!(
+                    "# 任务上下文（auto-prompt 自动合成）\n管线「{}」{}节点「{}」{}",
+                    inner.pipeline_name,
+                    if inner.pipeline_desc.is_empty() {
+                        String::new()
+                    } else {
+                        format!("（{}）", inner.pipeline_desc)
+                    },
+                    inner.proc_name,
+                    if inner.proc_desc.is_empty() {
+                        String::new()
+                    } else {
+                        format!("：{}", inner.proc_desc)
+                    }
+                ));
+                // 2. 主题
+                if !topic.trim().is_empty() {
+                    b.push(format!("# 主题输入\n{}", topic.trim()));
+                }
+                // 3. 上游摘要
+                if !inner.upstream_summaries.is_empty() {
+                    let mut lines = Vec::new();
+                    let mut used = 0;
+                    for (name, desc) in &inner.upstream_summaries {
+                        if used >= 8 {
+                            lines.push(format!(
+                                "…（其余 {} 个上游省略）",
+                                inner.upstream_summaries.len() - used
+                            ));
+                            break;
+                        }
+                        if let Some(val) = results.get(name) {
+                            lines.push(format!(
+                                "## 来自「{}」{}：\n{}",
+                                name,
+                                if desc.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("（{}）", desc)
+                                },
+                                preview_value(val, 200)
+                            ));
+                            used += 1;
+                        }
+                    }
+                    if !lines.is_empty() {
+                        b.push(format!("# 上游输入（你的原材料）\n{}", lines.join("\n")));
+                    }
+                }
+                // 4. 继承约束
+                let mut cons = Vec::new();
+                for w in &inner.when_conds {
+                    cons.push(format!("本节点仅在条件「{}」成立时执行（引擎门禁）", w));
+                }
+                cons.extend(inner.upstream_contracts.iter().cloned());
+                if !cons.is_empty() {
+                    b.push(format!(
+                        "# 继承的约束（违反即失败）\n- {}",
+                        cons.join("\n- ")
+                    ));
+                }
+                // 4.5 位置信息：你的产出给谁用（下游消费者）——粒度与字段稳定性
+                // 为它们负责；deliver 节点语义：这是最终交付物。
+                if !inner.downstream.is_empty() {
+                    b.push(format!(
+                        "# 下游消费者（你的产出是它们的上游）\n{}",
+                        inner.downstream.join("、")
+                    ));
+                }
+                // 5. 开放动作（agent guide）
+                if !guide.is_empty() {
+                    b.push(format!("# 可用动作与检索方式\n{}", guide));
+                }
+                // 5.5 认知上下文：错误记忆 + 历史统计（cognition spec §4 pull 模型：
+                // 指针卡 + 按需展开；L3 冷启动只记不判——不足 K 条历史不注入统计）。
+                // 注入是防复发：同节点历史错误模式前置告知，不是全量倾倒。
+                let mem = memory_digest(&inner.proc_name);
+                if let Some(m) = mem {
+                    b.push(m);
+                }
+                // 6. 输出契约 + 示例
+                if !schema.is_empty() {
+                    let fields: Vec<&str> = schema.split(',').map(|s| s.trim()).collect();
+                    let example = fields
+                        .iter()
+                        .map(|f| format!("  \"{}\": \"...\"", f))
+                        .collect::<Vec<_>>()
+                        .join(",\n");
+                    b.push(format!(
+                        "# 输出契约\n只输出一个 JSON 对象，包含且仅包含这些字段：{}。\n示例：\n{{\n{}\n}}\n不要输出 JSON 以外的任何文字。",
+                        schema, example
+                    ));
+                }
+                if b.len() < 2 {
+                    return None;
+                }
+                Some(b.join("\n\n"))
+            }
+        })
+    }
+}
+
+/// 上游 p 是否被本 proc 的任一 .when 引用（@p 或 @p.field 形态）。
+fn when_refs(p: &crate::ast::Proc, plan: &[crate::ast::Impl]) -> bool {
+    plan.iter().any(|i| {
+        i.when
+            .as_ref()
+            .map(|w| w.contains(&format!("@{}", p.name)))
+            .unwrap_or(false)
+    })
+}
+
+/// v0.17 认知上下文注入：同节点错误记忆（open incident）+ 历史统计（runs）。
+/// cognition spec §4：最小上下文按角色定义——caller 拿意图+结果卡，节点执行
+/// 拿「我上次怎么错的」。错误卡是指针卡（id + 信号 + 一句话证据），pull 模型
+/// ——全文在 incidents 表，按需 `ductile incident show` 展开。
+/// L3 统计冷启动只记不判：<3 条历史不注入（防单样本误导）。
+fn memory_digest(proc_name: &str) -> Option<String> {
+    // cfg!(test) 守卫：单测不读真库（db 继承 DUCTILE_DATA 泄漏脚枪）
+    if cfg!(test) {
+        return None;
+    }
+    let mut lines: Vec<String> = Vec::new();
+    // 错误流：本节点未关闭的 incident（最近 3 条）
+    if let Ok(conn) = crate::db::open_try() {
+        let open = crate::incident::list_incidents_conn(&conn, Some("open"));
+        let mine: Vec<_> = open
+            .iter()
+            .filter(|i| i.proc_name == proc_name)
+            .take(3)
+            .collect();
+        if !mine.is_empty() {
+            let cards: Vec<String> = mine
+                .iter()
+                .map(|i| {
+                    format!(
+                        "- [incident#{}] {} 信号:({}) 证据: {}",
+                        i.id,
+                        i.err_code,
+                        trunc_chars(&i.signals, 80),
+                        trunc_chars(&i.evidence, 120)
+                    )
+                })
+                .collect();
+            lines.push(format!(
+                "# 错误记忆（本节点历史事故，防复发——展开用 ductile incident）\n{}",
+                cards.join("\n")
+            ));
+        }
+    }
+    // 历史统计：本节点最近 runs 的成功率/时延分布（L3 统计带）
+    let runs = crate::db::recent_runs_limit(proc_name, 20);
+    if runs.len() >= 3 {
+        let ok = runs.iter().filter(|r| r.status == "Ok").count();
+        let total = runs.len();
+        let lats: Vec<i64> = runs
+            .iter()
+            .map(|r| r.latency_ms)
+            .filter(|l| *l > 0)
+            .collect();
+        if !lats.is_empty() {
+            let max_l = *lats.iter().max().unwrap_or(&0);
+            let min_l = *lats.iter().min().unwrap_or(&0);
+            lines.push(format!(
+                "# 历史统计（近 {} 次执行）\n成功率 {}/{}；时延 {}-{}ms。时延逼近上限或成功率异常时优先精简输出。",
+                total, ok, total, min_l, max_l
+            ));
+        }
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n\n"))
+    }
+}
+
+/// v0.17 auto-prompt 的上游值预览：§§FIELDS§§ 编码 → 字段=截断值 行列表；
+/// 其他文本 → 截断原文。最少必要信息 ≠ 全文倾倒。
+fn preview_value(val: &Value, limit: usize) -> String {
+    let text = match val {
+        Value::Text(t) => t.clone(),
+        Value::File(p) => format!("[文件: {}]", p),
+        Value::Null => String::new(),
+    };
+    if text.starts_with("§§FIELDS§§") {
+        let body = &text["§§FIELDS§§".len()..];
+        let mut lines = Vec::new();
+        for part in body.split("§§") {
+            if part.is_empty() || !part.contains('=') {
+                continue;
+            }
+            let (k, v) = part.split_once('=').unwrap_or((part, ""));
+            if k == "RAW" {
+                continue; // 原文全文不进 prompt
+            }
+            let v_prev = trunc_chars(v, limit);
+            lines.push(format!("{} = {}", k, v_prev));
+        }
+        return lines.join("\n");
+    }
+    trunc_chars(&text, limit * 4)
+}
+
+fn trunc_chars(s: &str, limit: usize) -> String {
+    if s.chars().count() <= limit {
+        s.to_string()
+    } else {
+        let cut: String = s.chars().take(limit).collect();
+        format!("{}…", cut)
+    }
+}
 
 impl PipelineCtx {
     /// exec_pipeline 入口调用；返回 guard，Drop 时清理。
@@ -165,7 +510,10 @@ impl PipelineCtx {
                 Err(e) => {
                     let msg = format!("pipeline cwd invalid: {} ({})", c, e);
                     eprintln!("  [env] {}", msg);
-                    return Some(PipelineCtxGuard { poisoned: true, msg: Some(msg) });
+                    return Some(PipelineCtxGuard {
+                        poisoned: true,
+                        msg: Some(msg),
+                    });
                 }
             },
             None => None,
@@ -174,11 +522,15 @@ impl PipelineCtx {
             .env
             .iter()
             .filter_map(|e| {
-                e.find('=').map(|eq| (e[..eq].to_string(), e[eq + 1..].to_string()))
+                e.find('=')
+                    .map(|eq| (e[..eq].to_string(), e[eq + 1..].to_string()))
             })
             .collect();
         PIPELINE_CTX.with(|c| *c.borrow_mut() = Some(PipelineCtxInner { cwd, env }));
-        Some(PipelineCtxGuard { poisoned: false, msg: None })
+        Some(PipelineCtxGuard {
+            poisoned: false,
+            msg: None,
+        })
     }
 
     /// 当前线程管线 cwd（未设置 = None）
@@ -468,7 +820,10 @@ fn exec_llm(
     let model = {
         let m = extract_string_arg("model", body);
         if m.is_empty() {
-            agent_cfg.as_ref().map(|a| a.model.clone()).unwrap_or_default()
+            agent_cfg
+                .as_ref()
+                .map(|a| a.model.clone())
+                .unwrap_or_default()
         } else {
             m
         }
@@ -476,7 +831,10 @@ fn exec_llm(
     let system = {
         let s = extract_string_arg("system", body);
         if s.is_empty() {
-            agent_cfg.as_ref().map(|a| a.system.clone()).unwrap_or_default()
+            agent_cfg
+                .as_ref()
+                .map(|a| a.system.clone())
+                .unwrap_or_default()
         } else {
             s
         }
@@ -484,7 +842,10 @@ fn exec_llm(
     let schema = {
         let s = extract_string_arg("schema", body);
         if s.is_empty() {
-            agent_cfg.as_ref().map(|a| a.schema.clone()).unwrap_or_default()
+            agent_cfg
+                .as_ref()
+                .map(|a| a.schema.clone())
+                .unwrap_or_default()
         } else {
             s
         }
@@ -498,14 +859,39 @@ fn exec_llm(
             Some(t)
         }
     };
-    let resolved_prompt = resolve_vars(&prompt_raw, topic, results);
+    let resolved_prompt = {
+        let p = resolve_vars(&prompt_raw, topic, results);
+        if p.is_empty() {
+            // v0.17 auto-prompt：prompt 缺省 + agent 存在 → 从图上下文合成。
+            // 六段结构：身份/主题/上游摘要/继承约束/开放动作(guide)/输出契约+示例。
+            // 无 agent 或信息不足 → 维持硬错误（auto-prompt 是糖不是承重墙）。
+            let synth = agent_cfg.as_ref().and_then(|a| {
+                NodeCtx::synthesize_auto_prompt(
+                    topic,
+                    results,
+                    &resolve_vars(&schema, topic, results),
+                    &a.guide,
+                    &resolve_vars(&a.system, topic, results),
+                )
+            });
+            match synth {
+                Some(p) => {
+                    eprintln!(
+                        "    -> llm auto-prompt: synthesized {} chars",
+                        p.chars().count()
+                    );
+                    p
+                }
+                None => return Err("llm requires prompt=\"...\" or input=\"...\" (auto-prompt needs an agent with .desc or system)".into()),
+            }
+        } else {
+            p
+        }
+    };
     let resolved_template = resolve_vars(&template, topic, results);
     let resolved_system = resolve_vars(&system, topic, results);
     let resolved_schema = resolve_vars(&schema, topic, results);
     let resolved_model = resolve_vars(&model, topic, results);
-    if resolved_prompt.is_empty() {
-        return Err("llm requires prompt=\\\"...\\\" or input=\\\"...\\\"".into());
-    }
 
     // v0.16.1 智力阶梯：agent 声明 tiers 且未显式 model= → 阶梯执行。
     // 档位 i 失败自动升 i+1（Reroute 换路哲学，阶梯有界）。显式 model= 完全
@@ -601,12 +987,7 @@ fn exec_llm(
                 tier_name,
                 tier.model
             );
-            let out = run_python_bridge_tier(
-                &bridge,
-                &t_args,
-                agent_timeout,
-                Some(tier),
-            );
+            let out = run_python_bridge_tier(&bridge, &t_args, agent_timeout, Some(tier));
             match out {
                 Ok(output) if output.status.success() => {
                     let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
@@ -745,6 +1126,11 @@ fn run_python_bridge_tier(
             }
             if t.timeout_secs > 0 {
                 cmd.env("OPENAI_TIMEOUT_SECS", t.timeout_secs.to_string());
+            }
+            // v0.17：tier 级 max_tokens（思考型模型预算——35B 思考 9k+ 的教训）。
+            // 显式配置覆盖环境变量；缺省不动（沿用 OPENAI_MAX_TOKENS）。
+            if t.max_tokens > 0 {
+                cmd.env("OPENAI_MAX_TOKENS", t.max_tokens.to_string());
             }
         }
         if agent_timeout_secs > 0 && tier.is_none() {
@@ -1705,8 +2091,11 @@ mod tests {
     #[test]
     fn fs_exists_true_false() {
         let here = std::env::temp_dir();
-        let ok = exec_fs_exists(&default_impl(), &format!(r#"exists("{}")"#, dsl_path(&here)))
-            .unwrap();
+        let ok = exec_fs_exists(
+            &default_impl(),
+            &format!(r#"exists("{}")"#, dsl_path(&here)),
+        )
+        .unwrap();
         assert_eq!(ok.as_text(), "true");
         let no = exec_fs_exists(&default_impl(), r#"exists("/nonexistent-xyz-ductile")"#).unwrap();
         assert_eq!(no.as_text(), "false");
@@ -1924,10 +2313,7 @@ mod tests {
 
     #[test]
     fn unsafe_shell_overrides_restrict() {
-        assert!(shell_allowed_with(
-            Some("1".into()),
-            Some("1".into())
-        ));
+        assert!(shell_allowed_with(Some("1".into()), Some("1".into())));
     }
 
     #[test]
@@ -1994,5 +2380,105 @@ mod tests {
         let content = std::fs::read_to_string(&f).unwrap();
         assert_eq!(content, "data-topicX");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── v0.17 auto-prompt ──
+
+    fn mk_proc(name: &str, desc: &str) -> crate::ast::Proc {
+        crate::ast::Proc {
+            name: name.into(),
+            description: desc.into(),
+            plan: Vec::new(),
+            checks: Vec::new(),
+            contract: crate::ast::Contract::default(),
+            deliver: false,
+            foreach: None,
+            deliver_refs: Vec::new(),
+            foreach_var: String::new(),
+            pick_by: String::new(),
+        }
+    }
+
+    #[test]
+    fn auto_prompt_synthesizes_identity_topic_upstream() {
+        let mut pl = crate::ast::Pipeline::default();
+        pl.name = "proj_chain".into();
+        pl.description = "项目开发全链".into();
+        let mut up = mk_proc("req", "S0 需求提炼");
+        // 上游有契约 → 继承约束段
+        up.contract.outputs = vec!["must_have".into(), "constraints".into()];
+        pl.procs.push(up);
+        let mut me = mk_proc("arch", "S1 架构设计");
+        // 本节点 impl 引用上游 + .when 门禁
+        let mut im = default_impl();
+        im.refs = vec!["req".into()];
+        im.when = Some("@req.must_have".into());
+        me.plan.push(im);
+        pl.procs.push(me);
+
+        let mut results = BTreeMap::new();
+        results.insert(
+            "req".to_string(),
+            Value::Text("§§FIELDS§§must_have=[\"a\", \"b\"]§§constraints=低预算§§RAW§§xx".into()),
+        );
+
+        let _g = NodeCtx::set(&pl, &pl.procs[1]);
+        let out = NodeCtx::synthesize_auto_prompt(
+            "搞个素材归档",
+            &results,
+            "modules,storage,stack,risks",
+            "可检索 /tmp 目录",
+            "",
+        )
+        .expect("synthesized");
+        assert!(out.contains("管线「proj_chain」"), "身份段: {}", out);
+        assert!(out.contains("节点「arch」：S1 架构设计"));
+        assert!(out.contains("# 主题输入\n搞个素材归档"));
+        assert!(out.contains("## 来自「req」"), "上游段: {}", out);
+        assert!(
+            out.contains("must_have = [\"a\", \"b\"]"),
+            "字段预览: {}",
+            out
+        );
+        assert!(!out.contains("RAW"), "RAW 全文不得进 prompt");
+        assert!(out.contains("引擎门禁"), "when 约束: {}", out);
+        assert!(
+            out.contains("上游「req」契约要求输出字段"),
+            "契约约束: {}",
+            out
+        );
+        assert!(out.contains("# 可用动作与检索方式"), "guide 段: {}", out);
+        assert!(out.contains("\"modules\": \"...\""), "schema 示例: {}", out);
+    }
+
+    #[test]
+    fn auto_prompt_needs_identity() {
+        // 无 desc 无 system → None（不合成空洞 prompt）
+        let mut pl = crate::ast::Pipeline::default();
+        pl.procs.push(mk_proc("x", ""));
+        let _g = NodeCtx::set(&pl, &pl.procs[0]);
+        assert!(NodeCtx::synthesize_auto_prompt("t", &BTreeMap::new(), "", "", "").is_none());
+    }
+
+    #[test]
+    fn auto_prompt_outside_exec_proc_is_none() {
+        // 不在 exec_proc 内（无 NODE_CTX）→ None
+        let t = std::thread::spawn(|| {
+            NodeCtx::synthesize_auto_prompt("t", &BTreeMap::new(), "a,b", "g", "s")
+        });
+        assert!(t.join().unwrap().is_none());
+    }
+
+    #[test]
+    fn preview_value_truncates_long_text() {
+        let long = "x".repeat(1000);
+        let v = Value::Text(long);
+        let pv = preview_value(&v, 10);
+        assert!(
+            pv.chars().count() <= 41,
+            "10*4+1 截断: {}",
+            pv.chars().count()
+        );
+        assert!(pv.ends_with('…'));
     }
 }

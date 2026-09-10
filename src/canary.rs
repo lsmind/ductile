@@ -55,7 +55,8 @@ pub fn add_canary_conn(
 }
 
 pub fn list_canaries_conn(conn: &Connection, proc_name: Option<&str>) -> Vec<CanaryRow> {
-    let mut sql = "SELECT id, pipeline, proc_name, input, expect, note, saved_at FROM canaries".to_string();
+    let mut sql =
+        "SELECT id, pipeline, proc_name, input, expect, note, saved_at FROM canaries".to_string();
     if proc_name.is_some() {
         sql.push_str(" WHERE proc_name = ?1");
     }
@@ -138,14 +139,18 @@ mod tests {
 
     fn mem_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(include_str!("canary_schema.sql")).unwrap();
+        conn.execute_batch(include_str!("canary_schema.sql"))
+            .unwrap();
         conn
     }
 
     #[test]
     fn normalize_expect_default() {
         assert_eq!(normalize_expect(""), "@self.ok == 1");
-        assert_eq!(normalize_expect("  @self.score >= 80  "), "@self.score >= 80");
+        assert_eq!(
+            normalize_expect("  @self.score >= 80  "),
+            "@self.score >= 80"
+        );
     }
 
     #[test]
@@ -159,7 +164,15 @@ mod tests {
     #[test]
     fn canary_crud_and_pass_record() {
         let conn = mem_conn();
-        let id = add_canary_conn(&conn, "p", "judge", "已知好输入", "@self.score >= 80", "note").unwrap();
+        let id = add_canary_conn(
+            &conn,
+            "p",
+            "judge",
+            "已知好输入",
+            "@self.score >= 80",
+            "note",
+        )
+        .unwrap();
         assert!(id > 0);
         let rows = list_canaries_conn(&conn, Some("judge"));
         assert_eq!(rows.len(), 1);

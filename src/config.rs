@@ -31,6 +31,9 @@ pub struct AgentConfig {
     pub timeout_secs: u64,
     /// v0.16.1 智力阶梯：tiers = "light,medium,high"（升序）。空 = 旧单模型路径。
     pub tiers: Vec<String>,
+    /// v0.17 auto-prompt：操作指南（开放动作/检索方式/示例说明），
+    /// prompt 缺省合成时注入"# 可用动作与检索方式"段。
+    pub guide: String,
 }
 
 /// v0.16.1 命名模型档：[models.<tier>] —— 档位是语义能力级（light/high），
@@ -41,6 +44,9 @@ pub struct ModelTier {
     pub base_url: String,
     pub api_key: String,
     pub timeout_secs: u64,
+    /// v0.17：思考型模型 token 预算（35B 思考烧 9k+ tokens 的实测教训）。
+    /// 缺省 0 = 不注入（沿用环境变量 OPENAI_MAX_TOKENS）。
+    pub max_tokens: u64,
 }
 
 /// 档位表：tier 名 → ModelTier。
@@ -99,7 +105,12 @@ pub fn config_search_paths() -> Vec<PathBuf> {
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_default();
     if !home.is_empty() {
-        out.push(PathBuf::from(&home).join(".config").join("ductile").join("config.toml"));
+        out.push(
+            PathBuf::from(&home)
+                .join(".config")
+                .join("ductile")
+                .join("config.toml"),
+        );
         out.push(
             PathBuf::from(&home)
                 .join(".local")
@@ -177,7 +188,8 @@ fn parse_toml_value(raw: &str) -> Option<String> {
     if raw.is_empty() {
         return Some(String::new());
     }
-    if (raw.starts_with('"') && raw.ends_with('"')) || (raw.starts_with('\'') && raw.ends_with('\''))
+    if (raw.starts_with('"') && raw.ends_with('"'))
+        || (raw.starts_with('\'') && raw.ends_with('\''))
     {
         let inner = &raw[1..raw.len() - 1];
         // minimal unescape for \"
@@ -213,7 +225,9 @@ fn first_nonempty(vals: &[String]) -> String {
 
 pub fn load_llm_config() -> LlmConfig {
     match find_config_path() {
-        Some(path) => load_llm_config_from_path(&path).unwrap_or_default().with_defaults(),
+        Some(path) => load_llm_config_from_path(&path)
+            .unwrap_or_default()
+            .with_defaults(),
         None => LlmConfig::default().with_defaults(),
     }
 }
@@ -248,6 +262,7 @@ pub fn agents_from_sections(sections: &BTreeMap<String, BTreeMap<String, String>
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
+            guide: get("guide").replace("\\n", "\n"),
         };
         out.agents.insert(name.to_string(), agent);
     }
@@ -286,6 +301,7 @@ pub fn tiers_from_sections(sections: &BTreeMap<String, BTreeMap<String, String>>
             base_url: get("base_url"),
             api_key: get("api_key"),
             timeout_secs: get("timeout_secs").parse().unwrap_or(0),
+            max_tokens: get("max_tokens").parse().unwrap_or(0),
         };
         out.tiers.insert(name.to_string(), tier);
     }
@@ -470,11 +486,7 @@ default_model = "glm-5"
         let dir = std::env::temp_dir().join(format!("ductile-cfg-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("config.toml");
-        fs::write(
-            &path,
-            "[llm]\napi_key = \"fromfile\"\nmodel = \"m1\"\n",
-        )
-        .unwrap();
+        fs::write(&path, "[llm]\napi_key = \"fromfile\"\nmodel = \"m1\"\n").unwrap();
         let cfg = load_llm_config_from_path(&path).unwrap();
         assert_eq!(cfg.api_key, "fromfile");
         assert_eq!(cfg.model, "m1");
@@ -503,7 +515,11 @@ model = "gpt-4o-mini"
         let planner = agents.get("planner").expect("planner parsed");
         assert_eq!(planner.model, "qwen3.8:27b");
         // \n 展开
-        assert!(planner.system.contains('\n'), "system: {:?}", planner.system);
+        assert!(
+            planner.system.contains('\n'),
+            "system: {:?}",
+            planner.system
+        );
         assert_eq!(planner.schema, "summary,kind");
         assert_eq!(planner.timeout_secs, 300);
         let judge = agents.get("judge").expect("judge parsed");
@@ -592,9 +608,15 @@ base_url = "http://gpu-box:11434/v1"
             ..Default::default()
         };
         let tiers = TiersConfig {
-            tiers: [("light".to_string(), ModelTier { model: "m".into(), ..Default::default() })]
-                .into_iter()
-                .collect(),
+            tiers: [(
+                "light".to_string(),
+                ModelTier {
+                    model: "m".into(),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
         };
         let err = resolve_tier_start(&agent, &tiers, 10, 10, 0, None).unwrap_err();
         assert!(err.contains("undefined tier 'ghost'"), "{err}");
@@ -606,7 +628,10 @@ base_url = "http://gpu-box:11434/v1"
             tiers: vec!["light".into(), "medium".into(), "high".into()],
             ..Default::default()
         };
-        let mk = |m: &str| ModelTier { model: m.into(), ..Default::default() };
+        let mk = |m: &str| ModelTier {
+            model: m.into(),
+            ..Default::default()
+        };
         let tiers = TiersConfig {
             tiers: [
                 ("light".to_string(), mk("m1")),

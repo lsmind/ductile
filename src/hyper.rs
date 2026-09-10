@@ -153,11 +153,7 @@ impl HyperSpec {
                     format!("chain:{}", roles.join(">"))
                 }
                 HedgeKind::Gate => {
-                    let j = h
-                        .judge
-                        .as_deref()
-                        .map(role_of)
-                        .unwrap_or("?");
+                    let j = h.judge.as_deref().map(role_of).unwrap_or("?");
                     let mut ps: Vec<&str> = h.producers.iter().map(|m| role_of(m)).collect();
                     ps.sort_unstable();
                     let mut cs: Vec<&str> = h.consumers.iter().map(|m| role_of(m)).collect();
@@ -171,14 +167,16 @@ impl HyperSpec {
                 }
                 HedgeKind::Xor => {
                     // slot role first, then sorted alt roles (alts may be suppressed from V)
-                    let slot = h
-                        .members
-                        .first()
-                        .map(|m| role_of(m))
-                        .unwrap_or("?");
-                    let mut alts: Vec<&str> = h.members.iter().skip(1).map(|m| role_of(m)).collect();
+                    let slot = h.members.first().map(|m| role_of(m)).unwrap_or("?");
+                    let mut alts: Vec<&str> =
+                        h.members.iter().skip(1).map(|m| role_of(m)).collect();
                     alts.sort_unstable();
-                    format!("xor:slot={}|alts={}|n={}", slot, alts.join("+"), h.members.len())
+                    format!(
+                        "xor:slot={}|alts={}|n={}",
+                        slot,
+                        alts.join("+"),
+                        h.members.len()
+                    )
                 }
             })
             .collect();
@@ -188,7 +186,10 @@ impl HyperSpec {
             vpart.join(","),
             eparts.join(";"),
             if self.require.judge
-                || self.vertices.iter().any(|v| matches!(v.role, HyperRole::Judge))
+                || self
+                    .vertices
+                    .iter()
+                    .any(|v| matches!(v.role, HyperRole::Judge))
             {
                 1
             } else {
@@ -430,12 +431,7 @@ fn synthesize_hedges_from_stages(stages: &[HyperStage]) -> Vec<Hyperedge> {
     let mut covered_data: BTreeSet<(String, String)> = BTreeSet::new();
     for s in stages {
         if let Some(g) = &s.gated_by {
-            let producers: Vec<String> = s
-                .after
-                .iter()
-                .filter(|a| *a != g)
-                .cloned()
-                .collect();
+            let producers: Vec<String> = s.after.iter().filter(|a| *a != g).cloned().collect();
             for p in &producers {
                 // producers→judge is owned by the gate hedge; do not also emit chain
                 covered_data.insert((p.clone(), g.clone()));
@@ -716,10 +712,7 @@ pub fn project_stages(
         match h.kind {
             HedgeKind::Chain => {
                 for w in h.members.windows(2) {
-                    after
-                        .entry(w[1].clone())
-                        .or_default()
-                        .insert(w[0].clone());
+                    after.entry(w[1].clone()).or_default().insert(w[0].clone());
                 }
             }
             HedgeKind::Bundle => {
@@ -845,12 +838,7 @@ fn parse_hedge(args: &str) -> Result<Hyperedge, String> {
                     name
                 ));
             }
-            Ok(hedge_gate(
-                name,
-                judge.unwrap(),
-                producers,
-                consumers,
-            ))
+            Ok(hedge_gate(name, judge.unwrap(), producers, consumers))
         }
         HedgeKind::Chain | HedgeKind::Bundle | HedgeKind::Xor => {
             if judge.is_some() || !producers.is_empty() || !consumers.is_empty() {
@@ -998,9 +986,8 @@ fn parse_bool(v: &str) -> Result<bool, String> {
 }
 
 fn parse_stage(args: &str) -> Result<HyperStage, String> {
-    let name = extract_first_quoted(args).ok_or_else(|| {
-        ".stage(\"name\", ...) needs a quoted stage name".to_string()
-    })?;
+    let name = extract_first_quoted(args)
+        .ok_or_else(|| ".stage(\"name\", ...) needs a quoted stage name".to_string())?;
     let mut role = HyperRole::Default;
     let mut tags = BTreeSet::new();
     let mut after = Vec::new();
@@ -1167,10 +1154,7 @@ pub fn emit_pipeline(spec: &HyperSpec) -> String {
 
     for stage in &spec.stages {
         let after = if stage.after.is_empty() {
-            prev_default
-                .get(&stage.name)
-                .cloned()
-                .unwrap_or_default()
+            prev_default.get(&stage.name).cloned().unwrap_or_default()
         } else {
             stage.after.clone()
         };
@@ -1267,7 +1251,10 @@ fn stub_bodies(
         let body = if tags.iter().any(|t| t == "write" || t == "file") && after.is_empty() {
             "write(to=\"/tmp/ductile_hyper_fallback.txt\", content=\"fallback\")".into()
         } else if let Some(a) = after.first() {
-            format!("write(to=\"/tmp/ductile_hyper_{}_fb.txt\", content=@{})", stage.name, a)
+            format!(
+                "write(to=\"/tmp/ductile_hyper_{}_fb.txt\", content=@{})",
+                stage.name, a
+            )
         } else {
             "read(from=\"{topic}\")".into()
         };
@@ -1299,9 +1286,7 @@ fn default_tags_for_role(role: &HyperRole) -> BTreeSet<String> {
 }
 
 fn primary_body(stage: &HyperStage, after: &[String], tags: &BTreeSet<String>) -> String {
-    if matches!(stage.role, HyperRole::Judge)
-        || tags.iter().any(|t| t == "judge" || t == "gate")
-    {
+    if matches!(stage.role, HyperRole::Judge) || tags.iter().any(|t| t == "judge" || t == "gate") {
         // Deterministic judge stub; embed @deps so DAG edges exist for after=.
         let deps = after
             .iter()
@@ -1338,7 +1323,10 @@ fn primary_body(stage: &HyperStage, after: &[String], tags: &BTreeSet<String>) -
     }
     // Generic worker: pass through upstream or topic.
     if let Some(a) = after.first() {
-        format!("write(to=\"/tmp/ductile_hyper_{}.txt\", content=@{})", stage.name, a)
+        format!(
+            "write(to=\"/tmp/ductile_hyper_{}.txt\", content=@{})",
+            stage.name, a
+        )
     } else {
         "read(from=\"{topic}\")".into()
     }
@@ -1388,10 +1376,12 @@ pub fn check_pipeline_against(spec: &HyperSpec, pl: &Pipeline) -> Vec<String> {
         };
         for dep in &after {
             let has = proc.plan.iter().any(|i| i.refs.iter().any(|r| r == dep))
-                || proc
-                    .plan
-                    .iter()
-                    .any(|i| i.when.as_ref().map(|w| w.contains(&format!("@{}", dep))).unwrap_or(false));
+                || proc.plan.iter().any(|i| {
+                    i.when
+                        .as_ref()
+                        .map(|w| w.contains(&format!("@{}", dep)))
+                        .unwrap_or(false)
+                });
             // Also accept block-level when only for gated_by; for after, require body/@ref.
             let body_ref = proc.plan.iter().any(|i| {
                 i.body_text.contains(&format!("@{}", dep)) || i.refs.iter().any(|r| r == dep)
@@ -1442,7 +1432,11 @@ pub fn check_pipeline_against(spec: &HyperSpec, pl: &Pipeline) -> Vec<String> {
         if !has_judge_stage {
             errs.push("require.judge=true but no stage with role=judge".into());
         } else {
-            for s in spec.stages.iter().filter(|s| matches!(s.role, HyperRole::Judge)) {
+            for s in spec
+                .stages
+                .iter()
+                .filter(|s| matches!(s.role, HyperRole::Judge))
+            {
                 if !proc_names.contains(s.name.as_str()) {
                     errs.push(format!("judge stage {:?} missing in pipeline", s.name));
                 }
@@ -1513,16 +1507,10 @@ impl StructSig {
         let roles = self.roles.join(">");
         let mut edges = self.edges.clone();
         edges.sort_unstable();
-        let e: Vec<String> = edges
-            .iter()
-            .map(|(a, b)| format!("{}-{}", a, b))
-            .collect();
+        let e: Vec<String> = edges.iter().map(|(a, b)| format!("{}-{}", a, b)).collect();
         let mut gates = self.gates.clone();
         gates.sort_unstable();
-        let g: Vec<String> = gates
-            .iter()
-            .map(|(c, j)| format!("{}<-{}", c, j))
-            .collect();
+        let g: Vec<String> = gates.iter().map(|(c, j)| format!("{}<-{}", c, j)).collect();
         format!(
             "roles={}|edges={}|gates={}|judge={}",
             roles,
@@ -1726,7 +1714,13 @@ fn set_jaccard(a: &BTreeSet<String>, b: &BTreeSet<String>) -> f64 {
     }
 }
 
-pub fn score_similar(query: &StructSig, cand: &StructSig, path: &str, name: &str, kind: &'static str) -> SimilarHit {
+pub fn score_similar(
+    query: &StructSig,
+    cand: &StructSig,
+    path: &str,
+    name: &str,
+    kind: &'static str,
+) -> SimilarHit {
     let both_hyper = query.hypergraph_key.is_some() && cand.hypergraph_key.is_some();
     let (qk, ck) = if both_hyper {
         (
@@ -1765,7 +1759,11 @@ pub fn score_similar(query: &StructSig, cand: &StructSig, path: &str, name: &str
 }
 
 /// Scan paths for `.hyper` / `.pipeline` and rank structural reuse candidates.
-pub fn find_similar(query: &StructSig, _query_name: &str, roots: &[String]) -> Result<Vec<SimilarHit>, String> {
+pub fn find_similar(
+    query: &StructSig,
+    _query_name: &str,
+    roots: &[String],
+) -> Result<Vec<SimilarHit>, String> {
     let mut hits = Vec::new();
     let mut files = Vec::new();
     for root in roots {
@@ -1910,7 +1908,7 @@ pub fn similar_json(query_path: &str, roots: &[String]) -> Result<String, String
 
 // ── Node-level reuse (proc / stage) ──
 //
- // Workflow iso reuses whole graphs; node iso reuses a single stage/proc.
+// Workflow iso reuses whole graphs; node iso reuses a single stage/proc.
 // Key = role + op family + in-arity + gated + min_impls_bucket — tags soft only.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2081,7 +2079,15 @@ fn body_preview_proc(proc: &crate::ast::Proc) -> String {
         .unwrap_or_default()
 }
 
-pub fn score_node(query: &NodeSig, cand: &NodeSig, path: &str, graph: &str, node: &str, kind: &'static str, preview: &str) -> NodeHit {
+pub fn score_node(
+    query: &NodeSig,
+    cand: &NodeSig,
+    path: &str,
+    graph: &str,
+    node: &str,
+    kind: &'static str,
+    preview: &str,
+) -> NodeHit {
     let qk = query.node_key();
     let ck = cand.node_key();
     let structure_match = qk == ck;
@@ -2160,15 +2166,7 @@ pub fn collect_nodes(roots: &[String]) -> Result<Vec<(NodeSig, NodeHit)>, String
             };
             for s in &h.stages {
                 let sig = node_sig_from_stage(s);
-                let hit = score_node(
-                    &sig,
-                    &sig,
-                    &path_str,
-                    &h.name,
-                    &s.name,
-                    "hyper-stage",
-                    "",
-                );
+                let hit = score_node(&sig, &sig, &path_str, &h.name, &s.name, "hyper-stage", "");
                 out.push((sig, hit));
             }
         } else if path.extension().and_then(|e| e.to_str()) == Some("pipeline") {
@@ -2198,7 +2196,11 @@ pub fn collect_nodes(roots: &[String]) -> Result<Vec<(NodeSig, NodeHit)>, String
     Ok(out)
 }
 
-pub fn find_similar_nodes(query: &NodeSig, roots: &[String], exclude_path_node: Option<(&str, &str)>) -> Result<Vec<NodeHit>, String> {
+pub fn find_similar_nodes(
+    query: &NodeSig,
+    roots: &[String],
+    exclude_path_node: Option<(&str, &str)>,
+) -> Result<Vec<NodeHit>, String> {
     let catalog = collect_nodes(roots)?;
     let mut hits = Vec::new();
     for (sig, meta) in catalog {
@@ -2286,9 +2288,7 @@ pub fn nodes_report_json(
     let mut first = true;
     let mut n = 0;
     for h in hits {
-        let keep = h.structure_match
-            || h.note.starts_with("same role+op")
-            || mode == "filter";
+        let keep = h.structure_match || h.note.starts_with("same role+op") || mode == "filter";
         if !keep {
             continue;
         }
@@ -2477,7 +2477,8 @@ fn collect_graph_files(root: &Path, out: &mut Vec<std::path::PathBuf>) -> Result
     // v0.15 fix: 扫描根本身不可读 → Err（调用方给的是明确路径，读不到是真错误）；
     // 但**子目录**不可读只跳过（/tmp 下 systemd-private-* 是常态，
     // 一个权限目录毒死整条 similar 扫描 = drill [4] 挂点根因）。
-    let entries = std::fs::read_dir(root).map_err(|e| format!("read_dir {}: {}", root.display(), e))?;
+    let entries =
+        std::fs::read_dir(root).map_err(|e| format!("read_dir {}: {}", root.display(), e))?;
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -2614,7 +2615,11 @@ Hyper("b")
         assert_eq!(sa.structure_key(), sb.structure_key());
         let hit = score_similar(&sa, &sb, "b.hyper", "b", "hyper");
         assert!(hit.structure_match);
-        assert!(hit.tag_jaccard < 0.5, "tags should diverge: {}", hit.tag_jaccard);
+        assert!(
+            hit.tag_jaccard < 0.5,
+            "tags should diverge: {}",
+            hit.tag_jaccard
+        );
     }
 
     #[test]
@@ -2661,8 +2666,7 @@ Pipeline("a")
         assert_eq!(
             load.op, "read",
             "body={:?} tags={:?}",
-            pl.procs[0].plan[0].body_text,
-            pl.procs[0].plan[0].tags
+            pl.procs[0].plan[0].body_text, pl.procs[0].plan[0].tags
         );
         assert_eq!(load.in_arity, 0);
         assert_eq!(load.role, "source");
@@ -2852,7 +2856,11 @@ HyperGraph("x")
         let names: Vec<_> = h.stages.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"live"));
         assert!(names.contains(&"out"));
-        assert!(!names.contains(&"stub"), "xor alt must not be a stage: {:?}", names);
+        assert!(
+            !names.contains(&"stub"),
+            "xor alt must not be a stage: {:?}",
+            names
+        );
         let live = h.stages.iter().find(|s| s.name == "live").unwrap();
         assert!(live.min_impls >= 2, "slot min_impls={}", live.min_impls);
     }

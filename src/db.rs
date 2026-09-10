@@ -37,7 +37,10 @@ pub fn db_path_with(data: Option<std::ffi::OsString>) -> PathBuf {
                 "/tmp".into()
             }
         });
-    let dir = PathBuf::from(&home).join(".local").join("share").join("ductile");
+    let dir = PathBuf::from(&home)
+        .join(".local")
+        .join("share")
+        .join("ductile");
     let _ = fs::create_dir_all(&dir);
     dir.join("ductile.db")
 }

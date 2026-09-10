@@ -179,18 +179,36 @@ mod tests {
     fn signals_layer_mapping() {
         // L1 缺字段 / L2 谓词违例 / L0 传输 / L0.5 截断
         assert_eq!(
-            signals_from_error("contract", "contract violation: proc 'g' missing required output field 'path'", ""),
+            signals_from_error(
+                "contract",
+                "contract violation: proc 'g' missing required output field 'path'",
+                ""
+            ),
             vec!["L1"]
         );
         assert_eq!(
-            signals_from_error("contract", "contract violation: proc 'j' invariant failed: @self.score >= 80", ""),
+            signals_from_error(
+                "contract",
+                "contract violation: proc 'j' invariant failed: @self.score >= 80",
+                ""
+            ),
             vec!["L2"]
         );
-        assert_eq!(signals_from_error("timeout", "run timed out", ""), vec!["L0"]);
-        assert_eq!(signals_from_error("truncation", "finish_reason length", ""), vec!["L0.5"]);
+        assert_eq!(
+            signals_from_error("timeout", "run timed out", ""),
+            vec!["L0"]
+        );
+        assert_eq!(
+            signals_from_error("truncation", "finish_reason length", ""),
+            vec!["L0.5"]
+        );
         // 结果带 META 截断证据 → 追加 L0.5
         assert_eq!(
-            signals_from_error("data", "value error", "§§FIELDS§§meta_finish_reason=length§§RAW§§x"),
+            signals_from_error(
+                "data",
+                "value error",
+                "§§FIELDS§§meta_finish_reason=length§§RAW§§x"
+            ),
             vec!["L0", "L0.5"]
         );
     }
@@ -198,8 +216,22 @@ mod tests {
     #[test]
     fn incident_dedupe_and_lifecycle() {
         let conn = mem_conn();
-        let id1 = record_incident_conn(&conn, "p", "judge", "contract", "invariant failed: x", "raw");
-        let id2 = record_incident_conn(&conn, "p", "judge", "contract", "invariant failed: y", "raw");
+        let id1 = record_incident_conn(
+            &conn,
+            "p",
+            "judge",
+            "contract",
+            "invariant failed: x",
+            "raw",
+        );
+        let id2 = record_incident_conn(
+            &conn,
+            "p",
+            "judge",
+            "contract",
+            "invariant failed: y",
+            "raw",
+        );
         assert_eq!(id1, id2, "同 (pipeline,proc,code) open 事故聚合为一条");
         let rows = list_incidents_conn(&conn, Some("open"));
         assert_eq!(rows.len(), 1);
@@ -210,7 +242,10 @@ mod tests {
         // close
         close_incident_conn(&conn, id1, "class3: 修了 desc，canary 转绿").unwrap();
         assert_eq!(list_incidents_conn(&conn, Some("open")).len(), 1);
-        assert!(close_incident_conn(&conn, id1, "again").is_err(), "重复关闭报错");
+        assert!(
+            close_incident_conn(&conn, id1, "again").is_err(),
+            "重复关闭报错"
+        );
         let closed = list_incidents_conn(&conn, Some("closed"));
         assert_eq!(closed.len(), 1);
         assert!(closed[0].evidence.contains("resolved: class3"));
