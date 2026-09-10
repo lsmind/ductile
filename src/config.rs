@@ -29,6 +29,24 @@ pub struct AgentConfig {
     pub system: String,
     pub schema: String,
     pub timeout_secs: u64,
+    /// v0.16.1 智力阶梯：tiers = "light,medium,high"（升序）。空 = 旧单模型路径。
+    pub tiers: Vec<String>,
+}
+
+/// v0.16.1 命名模型档：[models.<tier>] —— 档位是语义能力级（light/high），
+/// 不是裸模型名。model 必填；base_url/api_key/timeout 可选（缺省回落 [llm]）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ModelTier {
+    pub model: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub timeout_secs: u64,
+}
+
+/// 档位表：tier 名 → ModelTier。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TiersConfig {
+    pub tiers: BTreeMap<String, ModelTier>,
 }
 
 /// agents 配置集合：name → AgentConfig（[agents.planner] 形态，点分嵌套展开）。
@@ -209,6 +227,7 @@ pub fn load_llm_config_from_path(path: &Path) -> Result<LlmConfig, String> {
 /// v0.16 [agents.<name>] 段 → AgentsConfig（[agents.planner] 点分形态）。
 /// 字段同 [llm] 的 agent 子集：model/system/schema/timeout_secs（system/schema
 /// 内联 \n 解析时展开为真换行）。
+/// v0.16.1 新增：tiers = "light,medium,high"（逗号分隔升序阶梯）。
 pub fn agents_from_sections(sections: &BTreeMap<String, BTreeMap<String, String>>) -> AgentsConfig {
     let mut out = AgentsConfig::default();
     for (sec, kv) in sections {
@@ -224,6 +243,11 @@ pub fn agents_from_sections(sections: &BTreeMap<String, BTreeMap<String, String>
             system: get("system").replace("\\n", "\n"),
             schema: get("schema"),
             timeout_secs: get("timeout_secs").parse().unwrap_or(0),
+            tiers: get("tiers")
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
         };
         out.agents.insert(name.to_string(), agent);
     }
@@ -238,6 +262,131 @@ pub fn load_agents_config() -> AgentsConfig {
         },
         None => AgentsConfig::default(),
     }
+}
+
+/// v0.16.1 [models.<tier>] 段 → TiersConfig（[models.light] 形态）。
+/// tier 名与 [agents.x].tiers 引用对应；model 必填，base_url/api_key/timeout_secs
+/// 可选（缺省回落 [llm]）。
+pub fn tiers_from_sections(sections: &BTreeMap<String, BTreeMap<String, String>>) -> TiersConfig {
+    let mut out = TiersConfig::default();
+    for (sec, kv) in sections {
+        let Some(name) = sec.strip_prefix("models.") else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        let get = |k: &str| kv.get(k).cloned().unwrap_or_default();
+        let model = get("model");
+        if model.is_empty() {
+            continue; // model 必填，空档跳过（fail-safe）
+        }
+        let tier = ModelTier {
+            model,
+            base_url: get("base_url"),
+            api_key: get("api_key"),
+            timeout_secs: get("timeout_secs").parse().unwrap_or(0),
+        };
+        out.tiers.insert(name.to_string(), tier);
+    }
+    out
+}
+
+pub fn load_tiers_config() -> TiersConfig {
+    match find_config_path() {
+        Some(path) => match fs::read_to_string(&path) {
+            Ok(text) => tiers_from_sections(&parse_toml_sections(&text)),
+            Err(_) => TiersConfig::default(),
+        },
+        None => TiersConfig::default(),
+    }
+}
+
+// ── v0.16.1 档位匹配（纯函数，确定性）────────────────────────────
+//
+// 三信号优先序：
+//   1. tier= 实参（手动指定，最高）
+//   2. 复杂度打分（schema 字段数 + prompt/system 长度）
+//   3. 阶梯只有一档 = 钉死该档
+// 失败升级（执行层）：档位 i 桥失败 → 自动升 i+1，直到阶梯顶。
+
+/// 复杂度分数（确定性）：0 = 最轻。
+/// - schema 字段数：>=6 +2，>=3 +1（重抽取）
+/// - prompt 长度：>4000 +2，>1200 +1（长上下文推理）
+/// - system 长度：>400 +1（重角色）
+pub fn complexity_score(prompt_len: usize, system_len: usize, schema_fields: usize) -> u32 {
+    let mut s = 0u32;
+    if schema_fields >= 6 {
+        s += 2;
+    } else if schema_fields >= 3 {
+        s += 1;
+    }
+    if prompt_len > 4000 {
+        s += 2;
+    } else if prompt_len > 1200 {
+        s += 1;
+    }
+    if system_len > 400 {
+        s += 1;
+    }
+    s
+}
+
+/// 分数 → 阶梯起点下标：0-1 → 0档，2-3 → 1档，4+ → 2档（钳到阶梯内）。
+pub fn score_to_tier_index(score: u32, ladder_len: usize) -> usize {
+    if ladder_len == 0 {
+        return 0;
+    }
+    let idx = match score {
+        0..=1 => 0,
+        2..=3 => 1,
+        _ => 2,
+    };
+    idx.min(ladder_len - 1)
+}
+
+/// 解析 agent 的阶梯并选定起始档。
+/// 返回 (tier 名列表, 起始下标)。fail-closed：阶梯引用未定义档位 / tier= 实参
+/// 不在阶梯内 → 硬错误并列出可用档位。
+pub fn resolve_tier_start(
+    agent: &AgentConfig,
+    tiers_cfg: &TiersConfig,
+    prompt_len: usize,
+    system_len: usize,
+    schema_fields: usize,
+    tier_arg: Option<&str>,
+) -> Result<(Vec<String>, usize), String> {
+    // 阶梯完整性校验（fail-closed：引用未定义档位 = 配置漂移，硬错）
+    for t in &agent.tiers {
+        if !tiers_cfg.tiers.contains_key(t) {
+            let known: Vec<String> = tiers_cfg.tiers.keys().cloned().collect();
+            return Err(format!(
+                "agent ladder references undefined tier '{}' — define [models.{}] in config.toml. Known tiers: [{}]",
+                t,
+                t,
+                if known.is_empty() { "(none)".into() } else { known.join(", ") }
+            ));
+        }
+    }
+    let ladder = agent.tiers.clone();
+    if ladder.is_empty() {
+        return Ok((ladder, 0));
+    }
+    // 信号 1：tier= 实参
+    if let Some(want) = tier_arg {
+        return match ladder.iter().position(|t| t == want) {
+            Some(i) => Ok((ladder, i)),
+            None => Err(format!(
+                "tier '{}' not in agent ladder [{}] — pick one of the ladder or drop tier=",
+                want,
+                ladder.join(", ")
+            )),
+        };
+    }
+    // 信号 2：复杂度打分（单档阶梯自然钳到 0）
+    let score = complexity_score(prompt_len, system_len, schema_fields);
+    let idx = score_to_tier_index(score, ladder.len());
+    Ok((ladder, idx))
 }
 
 /// Fill missing OPENAI_* into a Command's environment from config (does not override existing env).
@@ -369,5 +518,114 @@ model = "gpt-4o-mini"
         let agents = agents_from_sections(&parse_toml_sections(text));
         // [agents] 裸段（无 .name）不产出 agent
         assert!(agents.agents.is_empty());
+    }
+
+    // ── v0.16.1 档位阶梯 ──
+
+    #[test]
+    fn tiers_section_parsed() {
+        let text = r#"
+[models.light]
+model = "lfm2.5-8b"
+
+[models.medium]
+model = "qwen3.8:27b"
+timeout_secs = 300
+
+[models.high]
+model = "ornith-1.5:35b"
+base_url = "http://gpu-box:11434/v1"
+"#;
+        let tiers = tiers_from_sections(&parse_toml_sections(text));
+        assert_eq!(tiers.tiers.len(), 3);
+        assert_eq!(tiers.tiers["light"].model, "lfm2.5-8b");
+        assert_eq!(tiers.tiers["light"].timeout_secs, 0); // 缺省回落 [llm]
+        assert_eq!(tiers.tiers["medium"].timeout_secs, 300);
+        assert_eq!(tiers.tiers["high"].base_url, "http://gpu-box:11434/v1");
+    }
+
+    #[test]
+    fn tiers_model_required() {
+        // model 缺失的档被跳过（fail-safe，不产出半档）
+        let text = "[models.broken]\ntimeout_secs = 60\n";
+        let tiers = tiers_from_sections(&parse_toml_sections(text));
+        assert!(tiers.tiers.is_empty());
+    }
+
+    #[test]
+    fn agent_tiers_ladder_parsed() {
+        let text = "[agents.planner]\ntiers = \"light, medium,high\"\n";
+        let agents = agents_from_sections(&parse_toml_sections(text));
+        assert_eq!(
+            agents.get("planner").unwrap().tiers,
+            vec!["light", "medium", "high"]
+        );
+    }
+
+    #[test]
+    fn complexity_scoring() {
+        // 轻任务：短 prompt、无 schema
+        assert_eq!(complexity_score(50, 0, 0), 0);
+        // 中等：3 字段 schema
+        assert_eq!(complexity_score(100, 100, 3), 1);
+        // 重：7 字段 schema + 长 prompt
+        assert_eq!(complexity_score(5000, 100, 7), 4);
+        // 长 system 也加分
+        assert_eq!(complexity_score(100, 500, 0), 1);
+    }
+
+    #[test]
+    fn tier_index_clamped() {
+        assert_eq!(score_to_tier_index(0, 3), 0);
+        assert_eq!(score_to_tier_index(2, 3), 1);
+        assert_eq!(score_to_tier_index(4, 3), 2);
+        // 两档阶梯：重任务钳到顶
+        assert_eq!(score_to_tier_index(4, 2), 1);
+        // 单档阶梯：永远 0
+        assert_eq!(score_to_tier_index(99, 1), 0);
+    }
+
+    #[test]
+    fn resolve_tier_undefined_hard_error() {
+        let agent = AgentConfig {
+            tiers: vec!["light".into(), "ghost".into()],
+            ..Default::default()
+        };
+        let tiers = TiersConfig {
+            tiers: [("light".to_string(), ModelTier { model: "m".into(), ..Default::default() })]
+                .into_iter()
+                .collect(),
+        };
+        let err = resolve_tier_start(&agent, &tiers, 10, 10, 0, None).unwrap_err();
+        assert!(err.contains("undefined tier 'ghost'"), "{err}");
+    }
+
+    #[test]
+    fn resolve_tier_arg_selects_index() {
+        let agent = AgentConfig {
+            tiers: vec!["light".into(), "medium".into(), "high".into()],
+            ..Default::default()
+        };
+        let mk = |m: &str| ModelTier { model: m.into(), ..Default::default() };
+        let tiers = TiersConfig {
+            tiers: [
+                ("light".to_string(), mk("m1")),
+                ("medium".to_string(), mk("m2")),
+                ("high".to_string(), mk("m3")),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        // tier= 手动指定
+        let (_, i) = resolve_tier_start(&agent, &tiers, 0, 0, 0, Some("high")).unwrap();
+        assert_eq!(i, 2);
+        // tier= 不在阶梯内 → 硬错误
+        assert!(resolve_tier_start(&agent, &tiers, 0, 0, 0, Some("ultra")).is_err());
+        // 复杂度选择：轻 → 0
+        let (_, i) = resolve_tier_start(&agent, &tiers, 50, 0, 0, None).unwrap();
+        assert_eq!(i, 0);
+        // 重 → 2
+        let (_, i) = resolve_tier_start(&agent, &tiers, 5000, 500, 7, None).unwrap();
+        assert_eq!(i, 2);
     }
 }

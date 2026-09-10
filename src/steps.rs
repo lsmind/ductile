@@ -490,13 +490,48 @@ fn exec_llm(
         }
     };
     let count = extract_string_arg("count", body);
+    let tier_arg = {
+        let t = extract_string_arg("tier", body);
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
+    };
     let resolved_prompt = resolve_vars(&prompt_raw, topic, results);
     let resolved_template = resolve_vars(&template, topic, results);
     let resolved_system = resolve_vars(&system, topic, results);
     let resolved_schema = resolve_vars(&schema, topic, results);
     let resolved_model = resolve_vars(&model, topic, results);
     if resolved_prompt.is_empty() {
-        return Err("llm requires prompt=\"...\" or input=\"...\"".into());
+        return Err("llm requires prompt=\\\"...\\\" or input=\\\"...\\\"".into());
+    }
+
+    // v0.16.1 智力阶梯：agent 声明 tiers 且未显式 model= → 阶梯执行。
+    // 档位 i 失败自动升 i+1（Reroute 换路哲学，阶梯有界）。显式 model= 完全
+    // 旁路（探测类场景）。
+    let schema_fields = if resolved_schema.is_empty() {
+        0
+    } else {
+        resolved_schema.split(',').count()
+    };
+    let use_ladder = agent_cfg.as_ref().is_some_and(|a| !a.tiers.is_empty())
+        && extract_string_arg("model", body).is_empty();
+    let mut ladder: Vec<String> = Vec::new();
+    let mut tier_idx = 0usize;
+    if use_ladder {
+        let agent = agent_cfg.as_ref().unwrap();
+        let tiers_cfg = crate::config::load_tiers_config();
+        let (l, idx) = crate::config::resolve_tier_start(
+            agent,
+            &tiers_cfg,
+            resolved_prompt.len(),
+            resolved_system.len(),
+            schema_fields,
+            tier_arg.as_deref(),
+        )?;
+        ladder = l;
+        tier_idx = idx;
     }
     eprintln!(
         "    -> llm: model={} schema={} input.len={}{}",
@@ -529,10 +564,7 @@ fn exec_llm(
         args.push("--template".into());
         args.push(resolved_template);
     }
-    if !resolved_model.is_empty() {
-        args.push("--model".into());
-        args.push(resolved_model);
-    }
+    // model 不在此注入：阶梯路径按档位动态换，legacy 路径走 resolved_model
     if !resolved_system.is_empty() {
         args.push("--system".into());
         args.push(resolved_system);
@@ -546,6 +578,95 @@ fn exec_llm(
         args.push(count);
     }
 
+    // 阶梯路径：档位 i 失败 → 升 i+1 重试（阶梯有界 = 自动 Reroute）。
+    // 每档注入 [models.<tier>] 的 model/base_url/api_key/timeout（显式覆盖 [llm]）。
+    if !ladder.is_empty() {
+        let tiers_cfg = crate::config::load_tiers_config();
+        let agent_timeout = agent_cfg.as_ref().map(|a| a.timeout_secs).unwrap_or(0);
+        let mut last_err = String::new();
+        let mut i = tier_idx;
+        while i < ladder.len() {
+            let tier_name = &ladder[i];
+            let Some(tier) = tiers_cfg.tiers.get(tier_name) else {
+                // resolve_tier_start 已校验过——此处理论不可达，fail-closed 兜底
+                return Err(format!("tier '{}' vanished from config mid-run", tier_name));
+            };
+            let mut t_args = args.clone();
+            t_args.push("--model".into());
+            t_args.push(tier.model.clone());
+            eprintln!(
+                "    -> llm tier [{}/{}] {} -> model={}",
+                i + 1,
+                ladder.len(),
+                tier_name,
+                tier.model
+            );
+            let out = run_python_bridge_tier(
+                &bridge,
+                &t_args,
+                agent_timeout,
+                Some(tier),
+            );
+            match out {
+                Ok(output) if output.status.success() => {
+                    let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
+                    if let Some(kvs) = parse_dsl_result_block(&stdout_text) {
+                        if !kvs.is_empty() {
+                            eprintln!(
+                                "    -> llm result: {} fields (tier={})",
+                                kvs.len(),
+                                tier_name
+                            );
+                            let mut enriched = kvs;
+                            enriched.push(("meta_tier".into(), tier_name.clone()));
+                            enriched.push(("meta_model_id".into(), tier.model.clone()));
+                            return Ok(Value::Text(encode_structured_result(
+                                &enriched,
+                                &stdout_text,
+                            )));
+                        }
+                    }
+                    // 成功但无结构化块——原样返回（meta 已在 bridge 侧？没有；补 tier 标注）
+                    eprintln!("    -> llm result: plain text (tier={})", tier_name);
+                    return Ok(Value::Text(stdout_text));
+                }
+                Ok(output) => {
+                    last_err = format!(
+                        "tier '{}' (model={}) failed: {}",
+                        tier_name,
+                        tier.model,
+                        String::from_utf8_lossy(&output.stderr)
+                            .chars()
+                            .take(200)
+                            .collect::<String>()
+                    );
+                }
+                Err(e) => {
+                    last_err = format!("tier '{}' bridge launch failed: {}", tier_name, e);
+                }
+            }
+            if i + 1 < ladder.len() {
+                eprintln!(
+                    "    -> llm escalate: {} -> {} (upgrading intelligence tier)",
+                    tier_name,
+                    ladder[i + 1]
+                );
+            }
+            i += 1;
+        }
+        return Err(format!(
+            "llm: all ladder tiers [{}] failed. Last: {}",
+            ladder[tier_idx..].join(", "),
+            last_err
+        ));
+    }
+
+    // legacy 单模型路径
+    let mut args = args;
+    if !resolved_model.is_empty() {
+        args.push("--model".into());
+        args.push(resolved_model);
+    }
     let output = if let Some(a) = &agent_cfg {
         run_python_bridge_with_timeout(&bridge, &args, a.timeout_secs)?
     } else {
@@ -591,6 +712,42 @@ fn run_python_bridge_with_timeout(
         cmd.arg(bridge).args(args);
         crate::config::apply_llm_env_from_config(&mut cmd, &cfg);
         if agent_timeout_secs > 0 {
+            cmd.env("OPENAI_TIMEOUT_SECS", agent_timeout_secs.to_string());
+        }
+        match cmd.output() {
+            Ok(o) => return Ok(o),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("llm bridge launch failed ({py}): {e}")),
+        }
+    }
+    Err("llm bridge launch failed: neither python3 nor python found on PATH".into())
+}
+
+/// v0.16.1 档位桥：tier 的 model 经 --model 已注入 args；此处注入档位的
+/// base_url/api_key/timeout（tier 显式值覆盖 [llm]，缺省回落）。
+fn run_python_bridge_tier(
+    bridge: &str,
+    args: &[String],
+    agent_timeout_secs: u64,
+    tier: Option<&crate::config::ModelTier>,
+) -> Result<std::process::Output, String> {
+    let cfg = crate::config::load_llm_config();
+    for py in ["python3", "python"] {
+        let mut cmd = Command::new(py);
+        cmd.arg(bridge).args(args);
+        crate::config::apply_llm_env_from_config(&mut cmd, &cfg);
+        if let Some(t) = tier {
+            if !t.base_url.is_empty() {
+                cmd.env("OPENAI_BASE_URL", &t.base_url);
+            }
+            if !t.api_key.is_empty() {
+                cmd.env("OPENAI_API_KEY", &t.api_key);
+            }
+            if t.timeout_secs > 0 {
+                cmd.env("OPENAI_TIMEOUT_SECS", t.timeout_secs.to_string());
+            }
+        }
+        if agent_timeout_secs > 0 && tier.is_none() {
             cmd.env("OPENAI_TIMEOUT_SECS", agent_timeout_secs.to_string());
         }
         match cmd.output() {

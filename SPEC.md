@@ -73,6 +73,14 @@ Pipeline("name", "optional description", cwd="...", env=["K=V", ...])
 >    > 内置默认。agent 不存在 → 硬错误并列出可用 agents（fail-closed）。
 >    base_url/api_key 永远来自 `[llm]`（连接层不属于 agent 语义）。
 >    示例：`pipelines/agent_probe.pipeline`。
+> 5. **智力阶梯（v0.16.1）**：`[models.<tier>]` 定义命名档位（model 必填 +
+>    base_url/api_key/timeout_secs 可选回落 [llm]）；`[agents.x]` 声明
+>    `tiers = "light,medium,high"`（升序）。档位选择三信号：`tier=` 实参（最高）
+>    > 复杂度打分（schema 字段数 ≥3/≥6、prompt >1200/>4000、system >400，
+>    确定性）> 单档阶梯钉死。**失败升级**：档 i 桥失败自动升 i+1 直到阶梯顶
+>    （有界 Reroute）；阶梯耗尽 → 汇总错误。`model=` 实参完全旁路阶梯（探测
+>    场景）。阶梯引用未定义档位 / `tier=` 不在阶梯内 → 硬错误（fail-closed）。
+>    结果自动附 `meta_tier`/`meta_model_id` 字段。档位是语义能力级，非裸模型名。
 >
 > **v0.11 退役语法**（仍可解析但警告+忽略，不入 AST）：`.cost(latency=..., ...)`、
 > `.ensure(result => ..., "...")`、`.check(result => ..., "...")`。
