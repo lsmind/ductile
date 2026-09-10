@@ -2,20 +2,11 @@
 // hyper-reuse-drill.pipeline — 超图层/节点复用场景回归
 // 直跑：ductile run examples/scripts/hyper-reuse-drill.pipeline
 // 逻辑在 hyper_reuse_drill.sh（九项场景）；本文件只做编排+门禁
-Pipeline("hyper_reuse_drill", "hyper 层场景：整图同构 + 节点复用可查")
-  .proc("drill")
-    .desc("跑 hyper_reuse_drill.sh")
-    .plan(
-      s -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && bash examples/scripts/hyper_reuse_drill.sh")
-        .tags(#test, #hyper)
-        .retry(n=0)
-        .desc("九项场景 → HYPER-REUSE-PASS")
-    )
-  .proc("gate")
+// v0.16 糖化：内联糖 + 管线 cwd
+Pipeline("hyper_reuse_drill", "hyper 层场景：整图同构 + 节点复用可查", cwd="${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)}")
+  .proc("drill", run("bash examples/scripts/hyper_reuse_drill.sh").tags(#hyper))
+    .desc("跑 hyper_reuse_drill.sh — 九项场景 → HYPER-REUSE-PASS")
+  .proc("gate", run("echo '@drill' | grep -q HYPER-REUSE-PASS && echo DRILL-OK || (echo DRILL-FAIL; echo '@drill'; exit 1)").tags(#gate))
     .desc("门禁")
-    .plan(
-      g -> run("echo '@drill' | grep -q HYPER-REUSE-PASS && echo DRILL-OK || (echo DRILL-FAIL; echo '@drill'; exit 1)")
-        .tags(#gate)
-    )
   .proc("deliver")
     .deliver(@gate)

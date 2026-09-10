@@ -2,27 +2,13 @@
 // disk-watch.pipeline — 磁盘哨兵：HOME 分区水位 + HOME 下大目录 top5 → 报告
 // 直跑：./disk-watch.pipeline
 // 路径：用 $HOME（可用 DUCTILE_HOME 覆盖探测根）
+// v0.16 糖化：单 impl 内联糖 + tags 动词推导
 Pipeline("disk_watch", "磁盘哨兵：HOME 使用率 + 大目录排行，报告落盘")
-  .proc("usage")
-    .desc("HOME 所在分区水位")
-    .plan(
-      root -> run("df -h \"${DUCTILE_HOME:-$HOME}\" | tail -1 | awk '{print $5}'")
-        .tags(#run, #shell)
-        .desc("使用率")
-    )
-  .proc("big")
-    .desc("大目录排行")
-    .plan(
-      top -> run("du -sh \"${DUCTILE_HOME:-$HOME}\"/* 2>/dev/null | sort -rh | head -5")
-        .tags(#run, #shell)
-        .desc("top5")
-    )
-  .proc("report")
-    .desc("报告落盘")
-    .plan(
-      w -> write(to="/tmp/disk_watch.txt", content="root usage: @usage | top5: @big")
-        .tags(#write, #file)
-        .desc("写 /tmp/disk_watch.txt")
-    )
+  .proc("usage", run("df -h \"${DUCTILE_HOME:-$HOME}\" | tail -1 | awk '{print $5}'"))
+    .desc("HOME 所在分区水位 — 使用率")
+  .proc("big", run("du -sh \"${DUCTILE_HOME:-$HOME}\"/* 2>/dev/null | sort -rh | head -5"))
+    .desc("大目录排行 — top5")
+  .proc("report", write(to="/tmp/disk_watch.txt", content="root usage: @usage | top5: @big"))
+    .desc("报告落盘 — 写 /tmp/disk_watch.txt")
   .proc("deliver")
     .deliver(@report)

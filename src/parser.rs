@@ -901,14 +901,19 @@ fn extract_cost_and_modifiers(
             let prefix = ".ensure(";
             let after = &body[e_pos..];
             if let Some(close) = find_matching_paren(after) {
-                let char_close = after
+                // find_matching_paren 返回字节索引（v0.14.2 语义），但它是相对
+                // after 的——close+1 可能正好落在多字节字符中间或越界（末尾
+                // 中文标点形态实测 panic start byte index out of bounds）。
+                // 剥离用 char 边界钳制：close+1 不在边界上就退到下一个边界。
+                let strip_at = (close + 1).min(after.len());
+                let strip_at = after
                     .char_indices()
-                    .nth(close)
                     .map(|(b, _)| b)
+                    .find(|b| *b >= strip_at)
                     .unwrap_or(after.len());
                 let inner_start = prefix.len();
-                if char_close >= inner_start {
-                    body = format!("{}{}", &body[..e_pos], &after[char_close + 1..]);
+                if strip_at >= inner_start {
+                    body = format!("{}{}", &body[..e_pos], &after[strip_at..]);
                     continue;
                 }
                 break;

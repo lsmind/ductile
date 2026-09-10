@@ -2,23 +2,17 @@
 // llm-ping.pipeline — LLM 桥接健康检查：探测 → 失败换路 → 结果落盘
 // 直跑：./llm-ping.pipeline
 // 需要 config.toml [llm] 或 OPENAI_API_KEY（可选 OPENAI_BASE_URL / OPENAI_MODEL；Ollama：base_url=http://127.0.0.1:11434/v1）
+// v0.16 糖化：单 impl proc 内联糖 + tags 动词推导；双路探测保留 .plan 箭头
 Pipeline("llm_ping", "LLM 桥接健康检查：主路探测 + 失败自动换备选桥")
   .proc("probe")
     .desc("探测 LLM 桥")
     .plan(
-      primary -> llm(prompt="回复一个字：好", model="gpt-4o-mini")
-        .tags(#llm, #probe)
+      primary -> llm(prompt="回复一个字：好", model="gpt-4o-mini").tags(#probe)
         .desc("主桥探测"),
-      backup -> llm(prompt="回复一个字：好", model="gpt-4o-mini")
-        .tags(#llm, #probe)
+      backup -> llm(prompt="回复一个字：好", model="gpt-4o-mini").tags(#probe)
         .desc("备桥（主桥死时接管）")
     )
-  .proc("record")
-    .desc("结果落盘")
-    .plan(
-      w -> write(to="/tmp/llm_ping.txt", content="probe: @probe")
-        .tags(#write, #file)
-        .desc("写 /tmp/llm_ping.txt")
-    )
+  .proc("record", write(to="/tmp/llm_ping.txt", content="probe: @probe"))
+    .desc("结果落盘 — 写 /tmp/llm_ping.txt")
   .proc("deliver")
     .deliver(@record)

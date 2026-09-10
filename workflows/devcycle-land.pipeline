@@ -4,40 +4,20 @@
 // 门禁：selftest SELFTEST-PASS 才 ship；ship 内再跑 cargo test 并 commit（+push）
 // v0.14.3: 依赖边全部走 .when(@field) 引擎内求值——@ref 文本注入 bash 会因
 // 多行/单引号炸（实测 crash），结构化信号 + .when 是唯一安全形态。
-Pipeline("devcycle_land", "verify → gate → ship → report")
-  .proc("preflight")
+// v0.16 糖化：内联糖 + 管线 cwd（ROOT= 前缀消失，相对路径锚到仓库根）
+Pipeline("devcycle_land", "verify → gate → ship → report", cwd="${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)}")
+  .proc("preflight", run("mkdir -p target/devcycle && git status -sb > target/devcycle/land-preflight.txt && echo preflight-ok").tags(#git))
     .desc("落盘前快检：工作区非空或允许空提交跳过由 ship 处理")
-    .plan(
-      p -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && mkdir -p target/devcycle && git status -sb > target/devcycle/land-preflight.txt && echo preflight-ok")
-        .tags(#git)
-    )
-  .proc("verify")
+  .proc("verify", run("export DUCTILE_HOME=\"${DUCTILE_HOME:-$PWD/examples}\" DUCTILE_DATA=\"${DUCTILE_DATA:-$PWD/examples}\" && ductile run ./selftest.pipeline 2>&1 | tee target/devcycle/selftest.log | tail -20; grep -q SELFTEST-PASS target/devcycle/selftest.log && printf '%s\\n' '##DSL_RESULT' 'pass=1' '##DSL_END' || (printf '%s\\n' '##DSL_RESULT' 'pass=0' '##DSL_END'; exit 1)").tags(#selftest))
     .desc("完整自测门禁（unit+探针+脚本+hyper）→ 结构化信号 pass=1/0")
-    .plan(
-      v -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && export DUCTILE_HOME=\"${DUCTILE_HOME:-$ROOT/examples}\" DUCTILE_DATA=\"${DUCTILE_DATA:-$ROOT/examples}\" && ductile run ./selftest.pipeline 2>&1 | tee target/devcycle/selftest.log | tail -20; grep -q SELFTEST-PASS target/devcycle/selftest.log && printf '%s\\n' '##DSL_RESULT' 'pass=1' '##DSL_END' || (printf '%s\\n' '##DSL_RESULT' 'pass=0' '##DSL_END'; exit 1)")
-        .tags(#test, #selftest)
-    )
-  .proc("gate")
+  .proc("gate", run("grep -q SELFTEST-PASS target/devcycle/selftest.log && printf '%s\\n' '##DSL_RESULT' 'score=100' 'verdict=pass' '##DSL_END' || (printf '%s\\n' '##DSL_RESULT' 'score=0' 'verdict=fail' '##DSL_END'; exit 1)").tags(#gate))
     .desc("裁判：verify 绿才有资格 ship（.when 建边 + 文件复核双保险）")
-    .plan(
-      g -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && grep -q SELFTEST-PASS target/devcycle/selftest.log && printf '%s\\n' '##DSL_RESULT' 'score=100' 'verdict=pass' '##DSL_END' || (printf '%s\\n' '##DSL_RESULT' 'score=0' 'verdict=fail' '##DSL_END'; exit 1)")
-        .tags(#gate, #judge)
-    )
     .when(@verify.pass == 1)
-  .proc("ship")
+  .proc("ship", run("ductile run ./ship.pipeline '{topic}' 2>&1 | tee target/devcycle/ship.log | tail -30").tags(#ship).retry(n=1))
     .desc("测试门禁 → add → commit → push（ship.pipeline）")
-    .plan(
-      s -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && ductile run ./ship.pipeline '{topic}' 2>&1 | tee target/devcycle/ship.log | tail -30")
-        .tags(#git, #ship)
-        .retry(n=1)
-    )
     .when(@gate.score >= 80)
-  .proc("report")
+  .proc("report", run("mkdir -p target/devcycle && { echo '# devcycle land report'; echo; echo \"topic: {topic}\"; echo; echo '## gate'; grep -E 'SELFTEST-(PASS|FAIL)' target/devcycle/selftest.log | tail -1; echo; echo '## ship (tail)'; tail -15 target/devcycle/ship.log 2>/dev/null; echo; echo '## git'; git log --oneline -3; git status -sb; } > target/devcycle/report.md && echo DEVCYCLE-LAND-PASS && cat target/devcycle/report.md").tags(#report))
     .desc("周期报告落盘（gate 结果从落盘文件取，不注入 @ref）")
-    .plan(
-      r -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && mkdir -p target/devcycle && { echo '# devcycle land report'; echo; echo \"topic: {topic}\"; echo; echo '## gate'; grep -E 'SELFTEST-(PASS|FAIL)' target/devcycle/selftest.log | tail -1; echo; echo '## ship (tail)'; tail -15 target/devcycle/ship.log 2>/dev/null; echo; echo '## git'; git log --oneline -3; git status -sb; } > target/devcycle/report.md && echo DEVCYCLE-LAND-PASS && cat target/devcycle/report.md")
-        .tags(#write, #report)
-    )
     .when(@gate.score >= 80)
   .proc("deliver")
     .deliver(@report)

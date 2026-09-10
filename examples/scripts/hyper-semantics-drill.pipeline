@@ -1,9 +1,6 @@
 // hyper-semantics-drill.pipeline — 超图语义对照门禁
-Pipeline("hyper-semantics-drill", "gate/xor/bundle/iso/legacy semantics")
-  .proc("run")
-    .plan(
-      s -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && bash examples/scripts/hyper_semantics_drill.sh")
-        .tags(#test,#hyper)
-    )
+// v0.16 糖化：内联糖 + 管线 cwd
+Pipeline("hyper-semantics-drill", "gate/xor/bundle/iso/legacy semantics", cwd="${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)}")
+  .proc("run", run("bash examples/scripts/hyper_semantics_drill.sh").tags(#hyper))
   .proc("deliver")
     .deliver(@run)

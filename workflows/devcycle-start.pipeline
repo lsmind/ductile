@@ -2,16 +2,10 @@
 // workflows/devcycle-start.pipeline — 从用户指令到 agent handoff（编码前）
 // 用法：ductile run workflows/devcycle-start.pipeline "用户自然语言指令"
 // 产出：target/devcycle/plan.md + handoff.md；有 LLM 则结构化抽取，否则 stub
-// v0.15 注入修复：LLM 输出一律不过 bash——write 内置动词落盘、.when 建边、run 只 cat 文件
-// 下一步：智能体按 handoff 改代码 → ductile run workflows/devcycle-land.pipeline "commit msg"
-Pipeline("devcycle_start", "指令→计划→预检→handoff 落盘")
-  .proc("intake")
-    .desc("固化用户指令")
-    .plan(
-      w -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && mkdir -p target/devcycle && printf '%s\n' '{topic}' > target/devcycle/instruction.txt && cat target/devcycle/instruction.txt")
-        .tags(#write, #intent)
-        .desc("固化指令；输出=指令原文（cat 落盘文件，不走 echo 引号解析）")
-    )
+// v0.16 糖化：内联糖 + 管线 cwd（ROOT= 前缀消失，相对路径锚到仓库根）
+Pipeline("devcycle_start", "指令→计划→预检→handoff 落盘", cwd="${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)}")
+  .proc("intake", run("mkdir -p target/devcycle && printf '%s\n' '{topic}' > target/devcycle/instruction.txt && cat target/devcycle/instruction.txt").tags(#intent))
+    .desc("固化指令；输出=指令原文（cat 落盘文件，不走 echo 引号解析）")
   .proc("plan")
     .desc("结构化计划（LLM 优先，stub 兜底）")
     .plan(
@@ -20,32 +14,19 @@ Pipeline("devcycle_start", "指令→计划→预检→handoff 落盘")
         system="你是 ductile 仓库工程助手。把用户指令收成短计划。commit_msg 用中文或英文 feat/fix/docs 前缀，一行。needs_hyper/needs_docs 填 true 或 false。",
         schema="summary,kind,commit_msg,needs_hyper,needs_docs,touch_hint,risks"
       )
-        .tags(#llm, #plan)
         .desc("结构化抽取"),
       stub -> run("printf '%s\n' '##DSL_RESULT' 'summary=stub-plan-from-topic' 'kind=feat' \"commit_msg={topic}\" 'needs_hyper=false' 'needs_docs=true' 'touch_hint=see-git-status' 'risks=no-llm-config' '##DSL_END'")
-        .tags(#plan, #stub)
+        .tags(#stub)
         .desc("无 API 时本地计划（不 echo @ref——topic 引号不进 bash）")
     )
-  .proc("plan_dump")
+  .proc("plan_dump", write(to="target/devcycle/plan.md", content=@plan))
     .desc("LLM 计划落盘（write 在 Rust 侧解析 @ref，不过 bash——单引号/多行安全）")
-    .plan(
-      d -> write(to="target/devcycle/plan.md", content=@plan)
-        .tags(#write, #plan)
-    )
     .when(@plan.summary)
-  .proc("preflight")
+  .proc("preflight", run("mkdir -p target/devcycle && { echo '## git'; git status -sb; echo; echo '## hyper similar (soft)'; ductile hyper similar examples/hyper/unstructured_extract.hyper --json examples/hyper 2>/dev/null | head -c 2000 || echo 'hyper-skip'; } > target/devcycle/preflight.txt && printf '%s\n' '##DSL_RESULT' 'ok=1' '##DSL_END'").tags(#scan))
     .desc("仓库预检：状态 + 超图复用提示")
-    .plan(
-      p -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && mkdir -p target/devcycle && { echo '## git'; git status -sb; echo; echo '## hyper similar (soft)'; ductile hyper similar examples/hyper/unstructured_extract.hyper --json examples/hyper 2>/dev/null | head -c 2000 || echo 'hyper-skip'; } > target/devcycle/preflight.txt && printf '%s\n' '##DSL_RESULT' 'ok=1' '##DSL_END'")
-        .tags(#git, #scan)
-    )
     .when(@plan.summary)
-  .proc("handoff")
+  .proc("handoff", run("mkdir -p target/devcycle && OUT=target/devcycle/handoff.md && { echo '# Ductile devcycle handoff'; echo; echo '## Instruction'; cat target/devcycle/instruction.txt; echo; cat target/devcycle/plan.md; echo; echo '## Preflight'; cat target/devcycle/preflight.txt; echo; echo '## Agent checklist'; echo '1. Use .pipeline / .hyper (explicit gate ports)'; echo '2. selftest: ductile run ./selftest.pipeline'; echo '3. land: ductile run workflows/devcycle-land.pipeline \"<commit_msg>\"'; echo '4. Hyper constrains shape only'; echo; echo '## Done when'; echo '- SELFTEST-PASS then ship/land commit'; } > \"$OUT\" && echo HANDOFF-READY && wc -l \"$OUT\"").tags(#agent))
     .desc("写给智能体的执行卡（全部 cat 落盘文件，不注入 @ref 内容）")
-    .plan(
-      h -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && mkdir -p target/devcycle && OUT=target/devcycle/handoff.md && { echo '# Ductile devcycle handoff'; echo; echo '## Instruction'; cat target/devcycle/instruction.txt; echo; cat target/devcycle/plan.md; echo; echo '## Preflight'; cat target/devcycle/preflight.txt; echo; echo '## Agent checklist'; echo '1. Use .pipeline / .hyper (explicit gate ports)'; echo '2. selftest: ductile run ./selftest.pipeline'; echo '3. land: ductile run workflows/devcycle-land.pipeline \"<commit_msg>\"'; echo '4. Hyper constrains shape only'; echo; echo '## Done when'; echo '- SELFTEST-PASS then ship/land commit'; } > \"$OUT\" && echo HANDOFF-READY && wc -l \"$OUT\"")
-        .tags(#write, #agent)
-    )
     .when(@preflight.ok == 1)
   .proc("deliver")
     .deliver(@handoff)

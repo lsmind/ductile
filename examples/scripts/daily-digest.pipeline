@@ -3,34 +3,15 @@
 // 直跑：./daily-digest.pipeline
 // 目录：${DUCTILE_DATA:-$HOME/data}/models/ai-video（可用环境变量覆盖）
 // 注：write() 的 \n 是字面量不转义；多统计量拆独立 proc（@proc 只暴露获胜 impl）
+// v0.16 糖化：单 impl 内联糖 + tags 动词推导（#scan 语义标记手写叠加）
 Pipeline("daily_digest", "扫描模型目录，统计模型文件数与磁盘占用，写日报")
-  .proc("scan")
-    .desc("列出模型目录")
-    .plan(
-      main -> run("ls \"${DUCTILE_DATA:-$HOME/data}/models/ai-video\" 2>/dev/null || echo '(missing dir)'")
-        .tags(#fs, #scan)
-        .desc("模型目录清单（缺目录不杀整管线）")
-    )
-  .proc("count")
-    .desc("模型文件计数")
-    .plan(
-      n -> run("find \"${DUCTILE_DATA:-$HOME/data}/models/ai-video\" -name '*.safetensors' -o -name '*.gguf' 2>/dev/null | wc -l")
-        .tags(#run, #shell)
-        .desc("模型文件总数（find|wc 永不非零退出）")
-    )
-  .proc("disk")
-    .desc("目录体积")
-    .plan(
-      d -> run("du -sh \"${DUCTILE_DATA:-$HOME/data}/models/ai-video\" 2>/dev/null | cut -f1 || echo 0")
-        .tags(#run, #shell)
-        .desc("du 汇总")
-    )
-  .proc("report")
-    .desc("落盘日报")
-    .plan(
-      w -> write(to="/tmp/daily_digest.txt", content="model files: @count | disk: @disk")
-        .tags(#write, #file)
-        .desc("写 /tmp/daily_digest.txt")
-    )
+  .proc("scan", run("ls \"${DUCTILE_DATA:-$HOME/data}/models/ai-video\" 2>/dev/null || echo '(missing dir)'").tags(#scan))
+    .desc("模型目录清单（缺目录不杀整管线）")
+  .proc("count", run("find \"${DUCTILE_DATA:-$HOME/data}/models/ai-video\" -name '*.safetensors' -o -name '*.gguf' 2>/dev/null | wc -l"))
+    .desc("模型文件总数（find|wc 永不非零退出）")
+  .proc("disk", run("du -sh \"${DUCTILE_DATA:-$HOME/data}/models/ai-video\" 2>/dev/null | cut -f1 || echo 0"))
+    .desc("du 汇总")
+  .proc("report", write(to="/tmp/daily_digest.txt", content="model files: @count | disk: @disk"))
+    .desc("写 /tmp/daily_digest.txt")
   .proc("deliver")
     .deliver(@report)

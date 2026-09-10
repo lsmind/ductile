@@ -3,26 +3,16 @@
 //
 // 开工（指令→handoff）：
 //   ./devcycle.pipeline "start: 给 hyper 加 bundle 文档"
-//   ductile run ./devcycle.pipeline "start: ..."
-//
 // 落盘（selftest→ship）：
 //   ./devcycle.pipeline "feat: hyper 约束面文档"
-//   ductile run ./devcycle.pipeline "feat: ..."
 //
 // 全貌见 docs/DEVCYCLE.md 与 workflows/devcycle.hyper
-Pipeline("devcycle", "devcycle 路由：start:* → 开工；否则 → 落盘")
-  .proc("route")
+// v0.16 糖化：内联糖 + 管线 cwd（ROOT= 前缀消失）
+Pipeline("devcycle", "devcycle 路由：start:* → 开工；否则 → 落盘", cwd="${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)}")
+  .proc("route", run("mkdir -p target/devcycle && TOPIC='{topic}' && case \"$TOPIC\" in start:*) REST=\"${TOPIC#start:}\" && REST=\"${REST# }\" && ductile run workflows/devcycle-start.pipeline \"$REST\" 2>&1 | tee target/devcycle/route.log | tail -40 && printf '%s\\n' '##DSL_RESULT' 'routed=1' '##DSL_END' ;; *) ductile run workflows/devcycle-land.pipeline \"$TOPIC\" 2>&1 | tee target/devcycle/route.log | tail -40 && printf '%s\\n' '##DSL_RESULT' 'routed=1' '##DSL_END' ;; esac").tags(#route))
     .desc("按 topic 前缀分流")
-    .plan(
-      r -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && mkdir -p target/devcycle && TOPIC='{topic}' && case \"$TOPIC\" in start:*) REST=\"${TOPIC#start:}\" && REST=\"${REST# }\" && ductile run workflows/devcycle-start.pipeline \"$REST\" 2>&1 | tee target/devcycle/route.log | tail -40 && printf '%s\n' '##DSL_RESULT' 'routed=1' '##DSL_END' ;; *) ductile run workflows/devcycle-land.pipeline \"$TOPIC\" 2>&1 | tee target/devcycle/route.log | tail -40 && printf '%s\n' '##DSL_RESULT' 'routed=1' '##DSL_END' ;; esac")
-        .tags(#route)
-    )
-  .proc("gate")
+  .proc("gate", run("grep -qE 'HANDOFF-READY|DEVCYCLE-LAND-PASS|ROUTE-START|ROUTE-LAND' target/devcycle/route.log && echo DEVCYCLE-OK || (echo DEVCYCLE-FAIL; tail -5 target/devcycle/route.log; exit 1)").tags(#gate))
     .desc("出口标记（grep 落盘 route.log，不注入 @ref 内容；.when 建边保序）")
-    .plan(
-      g -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && grep -qE 'HANDOFF-READY|DEVCYCLE-LAND-PASS|ROUTE-START|ROUTE-LAND' target/devcycle/route.log && echo DEVCYCLE-OK || (echo DEVCYCLE-FAIL; tail -5 target/devcycle/route.log; exit 1)")
-        .tags(#gate)
-    )
     .when(@route.routed == 1)
   .proc("deliver")
     .deliver(@gate)
