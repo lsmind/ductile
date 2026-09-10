@@ -8,7 +8,8 @@
 use crate::ast::*;
 use crate::dslresult::{encode_structured_result, parse_dsl_result_block};
 use crate::textargs::{
-    expand_fs_path, extract_all_string_args, extract_first_string, extract_string_arg, resolve_vars,
+    expand_fs_path, extract_all_string_args, extract_first_bare_arg, extract_first_string,
+    extract_string_arg, resolve_vars,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -424,6 +425,35 @@ fn exec_llm(
     body: &str,
     results: &BTreeMap<String, Value>,
 ) -> Result<Value, String> {
+    // v0.16 agent 引用：llm(<name>, ...) 裸首参（与 script(name, k=v) 同工效学）。
+    // 首参是裸标识符（非 k=v）且 [agents.<name>] 存在 → 视为 agent 名，从
+    // config.toml 取 model/system/schema/timeout。显式实参优先于 agent 配置
+    //（实参覆盖配置——局部临时改 model 不用动配置文件）。agent 不存在 →
+    // fail-closed 硬错误（防手滑把普通词当 agent 静默落错模型）。
+    let first_bare = extract_first_bare_arg(body);
+    let mut agent_cfg: Option<crate::config::AgentConfig> = None;
+    if let Some(name) = &first_bare {
+        let agents = crate::config::load_agents_config();
+        match agents.get(name) {
+            Some(a) => agent_cfg = Some(a.clone()),
+            None => {
+                // 真实意图校验：首参裸标识符但无对应 [agents.*] 段——若它不是
+                // 任何已知 k=v 参数名，就是想引 agent 写错了名，硬错误。
+                let known_keys = [
+                    "prompt", "input", "template", "model", "system", "schema", "count",
+                ];
+                if !known_keys.contains(&name.as_str()) {
+                    let available: Vec<String> = agents.agents.keys().cloned().collect();
+                    return Err(format!(
+                        "llm: unknown agent '{}' (first bare arg) — define [agents.{}] in config.toml or use prompt=/input=. Known agents: [{}]",
+                        name, name,
+                        if available.is_empty() { "(none)".to_string() } else { available.join(", ") }
+                    ));
+                }
+            }
+        }
+    }
+
     // prompt= aliases input= (examples historically used prompt=)
     let prompt_raw = {
         let p = extract_string_arg("prompt", body);
@@ -434,9 +464,31 @@ fn exec_llm(
         }
     };
     let template = extract_string_arg("template", body);
-    let model = extract_string_arg("model", body);
-    let system = extract_string_arg("system", body);
-    let schema = extract_string_arg("schema", body);
+    // 合并序：显式实参 > agent 配置 > [llm] 默认（bridge 侧 env 兜底）
+    let model = {
+        let m = extract_string_arg("model", body);
+        if m.is_empty() {
+            agent_cfg.as_ref().map(|a| a.model.clone()).unwrap_or_default()
+        } else {
+            m
+        }
+    };
+    let system = {
+        let s = extract_string_arg("system", body);
+        if s.is_empty() {
+            agent_cfg.as_ref().map(|a| a.system.clone()).unwrap_or_default()
+        } else {
+            s
+        }
+    };
+    let schema = {
+        let s = extract_string_arg("schema", body);
+        if s.is_empty() {
+            agent_cfg.as_ref().map(|a| a.schema.clone()).unwrap_or_default()
+        } else {
+            s
+        }
+    };
     let count = extract_string_arg("count", body);
     let resolved_prompt = resolve_vars(&prompt_raw, topic, results);
     let resolved_template = resolve_vars(&template, topic, results);
@@ -447,14 +499,19 @@ fn exec_llm(
         return Err("llm requires prompt=\"...\" or input=\"...\"".into());
     }
     eprintln!(
-        "    -> llm: model={} schema={} input.len={}",
+        "    -> llm: model={} schema={} input.len={}{}",
         if resolved_model.is_empty() {
             "(default)"
         } else {
             &resolved_model
         },
         !resolved_schema.is_empty(),
-        resolved_prompt.len()
+        resolved_prompt.len(),
+        if let Some(name) = &first_bare {
+            format!(" agent={}", name)
+        } else {
+            String::new()
+        }
     );
 
     let bridge = find_bridge("llm_bridge.py");
@@ -489,7 +546,11 @@ fn exec_llm(
         args.push(count);
     }
 
-    let output = run_python_bridge(&bridge, &args)?;
+    let output = if let Some(a) = &agent_cfg {
+        run_python_bridge_with_timeout(&bridge, &args, a.timeout_secs)?
+    } else {
+        run_python_bridge(&bridge, &args)?
+    };
 
     if output.status.success() {
         let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
@@ -513,15 +574,25 @@ fn exec_llm(
 
 /// Prefer `python3`, fall back to `python` (Windows).
 /// Injects [llm] from config.toml into child env when process env lacks OPENAI_*.
-fn run_python_bridge(
+/// v0.16：agent timeout 注入——[agents.x] timeout_secs 显式覆盖（agent 场景常需
+/// 比全局 [llm] 更长的窗口，schema 长输出尤其）。
+fn run_python_bridge(bridge: &str, args: &[String]) -> Result<std::process::Output, String> {
+    run_python_bridge_with_timeout(bridge, args, 0)
+}
+
+fn run_python_bridge_with_timeout(
     bridge: &str,
     args: &[String],
+    agent_timeout_secs: u64,
 ) -> Result<std::process::Output, String> {
     let cfg = crate::config::load_llm_config();
     for py in ["python3", "python"] {
         let mut cmd = Command::new(py);
         cmd.arg(bridge).args(args);
         crate::config::apply_llm_env_from_config(&mut cmd, &cfg);
+        if agent_timeout_secs > 0 {
+            cmd.env("OPENAI_TIMEOUT_SECS", agent_timeout_secs.to_string());
+        }
         match cmd.output() {
             Ok(o) => return Ok(o),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,

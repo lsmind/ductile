@@ -21,6 +21,28 @@ pub struct LlmConfig {
     pub timeout_secs: u64,
 }
 
+/// v0.16 llm agent：[agents.<name>] 段 → llm(<name>, ...) 裸首参引用。
+/// model/system/schema/timeout 均可省（缺省回落 [llm] / 实参）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AgentConfig {
+    pub model: String,
+    pub system: String,
+    pub schema: String,
+    pub timeout_secs: u64,
+}
+
+/// agents 配置集合：name → AgentConfig（[agents.planner] 形态，点分嵌套展开）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AgentsConfig {
+    pub agents: BTreeMap<String, AgentConfig>,
+}
+
+impl AgentsConfig {
+    pub fn get(&self, name: &str) -> Option<&AgentConfig> {
+        self.agents.get(name)
+    }
+}
+
 impl LlmConfig {
     pub fn with_defaults(self) -> Self {
         LlmConfig {
@@ -184,6 +206,40 @@ pub fn load_llm_config_from_path(path: &Path) -> Result<LlmConfig, String> {
     Ok(llm_from_sections(&sections))
 }
 
+/// v0.16 [agents.<name>] 段 → AgentsConfig（[agents.planner] 点分形态）。
+/// 字段同 [llm] 的 agent 子集：model/system/schema/timeout_secs（system/schema
+/// 内联 \n 解析时展开为真换行）。
+pub fn agents_from_sections(sections: &BTreeMap<String, BTreeMap<String, String>>) -> AgentsConfig {
+    let mut out = AgentsConfig::default();
+    for (sec, kv) in sections {
+        let Some(name) = sec.strip_prefix("agents.") else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        let get = |k: &str| kv.get(k).cloned().unwrap_or_default();
+        let agent = AgentConfig {
+            model: get("model"),
+            system: get("system").replace("\\n", "\n"),
+            schema: get("schema"),
+            timeout_secs: get("timeout_secs").parse().unwrap_or(0),
+        };
+        out.agents.insert(name.to_string(), agent);
+    }
+    out
+}
+
+pub fn load_agents_config() -> AgentsConfig {
+    match find_config_path() {
+        Some(path) => match fs::read_to_string(&path) {
+            Ok(text) => agents_from_sections(&parse_toml_sections(&text)),
+            Err(_) => AgentsConfig::default(),
+        },
+        None => AgentsConfig::default(),
+    }
+}
+
 /// Fill missing OPENAI_* into a Command's environment from config (does not override existing env).
 pub fn apply_llm_env_from_config(cmd: &mut std::process::Command, cfg: &LlmConfig) {
     let set_if_absent = |cmd: &mut std::process::Command, key: &str, val: &str| {
@@ -274,5 +330,44 @@ default_model = "glm-5"
         assert_eq!(cfg.api_key, "fromfile");
         assert_eq!(cfg.model, "m1");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── v0.16 [agents.<name>] ──
+
+    #[test]
+    fn agents_section_parsed() {
+        let text = r#"
+[llm]
+model = "default-m"
+
+[agents.planner]
+model = "qwen3.8:27b"
+system = "你是规划助手。\n输出短计划。"
+schema = "summary,kind"
+timeout_secs = 300
+
+[agents.judge]
+model = "gpt-4o-mini"
+"#;
+        let secs = parse_toml_sections(text);
+        let agents = agents_from_sections(&secs);
+        let planner = agents.get("planner").expect("planner parsed");
+        assert_eq!(planner.model, "qwen3.8:27b");
+        // \n 展开
+        assert!(planner.system.contains('\n'), "system: {:?}", planner.system);
+        assert_eq!(planner.schema, "summary,kind");
+        assert_eq!(planner.timeout_secs, 300);
+        let judge = agents.get("judge").expect("judge parsed");
+        assert_eq!(judge.model, "gpt-4o-mini");
+        assert_eq!(judge.system, "");
+        assert_eq!(agents.get("nonexistent"), None);
+    }
+
+    #[test]
+    fn agents_ignored_without_prefix() {
+        let text = "[agents]\nmodel = \"x\"\n\n[other]\ny = \"1\"\n";
+        let agents = agents_from_sections(&parse_toml_sections(text));
+        // [agents] 裸段（无 .name）不产出 agent
+        assert!(agents.agents.is_empty());
     }
 }

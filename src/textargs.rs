@@ -134,7 +134,44 @@ pub fn extract_string_arg(key: &str, body: &str) -> String {
     String::new()
 }
 
-/// 提取 body 第一个带引号字符串（转义感知）；无引号 → body 原样。
+/// v0.16 llm agent 引用：提取动词调用括号内的**第一个裸标识符实参**。
+/// `llm(planner, prompt="...")` → "planner"；`llm(prompt="...", model="x")` → None
+///（首参是 k=v 或引号串都不是 agent 名）。标识符后必须跟 `,` 或 `)`。
+pub fn extract_first_bare_arg(body: &str) -> Option<String> {
+    // 定位动词调用的开括号（与 detect_func 同位）
+    let chars: Vec<char> = body.chars().collect();
+    let mut i = 0;
+    while i < chars.len() && chars[i] != '(' {
+        i += 1;
+    }
+    if i >= chars.len() {
+        return None;
+    }
+    i += 1; // past '('
+    // 跳过空白
+    while i < chars.len() && chars[i].is_whitespace() {
+        i += 1;
+    }
+    // 收集标识符字符
+    let start = i;
+    while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+        i += 1;
+    }
+    if i == start {
+        return None; // 首字符非标识符（引号/k=v 值等）
+    }
+    let ident: String = chars[start..i].iter().collect();
+    // 跳过空白后必须是 , 或 )——排除 `key =` 形态（k=v 首参）
+    let mut j = i;
+    while j < chars.len() && chars[j].is_whitespace() {
+        j += 1;
+    }
+    if j < chars.len() && (chars[j] == ',' || chars[j] == ')') {
+        Some(ident)
+    } else {
+        None
+    }
+}
 pub fn extract_first_string(body: &str) -> String {
     // Escape-aware: a DSL string literal may contain \" — the first raw '"'
     // after the opener must not be preceded by an odd number of backslashes.
@@ -335,6 +372,31 @@ mod tests {
     #[test]
     fn extract_string_arg_missing() {
         assert_eq!(extract_string_arg("missing", "query=\"AI\""), "");
+    }
+
+    // ── v0.16 llm agent 裸首参 ──
+
+    #[test]
+    fn first_bare_arg_agent_name() {
+        assert_eq!(
+            extract_first_bare_arg("llm(planner, prompt=\"hi\")"),
+            Some("planner".into())
+        );
+        // 空白容忍
+        assert_eq!(
+            extract_first_bare_arg("llm( judge , prompt=\"hi\")"),
+            Some("judge".into())
+        );
+    }
+
+    #[test]
+    fn first_bare_arg_none_for_kv_or_quoted() {
+        // 首参 k=v → None
+        assert_eq!(extract_first_bare_arg("llm(prompt=\"hi\", model=\"x\")"), None);
+        // 首参引号串 → None
+        assert_eq!(extract_first_bare_arg("llm(\"plain prompt\")"), None);
+        // 空 → None
+        assert_eq!(extract_first_bare_arg("llm()"), None);
     }
 
     #[test]

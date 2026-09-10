@@ -1,0 +1,10 @@
+// agent_probe.pipeline — v0.16 llm agent 裸首参引用示例
+// 用法：ductile run pipelines/agent_probe.pipeline "任意指令"
+// 前置：~/.config/ductile/config.toml 定义 [agents.planner]（model/system/timeout）
+// 语法：llm(planner, prompt="{topic}") —— model/system/schema/timeout 全部来自配置；
+//       显式实参可覆盖（如临时 llm(planner, prompt="...", model="other")）
+Pipeline("agent_probe", "llm agent 裸首参引用示例")
+  .proc("plan", llm(planner, prompt="{topic}"))
+    .desc("agent=planner：system/model/timeout 来自 config.toml [agents.planner]")
+  .proc("deliver")
+    .deliver(@plan)

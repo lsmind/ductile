@@ -67,6 +67,12 @@ Pipeline("name", "optional description", cwd="...", env=["K=V", ...])
 >    锚到 cwd（expand_fs_path 统一处理）。cwd 值内可写 `$VAR`/`$(...)`/`~`（bash
 >    规范化，坏路径整流 fail-closed 退出）。env 注入全部子进程，身份变量
 >    PATH/HOME/USER 永不覆盖。无 cwd/env 声明 = v0.15 行为不变。
+> 4. **llm agent 引用（裸首参）**：`llm(planner, prompt="{topic}")` ——首参裸标识符
+>    引用 config.toml 的 `[agents.<name>]` 段（model/system/schema/timeout_secs，
+>    system 内 `\n` 展开为真换行）。合并序：显式实参 > agent 配置 > `[llm]` 全局
+>    > 内置默认。agent 不存在 → 硬错误并列出可用 agents（fail-closed）。
+>    base_url/api_key 永远来自 `[llm]`（连接层不属于 agent 语义）。
+>    示例：`pipelines/agent_probe.pipeline`。
 >
 > **v0.11 退役语法**（仍可解析但警告+忽略，不入 AST）：`.cost(latency=..., ...)`、
 > `.ensure(result => ..., "...")`、`.check(result => ..., "...")`。
