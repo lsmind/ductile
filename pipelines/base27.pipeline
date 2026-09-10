@@ -1,0 +1,34 @@
+#!/usr/bin/env -S ductile run
+// base27.pipeline — 基线链：手写 prompt 全链钉死 medium(27B)，产 out27_* 固化基线
+// /tmp/regchain_data 被清空后重跑本链即可再生成基线（regcheck3 的 baseline 臂）。
+// 手写 prompt + @ref 全文展开 = 与 auto-prompt 臂的对照面（上游传导靠人肉写死）。
+// 用法：DUCTILE_DATA=/tmp/regchain_data ductile run pipelines/base27.pipeline "$(cat /tmp/regchain_data/story.txt)"
+Pipeline("base27", "手写prompt基线链@27B", cwd="/tmp/regchain_data")
+
+  .proc("req", llm(req_analyst, tier="medium", prompt="{topic}"))
+    .desc("S0 需求提炼 @27B 手写prompt")
+  .proc("arch", llm(architect, tier="medium", prompt="基于以下结构化需求做架构设计: {topic}\n需求: @req"))
+    .desc("S1 架构设计 @27B 手写prompt")
+    .when(@req.must_have)
+  .proc("brk", llm(breaker, tier="medium", prompt="把以下架构拆成开发任务单: @arch"))
+    .desc("S2 任务拆解 @27B 手写prompt")
+    .when(@arch.modules)
+  .proc("audit", llm(auditor, tier="medium", prompt="原始用户描述: {topic}\n需求: @req\n任务单: @brk\n请审查任务单是否覆盖全部隐含约束。"))
+    .desc("S3 审计门 @27B 手写prompt")
+    .when(@brk.tickets)
+
+  .proc("d_req", write(to="/tmp/regchain_data/out27_req.txt", content=@req))
+    .desc("落盘基线 S0 产物")
+    .when(@req.must_have)
+  .proc("d_arch", write(to="/tmp/regchain_data/out27_arch.txt", content=@arch))
+    .desc("落盘基线 S1 产物")
+    .when(@arch.modules)
+  .proc("d_brk", write(to="/tmp/regchain_data/out27_brk.txt", content=@brk))
+    .desc("落盘基线 S2 产物")
+    .when(@brk.tickets)
+  .proc("m", write(to="/tmp/regchain_data/out27_audit.txt", content=@audit))
+    .desc("落盘基线审计产物")
+    .when(@audit.score)
+
+  .proc("deliver")
+    .deliver(@m)

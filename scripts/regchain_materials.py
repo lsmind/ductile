@@ -54,6 +54,12 @@ segs = {
   "s2": [("甲","auto","brk"), ("乙","baseline","brk")],
   "s3": [("甲","baseline","audit"), ("乙","auto","audit")],
 }
+# N 轮顺序轮换（v0.17.2）：奇数轮甲乙互换——位置偏差控制
+_r = int(__import__("os").environ.get("REG_ROUND", "0"))
+if _r % 2 == 1:
+    _lbl = {"甲": "乙", "乙": "甲"}
+    segs = {k: [(_lbl[c[0]], c[1], c[2]) for c in v] for k, v in segs.items()}
+
 rubric = {
  "s0": "需求提炼：隐含约束捕获（5人团队/每天几十GB/低预算/避免复杂/先跑起来）、结构清晰、无幻觉、范围边界明确",
  "s1": "架构设计：与约束一致性（低成本/简单/5人非IT团队/几十GB日增）、技术选型成熟度、模块划分合理性、风险识别",
@@ -69,6 +75,7 @@ for seg, cands in segs.items():
     open(f"{TB}/reg_{seg}.txt","w").write(body)
 
 json.dump(mapping, open(f"{TB}/reg_blind_map.json","w"), ensure_ascii=False, indent=1)
+json.dump(mapping, open(f"{TB}/reg_blind_map_r{_r}.json","w"), ensure_ascii=False, indent=1)
 print("映射（裁判不可见）:", json.dumps(mapping, ensure_ascii=False))
 print("\n各臂产物大小:")
 for seg, cands in segs.items():

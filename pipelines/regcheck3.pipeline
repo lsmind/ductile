@@ -1,0 +1,20 @@
+#!/usr/bin/env -S ductile run
+// regcheck3.pipeline — N 轮均值回归门禁（v0.17.2）：3 轮盲评取均值再判闸
+// 每轮：重新生成材料（REG_ROUND 奇偶互换甲乙）→ 独立盲评 → 轮号落盘
+// tally 聚合 3 轮，打印轮间噪声 + 位置偏差；auto < baseline-5 才拉闸
+// 用法：DUCTILE_DATA=/tmp/regchain_data ductile run pipelines/regcheck3.pipeline regression
+Pipeline("regcheck3", "N 轮均值回归门禁", cwd="/tmp/regchain_data")
+  .proc("chain", run("DUCTILE_CONFIG=/tmp/regchain_data/regconf.toml ductile run /home/beef/projects/ductile/pipelines/regchain.pipeline \"$(cat /tmp/regchain_data/story.txt)\" > reg_chain.log 2>&1 && grep -q 'executed successfully' reg_chain.log && echo chain-ok"))
+    .desc("阶段1：五段裸 agent 链（auto-prompt 全开，v0.17.1 preview 分级+打分信号）")
+  .proc("r0", run("REG_ROUND=0 python3 /home/beef/projects/ductile/scripts/regchain_materials.py > reg_mat0.log 2>&1 && DUCTILE_CONFIG=/tmp/regchain_data/regconf.toml ductile run /home/beef/projects/ductile/pipelines/regjudge.pipeline 盲评0 > reg_judge0.log 2>&1 && grep -q 'executed successfully' reg_judge0.log && echo r0-ok"))
+    .desc("轮 0：材料+盲评（甲=auto, 乙=baseline）")
+  .proc("r1", run("{ echo '@r0'; } > rt1.txt && grep -q r0-ok rt1.txt && REG_ROUND=1 python3 /home/beef/projects/ductile/scripts/regchain_materials.py > reg_mat1.log 2>&1 && DUCTILE_CONFIG=/tmp/regchain_data/regconf.toml ductile run /home/beef/projects/ductile/pipelines/regjudge.pipeline 盲评1 > reg_judge1.log 2>&1 && grep -q 'executed successfully' reg_judge1.log && echo r1-ok"))
+    .desc("轮 1：材料+盲评（甲乙互换）")
+  .proc("r2", run("{ echo '@r1'; } > rt2.txt && grep -q r1-ok rt2.txt && REG_ROUND=2 python3 /home/beef/projects/ductile/scripts/regchain_materials.py > reg_mat2.log 2>&1 && DUCTILE_CONFIG=/tmp/regchain_data/regconf.toml ductile run /home/beef/projects/ductile/pipelines/regjudge.pipeline 盲评2 > reg_judge2.log 2>&1 && grep -q 'executed successfully' reg_judge2.log && echo r2-ok"))
+    .desc("轮 2：材料+盲评（同轮 0 位置）")
+  .proc("tally", run("{ echo '@r2'; } > rt3.txt && grep -q r2-ok rt3.txt && python3 /home/beef/projects/ductile/scripts/regchain_tally.py > reg_tally.log 2>&1 && grep -q REGCHAIN-PASS reg_tally.log && echo tally-ok"))
+    .desc("阶段N：3 轮聚合+均值门禁（含轮间噪声/位置偏差打印）")
+  .proc("report", run("{ echo '@tally'; } > rt4.txt && grep -q tally-ok rt4.txt && cat reg_tally.log && echo REGCHECK-PASS"))
+    .desc("终报：分段/轮均值/噪声/位置偏差 + REGCHECK-PASS")
+  .proc("deliver", run("echo done"))
+    .deliver(@report)
