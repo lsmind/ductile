@@ -9,6 +9,7 @@ use crate::db;
 use crate::egraph;
 use crate::errflow;
 use crate::ranking::rank_impls_named;
+use crate::steps::PipelineCtx;
 pub use crate::ranking::ImplPrefs;
 pub use crate::steps::exec_script_call;
 pub use crate::steps::known_functions;
@@ -120,6 +121,18 @@ pub fn exec_pipeline(
     pl: &Pipeline,
     policy: Option<&Policy>,
 ) -> ExecResult {
+    // v0.16 管线级 cwd/env（第三刀）：thread_local 中继到 steps 层的 Command 构造。
+    // 不用 set_var 全局 env（AGENTS 规则 9：并行测试竞态）；不用签名穿线
+    //（StepFn 签名动一发牵全身）。cwd 经 bash 一次性规范化（$VAR/$(...) 可用），
+    // 失败即整流退出——cwd 错了后面每条命令都是错误目录，fail-closed。
+    let _ctx_guard = PipelineCtx::set(pl);
+    if let Some(poison) = _ctx_guard.as_ref().and_then(|g| g.poison()) {
+        return ExecResult::Failed {
+            error: poison.to_string(),
+            partial: BTreeMap::new(),
+        };
+    }
+
     // Apply hot patches: clone pipeline, override fields from SQLite.
     // v0.11.1 Null Object：--policy 缺席不再走 Option 分支，统一为 Evaluator 多态调用。
     let mut pl = apply_patches(pl);
@@ -1045,6 +1058,8 @@ mod tests {
         let pl = Pipeline {
             name: "stub_test".into(),
             weights: Weights::default(),
+            cwd: None,
+            env: vec![],
             description: String::new(),
             procs: vec![Proc {
                 name: "p".into(),

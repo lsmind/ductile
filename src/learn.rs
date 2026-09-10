@@ -199,6 +199,8 @@ mod tests {
                 },
             ],
             weights: Weights::default(),
+            cwd: None,
+            env: vec![],
         };
         let seqs = extract_tag_seqs(&pl);
         assert_eq!(seqs.len(), 2);

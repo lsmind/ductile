@@ -2,50 +2,22 @@
 // ship.pipeline — 仓库自动管理：测试门禁 → add → commit(信息=topic) → push → 验证
 // 用法：./ship.pipeline "feat: 提交信息"
 // 门禁：cargo test 不绿不 commit 不 push（@test 引用即依赖：test Left 则下游传播短路）
-// v0.15 修复：topic 经 write 内置动词落盘 + git commit -F（topic 含单引号不再炸 bash；
-// 旧版 git commit -m '{topic}' 被单引号打断 → commit 失败被 || 误报成 "tests not green"）
-// 仓库根：优先 $DUCTILE_ROOT，否则 git rev-parse
-Pipeline("ship", "git 自动管理：测试门禁 → add → commit → push → 验证干净")
-  .proc("test")
+// v0.15 修复：topic 经 write 内置动词落盘 + git commit -F（topic 含单引号不再炸 bash）
+// v0.16 狗粮：单 impl 内联糖（.proc 直挂动词，.plan/.tags 仪式消失）+
+// 管线级 cwd（六处 ROOT=${DUCTILE_ROOT:-...} && cd 前缀全部消失——run/write
+// 都在仓库根执行，相对路径 target/ship-msg.txt 由管线 cwd 锚定）
+Pipeline("ship", "git 自动管理：测试门禁 → add → commit → push → 验证干净", cwd="${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)}")
+  .proc("test", run("cargo test --release --lib 2>&1 | grep '^test result' | tail -1").tags(#gate))
     .desc("测试门禁（全绿才放行）")
-    .plan(
-      t -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && cargo test --release --lib 2>&1 | grep '^test result' | tail -1")
-        .tags(#run, #gate)
-        .desc("cargo test 摘要行")
-    )
-  .proc("msg")
+  .proc("msg", write(to="target/ship-msg.txt", content="{topic}"))
     .desc("提交信息落盘（write 在 Rust 侧解析 {topic}，单引号/多行安全）")
-    .plan(
-      m -> write(to="target/ship-msg.txt", content="{topic}")
-        .tags(#write)
-    )
-  .proc("add")
+  .proc("add", run("git add -A && echo staged: $(git diff --cached --numstat | wc -l) files").tags(#git))
     .desc("暂存全部变更")
-    .plan(
-      a -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && git add -A && echo staged: $(git diff --cached --numstat | wc -l) files")
-        .tags(#run, #git)
-        .desc("git add -A")
-    )
-  .proc("commit")
-    .desc("提交（git commit -F 落盘信息；门禁不绿显式跳过，commit 失败单独报错）")
-    .plan(
-      c -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && echo '@test' | grep -q '; 0 failed' || { echo 'skipped: tests not green'; exit 0; }; git commit -F target/ship-msg.txt --quiet && git log --oneline -1 || { echo 'commit failed:'; git status --short | head -5; exit 1; }")
-        .tags(#run, #git)
-        .desc("门禁通过才 commit（-F 文件，不注入 topic 进 bash）")
-    )
-  .proc("push")
+  .proc("commit", run("echo '@test' | grep -q '; 0 failed' || { echo 'skipped: tests not green'; exit 0; }; git commit -F target/ship-msg.txt --quiet && git log --oneline -1 || { echo 'commit failed:'; git status --short | head -5; exit 1; }").tags(#git))
+    .desc("提交（-F 落盘信息；门禁不绿显式跳过，commit 失败单独报错）")
+  .proc("push", run("echo '@commit' | grep -qE '^[0-9a-f]{7} ' && git push origin main 2>&1 | tail -1 || echo 'no push: nothing committed'").tags(#git))
     .desc("推送（commit 未发生则短路；网络错误 errflow 自动重试）")
-    .plan(
-      p -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && echo '@commit' | grep -qE '^[0-9a-f]{7} ' && git push origin main 2>&1 | tail -1 || echo 'no push: nothing committed'")
-        .tags(#run, #git)
-        .desc("git push origin main")
-    )
-  .proc("verify")
+  .proc("verify", run("echo push-done: '@push' >/dev/null; echo dirty: $(git status --short | wc -l) && git log --oneline -1 && git status -sb | head -1").tags(#git))
     .desc("验证工作树干净")
-    .plan(
-      v -> run("ROOT=${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)} && cd \"$ROOT\" && echo push-done: '@push' >/dev/null; echo dirty: $(git status --short | wc -l) && git log --oneline -1 && git status -sb | head -1")
-        .tags(#run, #git)
-        .desc("收尾状态")
-    )
   .proc("deliver")
     .deliver(@verify)

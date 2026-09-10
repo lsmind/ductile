@@ -880,6 +880,8 @@ mod tests {
             description: String::new(),
             procs,
             weights: Weights::default(),
+            cwd: None,
+            env: vec![],
         }
     }
 

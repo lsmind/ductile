@@ -60,7 +60,7 @@ pub fn parse_pipeline(input: &str) -> Result<Pipeline, ParseError> {
 
     // Parse header: Pipeline("name") or Pipeline("name", "desc")
     let header_line = lines[idx];
-    let (name, description) = parse_header(header_line, idx + 1)?;
+    let (name, description, cwd, env) = parse_header(header_line, idx + 1)?;
 
     idx += 1;
 
@@ -94,10 +94,56 @@ pub fn parse_pipeline(input: &str) -> Result<Pipeline, ParseError> {
         description,
         procs,
         weights: Weights::default(),
+        cwd,
+        env,
     })
 }
 
-fn parse_header(line: &str, line_num: usize) -> Result<(String, String), ParseError> {
+/// v0.16 头部 k=v 参数提取：cwd="..." 与 env=["K=V", "K2=V2"]。
+/// env 值按引号块切分，每块再剥一层引号。env 引号块内还含逗号也原样保留
+/// （split(',') 会切断 "A=1, B=2"——块提取不受影响）。
+fn parse_header_kv(line: &str) -> (Option<String>, Vec<String>) {
+    let mut cwd = None;
+    let mut env: Vec<String> = vec![];
+    if let Some(p) = line.find("cwd=") {
+        // cwd="..." — 取 cwd= 后第一个引号块
+        let after = &line[p + 4..];
+        if let Some(q1) = after.find('"') {
+            let rest = &after[q1 + 1..];
+            if let Some(q2) = rest.find('"') {
+                cwd = Some(rest[..q2].to_string());
+            }
+        }
+    }
+    if let Some(p) = line.find("env=[") {
+        let after = &line[p + 5..];
+        if let Some(br) = after.find(']') {
+            let inner = &after[..br];
+            // 引号块切分：连续引号对之间的内容
+            let bytes: Vec<char> = inner.chars().collect();
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] == '"' {
+                    let start = i + 1;
+                    let mut end = start;
+                    while end < bytes.len() && bytes[end] != '"' {
+                        end += 1;
+                    }
+                    let v: String = bytes[start..end].iter().collect();
+                    if !v.trim().is_empty() {
+                        env.push(v);
+                    }
+                    i = end + 1;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    (cwd, env)
+}
+
+fn parse_header(line: &str, line_num: usize) -> Result<(String, String, Option<String>, Vec<String>), ParseError> {
     let lower: String = line.to_lowercase();
     if lower.trim_start().starts_with("pipeline(") || lower.trim_start().starts_with("pipeline (") {
         // OK
@@ -113,11 +159,19 @@ fn parse_header(line: &str, line_num: usize) -> Result<(String, String), ParseEr
         });
     }
 
-    // Extract quoted strings: first is name, optional second is description
-    let quoted = extract_all_quoted(line);
+    // Extract quoted strings: first is name, optional second is description.
+    // cwd=/env= 的引号块也混在 quoted 流里——先剥掉 k=v 区域再取 name/desc，
+    // 否则 Pipeline("x", cwd="/a") 会把 "/a" 当成 description。
+    let kv_start = line
+        .find("cwd=")
+        .or_else(|| line.find("env=["))
+        .unwrap_or(line.len());
+    let desc_zone = &line[..kv_start];
+    let quoted = extract_all_quoted(desc_zone);
     let name = quoted.first().cloned().unwrap_or_default();
     let description = quoted.get(1).cloned().unwrap_or_default();
-    Ok((name, description))
+    let (cwd, env) = parse_header_kv(line);
+    Ok((name, description, cwd, env))
 }
 
 pub(crate) fn extract_all_quoted(s: &str) -> Vec<String> {
@@ -191,6 +245,32 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
 
     // .proc("name") — just the name, no level/scope
     let name = extract_quoted(line).unwrap_or_default();
+
+    // v0.16 单 impl 内联糖：.proc("name", verb(...))
+    // 候选 = name 后剥掉「, 」到行尾的整段（不做括号截断——修饰符在动词调用
+    // 之后，截断会静默丢弃 .when/.retry），再剥 .proc( 自身的闭括号。
+    // 候选必须以已知动词调用开头；箭头缺席才激活，`name -> body` 形态留给
+    // .plan 的多路选择。
+    let mut inline_body: Option<String> = None;
+    if find_arrow(line).is_none() {
+        // 找带引号的完整形态（"name"），跳过闭引号后再剥「, 」——
+        // 只跳 name 长度会停在闭引号上，候选头部残留 `", run(...)`。
+        let quoted_name = format!("\"{}\"", name);
+        if let Some(p) = line.find(&quoted_name) {
+            let mut c = line[p + quoted_name.len()..]
+                .trim_start()
+                .trim_start_matches(',')
+                .trim_start();
+            if let Some(stripped) = c.strip_suffix(')') {
+                c = stripped.trim_end();
+            }
+            let candidate = c.to_string();
+            let func = crate::textargs::detect_func(&candidate);
+            if !func.is_empty() && crate::steps::known_functions().contains(&func.as_str()) {
+                inline_body = Some(candidate);
+            }
+        }
+    }
 
     idx += 1;
 
@@ -386,6 +466,43 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
 
         // Unknown line — skip
         idx += 1;
+    }
+
+    // v0.16 单 impl 内联糖脱糖：.proc("x", verb(...)) ≡ .plan(verb -> verb(...))。
+    // impl 名 = 动词名；tags 缺席时按动词推导（#run/#write/…——第二刀）；
+    // 块级 .when 语义不变（下推）；.plan 与内联共存时 .plan 追加（防呆：单
+    // impl 糖下再写 .plan 属于自相矛盾，追加而不是硬错，兼容生成器输出）。
+    if let Some(body) = inline_body {
+        let (body_text, _cost, retry, ensure, when, enabled, stub, tags, description) =
+            extract_cost_and_modifiers(&body, &name);
+        let func = crate::textargs::detect_func(&body_text);
+        // 第二刀：手写 tags 为空时按动词推导（语义域标记如 #git/#gate 仍可手写叠加）
+        let mut tags = tags;
+        if tags.is_empty() && !func.is_empty() {
+            tags.insert(func.clone());
+        }
+        let mut refs = extract_refs(&body_text);
+        if let Some(w) = &when {
+            for r in extract_refs(w) {
+                if !refs.contains(&r) {
+                    refs.push(r);
+                }
+            }
+        }
+        let inline_impl = Impl {
+            name: func,
+            tags,
+            cost: _cost,
+            enabled,
+            when: when.or(proc_when.clone()),
+            refs,
+            body_text,
+            stub,
+            retry,
+            ensure,
+            description,
+        };
+        plan.insert(0, inline_impl);
     }
 
     // v0.11.1：块级 .when 下推到未持有内联 when 的全部 impls，裁判 @ref 并入 refs
@@ -1815,5 +1932,107 @@ mod prim_tests {
         // 裸文本 + 声明了契约 → fail-closed
         let bare = Value::Text("plain output".into());
         assert!(check_contract(&mk(vec!["score"], vec![]), &bare).is_err());
+    }
+
+    // ── v0.16 三刀：单 impl 内联糖 / tags 动词推导 / 管线级 cwd+env ──
+
+    #[test]
+    fn inline_impl_sugar_desugars_to_plan() {
+        // 第一刀：.proc("x", verb(...)) ≡ .plan(verb -> verb(...))
+        let src = "Pipeline(\"t\")\n  .proc(\"analyze\", script(word_stats, text=\"{topic}\"))\n";
+        let pl = parse_pipeline(src).unwrap();
+        assert_eq!(pl.procs.len(), 1);
+        assert_eq!(pl.procs[0].plan.len(), 1);
+        let imp = &pl.procs[0].plan[0];
+        assert_eq!(imp.name, "script");
+        assert_eq!(imp.body_text, "script(word_stats, text=\"{topic}\")");
+        // 第二刀：tags 按动词推导
+        assert!(imp.tags.contains("script"), "tags: {:?}", imp.tags);
+    }
+
+    #[test]
+    fn inline_impl_sugar_preserves_trailing_modifiers() {
+        // 修饰符在动词调用之后：.when/.retry 必须存活（截断=静默丢门禁）
+        let src = "Pipeline(\"t\")\n  .proc(\"push\", run(\"echo push\").retry(n=2).when(mode == \"fast\"))\n";
+        let pl = parse_pipeline(src).unwrap();
+        let imp = &pl.procs[0].plan[0];
+        assert_eq!(imp.name, "run");
+        assert_eq!(imp.retry, 2, "retry lost — body: {:?}", imp.body_text);
+        assert_eq!(
+            imp.when.as_deref(),
+            Some("mode == \"fast\""),
+            "when lost — body: {:?}",
+            imp.body_text
+        );
+        // body 应只剩裸调用
+        assert_eq!(imp.body_text, "run(\"echo push\")");
+    }
+
+    #[test]
+    fn inline_impl_sugar_block_when_still_applies() {
+        // 块级 .when 下推不因内联糖失效
+        let src = "Pipeline(\"t\")\n  .proc(\"deliver\", run(\"echo DELIVERED\"))\n    .when(@gen.score < 80)\n";
+        let pl = parse_pipeline(src).unwrap();
+        let imp = &pl.procs[0].plan[0];
+        assert_eq!(imp.when.as_deref(), Some("@gen.score < 80"));
+        // 裁判 @ref 并入 refs（egraph 建边依赖）
+        assert!(imp.refs.contains(&"gen".to_string()), "refs: {:?}", imp.refs);
+    }
+
+    #[test]
+    fn inline_impl_sugar_string_with_paren_not_truncated() {
+        // 字符串字面量内的括号/引号不截断 body（与 .plan 深度扫描同语义）
+        let src = "Pipeline(\"t\")\n  .proc(\"x\", run(\"echo 'case (a) *)'\"))\n";
+        let pl = parse_pipeline(src).unwrap();
+        let imp = &pl.procs[0].plan[0];
+        assert!(
+            imp.body_text.contains("case (a) *)"),
+            "body truncated: {:?}",
+            imp.body_text
+        );
+    }
+
+    #[test]
+    fn inline_impl_sugar_ignored_for_unknown_func_and_arrow() {
+        // 未知动词 → 不激活（fail-closed 交给执行层报错，不产生幽灵 impl）
+        let src = "Pipeline(\"t\")\n  .proc(\"p\", bogus_verb(\"x\"))\n";
+        let pl = parse_pipeline(src).unwrap();
+        assert!(pl.procs[0].plan.is_empty(), "should not desugar unknown verb");
+        // 箭头形态 → 留给 .plan 语义
+        let src2 = "Pipeline(\"t\")\n  .proc(\"p\", a -> run(\"echo x\"))\n";
+        let pl2 = parse_pipeline(src2).unwrap();
+        assert!(pl2.procs[0].plan.is_empty());
+    }
+
+    #[test]
+    fn header_cwd_env_parsed() {
+        // 第三刀：Pipeline(..., cwd="...", env=["K=V", ...])
+        let src = "Pipeline(\"ship\", \"desc\", cwd=\"$HOME/projects/ductile\", env=[\"A=1\", \"B=two words\"])\n";
+        let pl = parse_pipeline(src).unwrap();
+        assert_eq!(pl.name, "ship");
+        assert_eq!(pl.description, "desc");
+        assert_eq!(pl.cwd.as_deref(), Some("$HOME/projects/ductile"));
+        assert_eq!(pl.env, vec!["A=1".to_string(), "B=two words".to_string()]);
+    }
+
+    #[test]
+    fn header_cwd_alone_no_description_pollution() {
+        // cwd 的引号块不能漏进 description
+        let src = "Pipeline(\"ship\", cwd=\"/tmp\")\n";
+        let pl = parse_pipeline(src).unwrap();
+        assert_eq!(pl.name, "ship");
+        assert_eq!(pl.description, "");
+        assert_eq!(pl.cwd.as_deref(), Some("/tmp"));
+    }
+
+    #[test]
+    fn header_without_kv_unchanged() {
+        // 旧形态零回归：无 cwd/env 时行为与 v0.15 完全一致
+        let src = "Pipeline(\"a\", \"b\")\n";
+        let pl = parse_pipeline(src).unwrap();
+        assert_eq!(pl.name, "a");
+        assert_eq!(pl.description, "b");
+        assert!(pl.cwd.is_none());
+        assert!(pl.env.is_empty());
     }
 }

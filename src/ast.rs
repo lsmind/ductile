@@ -149,6 +149,12 @@ pub struct Pipeline {
     pub description: String, // v0.4.1: optional Pipeline("name", "desc")
     pub procs: Vec<Proc>,
     pub weights: Weights,
+    // v0.16 管线级执行环境（第三刀）：Pipeline(..., cwd="...", env=["K=V", ...])
+    // cwd 由 executor 在执行前 chdir（相对路径相对 pipeline 文件所在目录）；
+    // env 注入所有子进程（PATH/HOME/USER 身份变量永不覆盖）。
+    // 默认（None/空）= v0.15 行为：继承调用方 CWD，不注入。
+    pub cwd: Option<String>,
+    pub env: Vec<String>,
 }
 
 impl Pipeline {
@@ -388,6 +394,8 @@ mod tests {
                 },
             ],
             weights: Weights::default(),
+            cwd: None,
+            env: vec![],
         };
         let tags = pl.computed_tags();
         assert_eq!(tags.len(), 3);
@@ -417,6 +425,8 @@ mod tests {
                 pick_by: "cost".into(),
             }],
             weights: Weights::default(),
+            cwd: None,
+            env: vec![],
         };
         assert!(pl.computed_tags().is_empty());
     }

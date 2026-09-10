@@ -95,6 +95,8 @@ mod tests {
             name: "test".into(),
             procs,
             weights: Weights::default(),
+            cwd: None,
+            env: vec![],
             description: String::new(),
         }
     }

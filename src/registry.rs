@@ -131,6 +131,8 @@ mod tests {
             description: String::new(),
             procs: vec![],
             weights: Weights::default(),
+            cwd: None,
+            env: vec![],
         }
     }
 
@@ -168,6 +170,8 @@ mod tests {
             description: String::new(),
             procs: vec![mk_proc("search", &["search", "web"])],
             weights: Weights::default(),
+            cwd: None,
+            env: vec![],
         };
         let entries = extract_entries(&pl);
         assert_eq!(entries.len(), 1);
@@ -219,6 +223,8 @@ mod tests {
             description: String::new(),
             procs: vec![mk_proc("search", &["search", "web"])],
             weights: Weights::default(),
+            cwd: None,
+            env: vec![],
         };
         let matches = find_isomorphic_matches("p1", &registry, &pl_same);
         assert!(matches.is_empty()); // same pipeline excluded

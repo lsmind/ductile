@@ -132,6 +132,116 @@ fn windows_bash_candidates() -> Vec<PathBuf> {
 
 /// Prepend dirs so child `ductile` / drills find the same binary as this process.
 /// Also sets `DUCTILE_BIN` to `current_exe` when available.
+// ── v0.16 管线级执行环境（第三刀）────────────────────────────
+// Pipeline(..., cwd="...", env=["K=V"]) 的 thread_local 中继。
+// exec_pipeline 入口 set（guard Drop 清理），steps 层 Command 构造时读取。
+// 不进全局 env（并行测试竞态），不穿签名（StepFn 面太广）。
+
+use std::cell::RefCell;
+
+thread_local! {
+    static PIPELINE_CTX: RefCell<Option<PipelineCtxInner>> = const { RefCell::new(None) };
+}
+
+struct PipelineCtxInner {
+    cwd: Option<String>,
+    env: Vec<(String, String)>,
+}
+
+pub struct PipelineCtx;
+
+impl PipelineCtx {
+    /// exec_pipeline 入口调用；返回 guard，Drop 时清理。
+    /// cwd 规范化（bash -c cd + pwd）：$VAR / $(...) / ~ 展开 + 相对路径判定。
+    /// 失败 fail-closed：cwd 坏 = 整流必错，panic 于 exec_pipeline 转硬错误。
+    pub fn set(pl: &crate::ast::Pipeline) -> Option<PipelineCtxGuard> {
+        if pl.cwd.is_none() && pl.env.is_empty() {
+            return None;
+        }
+        let cwd = match &pl.cwd {
+            Some(c) => match resolve_pipeline_cwd(c) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    let msg = format!("pipeline cwd invalid: {} ({})", c, e);
+                    eprintln!("  [env] {}", msg);
+                    return Some(PipelineCtxGuard { poisoned: true, msg: Some(msg) });
+                }
+            },
+            None => None,
+        };
+        let env: Vec<(String, String)> = pl
+            .env
+            .iter()
+            .filter_map(|e| {
+                e.find('=').map(|eq| (e[..eq].to_string(), e[eq + 1..].to_string()))
+            })
+            .collect();
+        PIPELINE_CTX.with(|c| *c.borrow_mut() = Some(PipelineCtxInner { cwd, env }));
+        Some(PipelineCtxGuard { poisoned: false, msg: None })
+    }
+
+    /// 当前线程管线 cwd（未设置 = None）
+    pub fn cwd() -> Option<String> {
+        PIPELINE_CTX.with(|c| c.borrow().as_ref().and_then(|i| i.cwd.clone()))
+    }
+
+    /// 当前线程管线 env 对（未设置 = 空）
+    pub fn env_pairs() -> Vec<(String, String)> {
+        PIPELINE_CTX.with(|c| {
+            c.borrow()
+                .as_ref()
+                .map(|i| i.env.clone())
+                .unwrap_or_default()
+        })
+    }
+}
+
+/// Drop 清理 + cwd 失败的延迟 poison（exec_pipeline 检查 guard 后整流退出）
+pub struct PipelineCtxGuard {
+    poisoned: bool,
+    msg: Option<String>,
+}
+
+impl PipelineCtxGuard {
+    pub fn poison(&self) -> Option<&str> {
+        if self.poisoned {
+            self.msg.as_deref()
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for PipelineCtxGuard {
+    fn drop(&mut self) {
+        PIPELINE_CTX.with(|c| *c.borrow_mut() = None);
+    }
+}
+
+/// cwd 规范化：bash `cd <dir> && pwd` 拿绝对路径。
+/// 环境变量 / 命令替换 / ~ 全交给 bash（DSL 值无需自实现展开器）。
+fn resolve_pipeline_cwd(raw: &str) -> Result<String, String> {
+    let bash = resolve_bash()?;
+    let out = Command::new(&bash)
+        .arg("-c")
+        .arg(format!("cd {} && pwd", shell_quote_cwd(raw)))
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// cwd 值单引号包裹（bash 单引号内零展开——$VAR 由 bash 在 cd 参数位置…不行，
+/// $VAR 需要展开）。改为：外层单引号剥掉，值原样传给 bash -c（值内引号转义）。
+/// 实际策略：值里既可能写 /abs/path 也可能写 $HOME/x 或 $(pwd)——原样交给
+/// bash -c 的 cd 参数位置，用双引号包裹并对值内 " \ ` $ 保留（保留 $ 展开语义）。
+fn shell_quote_cwd(raw: &str) -> String {
+    // 双引号包裹：$VAR/$(...) 展开，" 和 \ 转义。单引号原样。
+    format!("\"{}\"", raw.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 pub fn apply_ductile_child_env(command: &mut Command) {
     let mut prepend: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
@@ -139,6 +249,14 @@ pub fn apply_ductile_child_env(command: &mut Command) {
         if let Some(dir) = exe.parent() {
             prepend.push(dir.to_path_buf());
         }
+    }
+    // v0.16 管线级 env（第三刀）：Pipeline(env=[...]) 经 thread_local 中继注入。
+    // 身份变量 PATH/HOME/USER 永不覆盖（与 impl 级 env= 同规则）。
+    for (k, v) in PipelineCtx::env_pairs() {
+        if k == "PATH" || k == "HOME" || k == "USER" {
+            continue;
+        }
+        command.env(k, v);
     }
     if let Ok(td) = std::env::var("CARGO_TARGET_DIR") {
         let td = PathBuf::from(td);
@@ -849,6 +967,11 @@ fn exec_run(
 
     let bash = resolve_bash()?;
     let mut command = Command::new(&bash);
+    // v0.16 管线级 cwd（第三刀）：Pipeline(..., cwd="...") 生效于此。
+    // 值内可写 $VAR/$(...)/~——resolve 阶段已被 bash 规范化为绝对路径。
+    if let Some(dir) = PipelineCtx::cwd() {
+        command.current_dir(&dir);
+    }
     command.arg("-c").arg(&cmd);
     apply_ductile_child_env(&mut command);
     for e in &envs {

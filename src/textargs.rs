@@ -228,6 +228,8 @@ pub fn expand_tilde(path: &str) -> String {
 
 /// 文件系统路径：tilde 展开；Windows 上将 `/tmp` 与 `/tmp/...` 映射到系统临时目录。
 /// （引擎 `write`/`read`/`cp` 走原生路径；Git Bash 内的 `/tmp` 仍由 bash 自己解析。）
+/// v0.16：管线级 cwd 下相对路径解析到 cwd（Pipeline(cwd=...) 对 fs 动词同样生效；
+/// run() 走 Command::current_dir，fs 动词没有子进程——在这里统一锚定）。
 pub fn expand_fs_path(path: &str) -> String {
     let p = expand_tilde(path);
     #[cfg(windows)]
@@ -240,6 +242,12 @@ pub fn expand_fs_path(path: &str) -> String {
                 t.push(rest);
             }
             return t.to_string_lossy().into_owned();
+        }
+    }
+    // v0.16：相对路径 + 管线 cwd 存在 → 锚到 cwd（绝对路径/无 cwd 原样返回）
+    if !p.starts_with('/') && !p.starts_with('~') {
+        if let Some(dir) = crate::steps::PipelineCtx::cwd() {
+            return format!("{}/{}", dir.trim_end_matches('/'), p);
         }
     }
     p
