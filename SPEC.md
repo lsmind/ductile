@@ -35,7 +35,7 @@ cd ductile && cargo build --release
 ### 1.2 语法规则
 
 ```
-Pipeline("name", "optional description")
+Pipeline("name", "optional description", cwd="...", env=["K=V", ...])
   .proc("proc_name")
     .desc("optional description")
     .plan(
@@ -54,6 +54,20 @@ Pipeline("name", "optional description")
     .deliver(@upstream_proc)
 ```
 
+> **v0.16 简炼三刀**（ship.pipeline 已糖化改写，狗粮验证 48b33b0）：
+>
+> 1. **单 impl 内联糖**：`.proc("name", verb(args))` ≡ `.plan(verb -> verb(args))`。
+>    单 impl proc 不再写 `.plan(x -> ...)` 仪式；impl 名自动取动词名；尾部修饰符
+>    （`.retry/.when/.tags`）照常可用。**箭头保留给多路选择**——`name -> body`
+>    形态只在 `.plan(a -> ..., b -> ...)` 里出现。未知动词不脱糖（fail-closed）。
+> 2. **tags 动词推导**：impl 未手写 `.tags` 时自动取动词名（#run/#write/#script…）。
+>    语义域标记（#git/#gate）仍手写叠加。
+> 3. **管线级 cwd/env**：`Pipeline(..., cwd="${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)}")`
+>    ——run/spawn 子进程 `current_dir`；write/read/cp 等 fs 动词的相对路径同样
+>    锚到 cwd（expand_fs_path 统一处理）。cwd 值内可写 `$VAR`/`$(...)`/`~`（bash
+>    规范化，坏路径整流 fail-closed 退出）。env 注入全部子进程，身份变量
+>    PATH/HOME/USER 永不覆盖。无 cwd/env 声明 = v0.15 行为不变。
+>
 > **v0.11 退役语法**（仍可解析但警告+忽略，不入 AST）：`.cost(latency=..., ...)`、
 > `.ensure(result => ..., "...")`、`.check(result => ..., "...")`。
 > cost/权重 → `.eval` 策略文件 + `--policy` 挂载（§2/§3）；质量门槛 → 独立 judge proc +
