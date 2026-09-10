@@ -361,6 +361,20 @@ pub fn score_to_tier_index(score: u32, ladder_len: usize) -> usize {
     idx.min(ladder_len - 1)
 }
 
+/// guide 详尽性信号（v0.17.1）：guide 明确要求"输出详尽/清单/逐条"时，
+/// 复杂度打分 -1（下压半档）。盲评实证：思考型大模型（35B）偏好精炼，
+/// 与"裁判/下游要详尽清单"方向相反——升档反而掉分（s1 输 15 分）。
+/// 信号词：详尽/清单/逐条/列出所有/全面覆盖。"宁详勿简"这类反向指令
+/// 已实证会诱发格式退化，不在此信号内——语义方向由 guide 自己控制。
+fn guide_detail_signal(guide: &str) -> i32 {
+    const MARKERS: [&str; 5] = ["详尽", "清单", "逐条", "列出所有", "全面覆盖"];
+    if MARKERS.iter().any(|m| guide.contains(m)) {
+        -1
+    } else {
+        0
+    }
+}
+
 /// 解析 agent 的阶梯并选定起始档。
 /// 返回 (tier 名列表, 起始下标)。fail-closed：阶梯引用未定义档位 / tier= 实参
 /// 不在阶梯内 → 硬错误并列出可用档位。
@@ -401,6 +415,9 @@ pub fn resolve_tier_start(
     }
     // 信号 2：复杂度打分（单档阶梯自然钳到 0）
     let score = complexity_score(prompt_len, system_len, schema_fields);
+    // v0.17.1：guide 详尽性信号——要清单/逐条输出的节点下压一档
+    // （思考型模型精炼偏好与详尽要求方向相反）
+    let score = (score as i32 + guide_detail_signal(&agent.guide)).max(0) as u32;
     let idx = score_to_tier_index(score, ladder.len());
     Ok((ladder, idx))
 }
@@ -426,6 +443,16 @@ pub fn apply_llm_env_from_config(cmd: &mut std::process::Command, cfg: &LlmConfi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guide_detail_signal_markers() {
+        // 含清单/逐条类指令 → -1（下压档位）
+        assert_eq!(guide_detail_signal("risks 逐条列出严重度"), -1);
+        assert_eq!(guide_detail_signal("输出全面覆盖所有模块"), -1);
+        // 中性 guide / 空 → 0
+        assert_eq!(guide_detail_signal("上游是需求，正常设计"), 0);
+        assert_eq!(guide_detail_signal(""), 0);
+    }
 
     #[test]
     fn parse_llm_section_strings() {

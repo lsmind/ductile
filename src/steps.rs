@@ -324,7 +324,7 @@ impl NodeCtx {
                                 } else {
                                     format!("（{}）", desc)
                                 },
-                                preview_value(val, 200)
+                                preview_value(val, preview_window(schema))
                             ));
                             used += 1;
                         }
@@ -394,6 +394,27 @@ fn when_refs(p: &crate::ast::Proc, plan: &[crate::ast::Impl]) -> bool {
             .map(|w| w.contains(&format!("@{}", p.name)))
             .unwrap_or(false)
     })
+}
+
+/// v0.17.1 上游预览窗口分级（按下游职责）：
+/// - 常规：200 字符/字段（原 v0.17 行为，"最少必要信息"）
+/// - 细节消费型：2000 字符/字段——schema 声明它要做逐条核对/清单产出
+///   （missing/tickets/tasks/notes/findings 类字段），截断 200 会把它的
+///   工作对象截没。盲评实证：审计节点拿 200 字符预览 vs 基线拿全文，
+///   输掉 10 分且被批"仅两点、缺乏量化分析"。
+/// 判定信号用下游自身 schema（声明的是它的职责，非上游内容）。
+fn preview_window(schema: &str) -> usize {
+    const DETAIL_CONSUMER: [&str; 6] =
+        ["missing", "tickets", "tasks", "notes", "findings", "issues"];
+    let has = schema
+        .split(',')
+        .map(|s| s.trim())
+        .any(|f| DETAIL_CONSUMER.iter().any(|d| f.contains(d)));
+    if has {
+        2000
+    } else {
+        200
+    }
 }
 
 /// v0.17 认知上下文注入：同节点错误记忆（open incident）+ 历史统计（runs）。
@@ -2400,6 +2421,16 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn preview_window_detail_consumer() {
+        // 细节消费型 schema（missing/tickets）→ 2000 窗口
+        assert_eq!(preview_window("score,missing,notes"), 2000);
+        assert_eq!(preview_window("tickets,deps,total_est"), 2000);
+        // 常规 schema → 200
+        assert_eq!(preview_window("modules,storage,stack,risks"), 200);
+        assert_eq!(preview_window(""), 200);
+    }
+
     fn auto_prompt_synthesizes_identity_topic_upstream() {
         let mut pl = crate::ast::Pipeline::default();
         pl.name = "proj_chain".into();
