@@ -117,6 +117,12 @@ Pipeline("name", "optional description", cwd="...", env=["K=V", ...])
   - 内联（impl 级）：`name -> body.when(cond)` 只作用于该 impl
   - 块级（proc 级）：`.when(cond)` 独立成行，下推到该 proc 全部未持有内联 when 的 impls；条件里的 `@ref` 并入 refs，egraph 据此建裁判→消费者边（保证裁判先执行）
   - 块级语法错误（空条件/括号不平衡）= 解析期硬错误，不再静默丢弃
+- **`.needs(@ref, ...)` 修饰符（v0.17.3）**：声明上下文数据流——把指定上游产出并入本 proc（llm agent）的合成 prompt 上下文，不改变门禁/路由行为。
+  - 与 `.when` 的分工：`.when` = 控制流（门禁/路由，条件不满足不放行）；`.needs` = 数据流（"我的上下文需要它"，只喂料不判闸）
+  - 语法：`.needs(@a, @b)`，参数必须是 `@name` 格式（裸词硬错误）；可与其他修饰符组合（如先 `.when(@brk.tickets)` 再 `.needs(@req)`）
+  - 语义联动：① egraph 建排序边（needs 声明的上游先执行）；② 合成器把 needs 并入 upstream 引用集合（进入 LLM 上下文）
+  - 典型场景：审计/裁判节点 `.when(@上游产出存在)` 只声明门禁，但审计清单脚手架来自更早的节点——用 `.needs` 把清单喂进上下文。实证：regchain audit 节点挂 `.needs(@req)` 后盲评 s3 段 -7.3 → +8.0
+  - 判别法：如果缺了这个上游的**内容**产出质量会掉，用 `.needs`；如果缺了这个上游的**状态**流程走不通，用 `.when`
 
 ### 1.4 变量替换规则
 
