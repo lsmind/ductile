@@ -1,0 +1,26 @@
+#!/usr/bin/env -S ductile run
+// regbare.pipeline — 裸模型臂：五段直出，无 auto-prompt、无上游承接、无门禁。
+// 与 regchain 同 schema 同 agent 身份（system 一致），唯一差别 = 管线上下文。
+// 产物路径前缀 gbar_，不与管线臂混淆。
+Pipeline("regbare", "裸模型基线：五段单发直出", cwd="/tmp/regchain_data")
+
+  .proc("req", llm(req_analyst, model="qwen3.8:27b", prompt="{topic} 只输出 JSON。"))
+    .desc("S0 需求提炼：单发直出")
+  .proc("arch", llm(architect, model="qwen3.8:27b", prompt="{topic} 做架构设计，只输出 JSON。"))
+    .desc("S1 架构设计：单发直出（无上游需求承接）")
+  .proc("brk", llm(breaker, model="qwen3.8:27b", prompt="{topic} 拆任务单，只输出 JSON。"))
+    .desc("S2 任务拆解：单发直出")
+  .proc("audit", llm(auditor, model="qwen3.8:27b", prompt="{topic} 审计任务单覆盖度，score 0-100 放最前，只输出 JSON。"))
+    .desc("S3 审计门：单发直出")
+
+  .proc("d0", write(to="/tmp/regchain_data/gbar_req.txt", content=@req))
+    .when(@req.must_have)
+  .proc("d1", write(to="/tmp/regchain_data/gbar_arch.txt", content=@arch))
+    .when(@arch.modules)
+  .proc("d2", write(to="/tmp/regchain_data/gbar_brk.txt", content=@brk))
+    .when(@brk.tickets)
+  .proc("d3", write(to="/tmp/regchain_data/gbar_audit.txt", content=@audit))
+    .when(@audit.score)
+
+  .proc("deliver")
+    .deliver(@d3)
