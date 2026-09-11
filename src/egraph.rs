@@ -315,6 +315,15 @@ pub fn build_egraph(pl: &Pipeline) -> EGraph {
                     }
                 }
             }
+            // v0.17.3 .needs(@ref) 数据依赖边：needs 声明的上游也进排序图
+            // （它先跑完，本节点的合成上下文才有它）。
+            for r in &proc.needs {
+                if pl.procs.iter().any(|p| &p.name == r) && r != &proc.name {
+                    if edges_seen.insert((r.clone(), proc.name.clone())) {
+                        eg.edges.push((r.clone(), proc.name.clone()));
+                    }
+                }
+            }
             let children: Vec<usize> = refs
                 .iter()
                 .filter_map(|r| eg.proc_class.get(r).copied())
@@ -867,6 +876,7 @@ mod tests {
             checks: vec![],
             contract: Default::default(),
             deliver: false,
+            needs: vec![],
             deliver_refs: vec![],
             foreach: None,
             foreach_var: String::new(),

@@ -191,12 +191,17 @@ impl NodeCtx {
             .flat_map(|i| i.refs.iter().cloned())
             .collect();
         // .when 里的 @ref 也算上游（门禁引用即数据依赖）
+        // v0.17.3：.needs(@ref) 显式数据依赖也进 upstream——audit .when(@brk.tickets)
+        // 只声明门禁时，合成器看不到它真正要逐条核对的 req（盲评实证 -7.3 分）。
         let mut upstream = Vec::new();
         for p in &pl.procs {
             if p.name == proc.name {
                 break;
             }
-            if refs_set.contains(&p.name) || when_refs(&p, &proc.plan) {
+            if refs_set.contains(&p.name)
+                || when_refs(&p, &proc.plan)
+                || proc.needs.contains(&p.name)
+            {
                 upstream.push((p.name.clone(), p.description.clone()));
             }
         }
@@ -2413,6 +2418,7 @@ mod tests {
             checks: Vec::new(),
             contract: crate::ast::Contract::default(),
             deliver: false,
+            needs: vec![],
             foreach: None,
             deliver_refs: Vec::new(),
             foreach_var: String::new(),

@@ -1109,6 +1109,7 @@ mod tests {
                 checks: vec![],
                 contract: Default::default(),
                 deliver: false,
+                needs: vec![],
                 deliver_refs: vec![],
                 foreach: None,
                 foreach_var: String::new(),

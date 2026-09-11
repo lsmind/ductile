@@ -20,6 +20,7 @@ Pipeline("regchain", "auto-prompt 回归链：五段裸 agent + 结构化字段�
   .proc("audit", llm(auditor))
     .desc("S3 审计门：对照原始用户描述审查任务单覆盖度（score 0-100 + missing）")
     .when(@brk.tickets)
+    .needs(@req)
 
   .proc("d_req", write(to="/tmp/regchain_data/reg_req.txt", content=@req))
     .desc("落盘 S0 产物")

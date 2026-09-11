@@ -242,6 +242,7 @@ pub(crate) fn extract_quoted(s: &str) -> Option<String> {
 
 // ── Parse a single .proc block ──
 fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseError> {
+    let mut needs: Vec<String> = Vec::new(); // v0.17.3 .needs(@ref) 数据依赖
     let mut idx = start_idx;
     let line = lines[idx];
     let _line_num = idx + 1;
@@ -311,6 +312,46 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
             let (impls, next_idx) = parse_plan_block(lines, idx, &name)?;
             plan.extend(impls);
             idx = next_idx;
+            continue;
+        }
+
+        // .needs(@ref) — v0.17.3 纯数据依赖声明：进 egraph 排序边 + 合成器
+        // upstream。与 .when 的分工：.when 是门禁/路由（控制流），.needs 是
+        // "我的上下文需要它"（数据流）。可叠多个：.needs(@a, @b)。
+        if trimmed.starts_with(".needs(") || trimmed.starts_with(".needs (") {
+            let after = &trimmed[6..];
+            let close = find_matching_paren(after).ok_or_else(|| ParseError {
+                line: idx + 1,
+                col: 1,
+                msg: "unbalanced parens in .needs(...)".into(),
+                line_text: raw.to_string(),
+            })?;
+            let inner = &after[1..close];
+            if inner.trim().is_empty() {
+                return Err(ParseError {
+                    line: idx + 1,
+                    col: 1,
+                    msg: ".needs() requires at least one @ref".into(),
+                    line_text: raw.to_string(),
+                });
+            }
+            for part in inner.split(',') {
+                let raw_ref = part.trim();
+                // 必须是 @name 形态（防裸词被静默接受）
+                if !raw_ref.starts_with('@') || raw_ref.len() < 2 {
+                    return Err(ParseError {
+                        line: idx + 1,
+                        col: 1,
+                        msg: ".needs() ref must be @name (bare words not allowed)".into(),
+                        line_text: raw.to_string(),
+                    });
+                }
+                let r = raw_ref[1..].to_string();
+                if !needs.contains(&r) {
+                    needs.push(r);
+                }
+            }
+            idx += 1;
             continue;
         }
 
@@ -534,6 +575,7 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
             checks,
             contract: contract.unwrap_or_default(),
             deliver: is_deliver,
+            needs,
             deliver_refs,
             foreach: foreach_src,
             foreach_var,
@@ -1345,6 +1387,31 @@ mod tests {
     // ── v0.11.1 块级 .when（proc 级裁判路由）──
 
     #[test]
+    // ── v0.17.3 .needs(@ref) 数据依赖 ──
+
+    #[test]
+    fn needs_parses_refs_into_proc() {
+        let input = r#"Pipeline("t")
+  .proc("gen", run("echo 1"))
+  .proc("audit", llm(auditor))
+    .when(@gen.score)
+    .needs(@gen, @req)
+"#;
+        let pl = parse_pipeline(input).unwrap();
+        let audit = pl.procs.iter().find(|p| p.name == "audit").unwrap();
+        assert_eq!(audit.needs, vec!["gen".to_string(), "req".to_string()]);
+    }
+
+    #[test]
+    fn needs_empty_or_bad_ref_hard_error() {
+        // 空 needs → 硬错
+        let e = parse_pipeline("Pipeline(\"t\")\n  .proc(\"a\", run(\"echo 1\"))\n    .needs()\n");
+        assert!(e.is_err());
+        // 非引用裸词 → 硬错（必须是 @name）
+        let e2 = parse_pipeline("Pipeline(\"t\")\n  .proc(\"a\", run(\"echo 1\"))\n    .needs(bare_word)\n");
+        assert!(e2.is_err());
+    }
+
     fn block_when_pushes_to_all_impls() {
         let input = r#"Pipeline("t")
 
@@ -1936,6 +2003,7 @@ mod prim_tests {
                 invariants: invariants.into_iter().map(String::from).collect(),
             },
             deliver: false,
+            needs: vec![],
             deliver_refs: vec![],
             foreach: None,
             foreach_var: String::new(),

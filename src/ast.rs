@@ -136,7 +136,13 @@ pub struct Proc {
     pub contract: Contract, // v0.15: .contract(outputs=..., invariants=...)
     pub deliver: bool,
     pub foreach: Option<String>, // source proc name
-    /// v0.14b：deliver 引用（`.deliver(@report)` 的 @report）——关键节点集的根。
+    /// v0.17.3：纯数据依赖声明（`.needs(@req)`）——不参与门禁路由（那是 .when 的
+    /// 职责），只声明"我的上下文需要它"：①egraph 排序边（它先跑）②auto-prompt
+    /// 合成器把它并入上游输入。动机：audit `.when(@brk.tickets)` 只声明了门禁，
+    /// 审计员真正要逐条核对的 req 清单进不了合成上下文——单比较 when 文法
+    /// 表达不了"门禁 brk + 依赖 req"，这是语言表达力缺口不是作者漏写。
+    pub needs: Vec<String>,
+    /// v0.14b：deliver 引用（`.deliver(@report)` 的 @ref）——关键节点集的根。
     /// 旧版只置 is_deliver 丢弃参数，关键性判定无从谈起（实测 bug）。
     pub deliver_refs: Vec<String>,
     pub foreach_var: String,
@@ -371,6 +377,7 @@ mod tests {
                     checks: vec![],
                     contract: Default::default(),
                     deliver: false,
+                    needs: vec![],
                     deliver_refs: vec![],
                     foreach: None,
                     foreach_var: String::new(),
@@ -387,6 +394,7 @@ mod tests {
                     checks: vec![],
                     contract: Default::default(),
                     deliver: false,
+                    needs: vec![],
                     deliver_refs: vec![],
                     foreach: None,
                     foreach_var: String::new(),
@@ -419,6 +427,7 @@ mod tests {
                 checks: vec![],
                 contract: Default::default(),
                 deliver: false,
+                needs: vec![],
                 deliver_refs: vec![],
                 foreach: None,
                 foreach_var: String::new(),
