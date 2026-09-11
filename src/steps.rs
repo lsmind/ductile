@@ -407,15 +407,19 @@ fn when_refs(p: &crate::ast::Proc, plan: &[crate::ast::Impl]) -> bool {
 ///   （missing/tickets/tasks/notes/findings 类字段），截断 200 会把它的
 ///   工作对象截没。盲评实证：审计节点拿 200 字符预览 vs 基线拿全文，
 ///   输掉 10 分且被批"仅两点、缺乏量化分析"。
+/// v0.17.4 约束敏感型：schema 含 constraints/budget/cost/risks 的下游
+///   （架构师/方案设计类）扩窗 2000——盲评实证 s1 -15：constraints 字段
+///   在 200 字符处"预算少/别太复杂/先跑起来MVP"全被截掉，architect 只看
+///   must_have 就堆重型 AI 栈，3 轮批语一致"违背低成本MVP诉求"。
+///   约束是设计决策的边界条件，截断即失真。
 /// 判定信号用下游自身 schema（声明的是它的职责，非上游内容）。
 fn preview_window(schema: &str) -> usize {
     const DETAIL_CONSUMER: [&str; 6] =
         ["missing", "tickets", "tasks", "notes", "findings", "issues"];
-    let has = schema
-        .split(',')
-        .map(|s| s.trim())
-        .any(|f| DETAIL_CONSUMER.iter().any(|d| f.contains(d)));
-    if has {
+    const CONSTRAINT_SENSITIVE: [&str; 4] = ["constraints", "budget", "cost", "risks"];
+    let fields: Vec<&str> = schema.split(',').map(|s| s.trim()).collect();
+    let hit = |list: &[&str]| fields.iter().any(|f| list.iter().any(|d| f.contains(d)));
+    if hit(&DETAIL_CONSUMER) || hit(&CONSTRAINT_SENSITIVE) {
         2000
     } else {
         200
@@ -914,6 +918,11 @@ fn exec_llm(
             p
         }
     };
+    // v0.17.4 已知问题（不在此修）：complexity_score 的 prompt 长度轴对
+    // auto-prompt 中文节点失真——字节计数（中文 3B/字）+ 引擎注入预览把一切
+    // llm 节点推到 score≥2。盲评实证 architect 被路由到 high(35B) 产出变浅
+    // （s1 -22.7），钉回 medium(27B) 后 +13。修法定性：注入≠难度，留给
+    // v0.18 上下文协商规格一并处理（docs/v0.18_context_negotiation_spec.md）。
     let resolved_template = resolve_vars(&template, topic, results);
     let resolved_system = resolve_vars(&system, topic, results);
     let resolved_schema = resolve_vars(&schema, topic, results);
@@ -2432,8 +2441,13 @@ mod tests {
         // 细节消费型 schema（missing/tickets）→ 2000 窗口
         assert_eq!(preview_window("score,missing,notes"), 2000);
         assert_eq!(preview_window("tickets,deps,total_est"), 2000);
+        // v0.17.4 约束敏感型 schema（risks/constraints）→ 2000 窗口
+        assert_eq!(preview_window("modules,storage,stack,risks"), 2000);
+        assert_eq!(preview_window("constraints,must_have"), 2000);
+        assert_eq!(preview_window("plan,budget_breakdown"), 2000);
         // 常规 schema → 200
-        assert_eq!(preview_window("modules,storage,stack,risks"), 200);
+        assert_eq!(preview_window("must_have,scale,users"), 200);
+        assert_eq!(preview_window("title,summary"), 200);
         assert_eq!(preview_window(""), 200);
     }
 
