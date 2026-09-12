@@ -243,6 +243,7 @@ pub(crate) fn extract_quoted(s: &str) -> Option<String> {
 // ── Parse a single .proc block ──
 fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseError> {
     let mut needs: Vec<String> = Vec::new(); // v0.17.3 .needs(@ref) 数据依赖
+    let mut constraint_fields: Vec<String> = Vec::new(); // v0.18.1 .constraint(fields) 链级约束字段
     let mut idx = start_idx;
     let line = lines[idx];
     let _line_num = idx + 1;
@@ -349,6 +350,45 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
                 let r = raw_ref[1..].to_string();
                 if !needs.contains(&r) {
                     needs.push(r);
+                }
+            }
+            idx += 1;
+            continue;
+        }
+
+        // .constraint(fields) — v0.18.1 链级约束字段：挂在本生产者上，
+        // 声明"这个输出字段承载用户级约束"，下游合成 auto-prompt 时从本节点
+        // 结果中提取字段实时值注入「继承的约束」段。可叠多字段：
+        // .constraint(constraints, out_of_scope)
+        if trimmed.starts_with(".constraint(") || trimmed.starts_with(".constraint (") {
+            let after = &trimmed[11..];
+            let close = find_matching_paren(after).ok_or_else(|| ParseError {
+                line: idx + 1,
+                col: 1,
+                msg: "unbalanced parens in .constraint(...)".into(),
+                line_text: raw.to_string(),
+            })?;
+            let inner = &after[1..close];
+            if inner.trim().is_empty() {
+                return Err(ParseError {
+                    line: idx + 1,
+                    col: 1,
+                    msg: ".constraint() requires at least one field name".into(),
+                    line_text: raw.to_string(),
+                });
+            }
+            for part in inner.split(',') {
+                let f = part.trim().to_string();
+                if f.is_empty() || f.contains('@') || f.contains('(') {
+                    return Err(ParseError {
+                        line: idx + 1,
+                        col: 1,
+                        msg: ".constraint() takes bare field names (constraints, budget)".into(),
+                        line_text: raw.to_string(),
+                    });
+                }
+                if !constraint_fields.contains(&f) {
+                    constraint_fields.push(f);
                 }
             }
             idx += 1;
@@ -576,6 +616,7 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
             contract: contract.unwrap_or_default(),
             deliver: is_deliver,
             needs,
+            constraint_fields,
             deliver_refs,
             foreach: foreach_src,
             foreach_var,
@@ -1388,7 +1429,6 @@ mod tests {
 
     #[test]
     // ── v0.17.3 .needs(@ref) 数据依赖 ──
-
     #[test]
     fn needs_parses_refs_into_proc() {
         let input = r#"Pipeline("t")
@@ -1408,7 +1448,43 @@ mod tests {
         let e = parse_pipeline("Pipeline(\"t\")\n  .proc(\"a\", run(\"echo 1\"))\n    .needs()\n");
         assert!(e.is_err());
         // 非引用裸词 → 硬错（必须是 @name）
-        let e2 = parse_pipeline("Pipeline(\"t\")\n  .proc(\"a\", run(\"echo 1\"))\n    .needs(bare_word)\n");
+        let e2 = parse_pipeline(
+            "Pipeline(\"t\")\n  .proc(\"a\", run(\"echo 1\"))\n    .needs(bare_word)\n",
+        );
+        assert!(e2.is_err());
+    }
+
+    // ── v0.18.1 .constraint(fields) 链级约束字段 ──
+
+    #[test]
+    fn constraint_parses_fields_into_proc() {
+        let input = r#"Pipeline("t")
+  .proc("req", llm(req_analyst))
+    .constraint(constraints, out_of_scope)
+  .proc("arch", llm(architect))
+    .when(@req.must_have)
+"#;
+        let pl = parse_pipeline(input).unwrap();
+        let req = pl.procs.iter().find(|p| p.name == "req").unwrap();
+        assert_eq!(
+            req.constraint_fields,
+            vec!["constraints".to_string(), "out_of_scope".to_string()]
+        );
+        // 未声明的 proc 默认空
+        let arch = pl.procs.iter().find(|p| p.name == "arch").unwrap();
+        assert!(arch.constraint_fields.is_empty());
+    }
+
+    #[test]
+    fn constraint_empty_or_bad_field_hard_error() {
+        // 空 → 硬错
+        let e =
+            parse_pipeline("Pipeline(\"t\")\n  .proc(\"a\", run(\"echo 1\"))\n    .constraint()\n");
+        assert!(e.is_err());
+        // @ref 形态（那是 .needs 的语义）→ 硬错
+        let e2 = parse_pipeline(
+            "Pipeline(\"t\")\n  .proc(\"a\", run(\"echo 1\"))\n    .constraint(@req)\n",
+        );
         assert!(e2.is_err());
     }
 
@@ -2004,6 +2080,7 @@ mod prim_tests {
             },
             deliver: false,
             needs: vec![],
+            constraint_fields: vec![],
             deliver_refs: vec![],
             foreach: None,
             foreach_var: String::new(),

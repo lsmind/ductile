@@ -1,0 +1,12 @@
+#!/usr/bin/env -S ductile run
+// c181_judge.pipeline — v0.18.1 约束继承验收：s2 单段盲评（甲乙丙三候选）
+Pipeline("c181_judge", "v0.18.1 s2盲评", cwd="/tmp/regchain_data")
+
+  .proc("mat2", read(from="/tmp/regchain_data/c181_s2.txt"))
+  .proc("j2", llm(blind_judge, prompt="{@mat2}"))
+    .desc("S2 三方盲评（g27旧管线/gc新管线/gbar裸）")
+
+  .proc("d2", write(to="/tmp/regchain_data/{topic}_c181_s2.txt", content=@j2))
+    .when(@j2.scores)
+  .proc("deliver")
+    .deliver(@d2)

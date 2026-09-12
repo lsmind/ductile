@@ -105,6 +105,24 @@ pub fn resolve_vars(text: &str, topic: &str, results: &BTreeMap<String, Value>) 
     result
 }
 
+// ── Env-param hygiene ──
+
+/// 剥掉一层对称包围引号（序列化残留卫生）。
+/// 反馈单#2：param 经 @ref/resolve_vars 搬运后可能带序列化引号进
+/// DUCTILE_ARG_* env（脚本侧 int('"16"') 炸 import）。错误应炸在搬运处，
+/// 故 env 注入前统一过此函数（一层已覆盖实测场景；内容真含引号的参数
+/// 不受影响——只剥首尾对称对）。
+pub fn strip_wrapping_quotes(s: &str) -> &str {
+    let t = s.trim();
+    if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+        return &t[1..t.len() - 1];
+    }
+    if t.len() >= 2 && t.starts_with('\'') && t.ends_with('\'') {
+        return &t[1..t.len() - 1];
+    }
+    t
+}
+
 // ── String arg extraction ──
 
 /// key="value" 或 key=value 提取。无匹配 → 空串。
@@ -498,7 +516,24 @@ mod tests {
         assert_eq!(extract_string_arg("n", "n=5)"), "5");
     }
 
+    // ── v0.18.4 env 参数卫生（反馈单#2：int('"16"') 炸 import）──
     #[test]
+    fn strip_quotes_removes_serialization_wrapper() {
+        assert_eq!(strip_wrapping_quotes("\"16\""), "16");
+        assert_eq!(strip_wrapping_quotes("'16'"), "16");
+        assert_eq!(strip_wrapping_quotes("  \"16\"  "), "16"); // 前后空白也剥
+    }
+
+    #[test]
+    fn strip_quotes_keeps_content_intact() {
+        // 内容真含引号/不对称引号 → 不动（只剥首尾对称对）
+        assert_eq!(strip_wrapping_quotes("16"), "16");
+        assert_eq!(strip_wrapping_quotes("say \"hi\" now"), "say \"hi\" now");
+        assert_eq!(strip_wrapping_quotes("\"unbalanced"), "\"unbalanced");
+        assert_eq!(strip_wrapping_quotes(""), "");
+        assert_eq!(strip_wrapping_quotes("\""), "\"");
+    }
+
     fn extract_all_string_args_multiple() {
         let body = r#"run("x", env="A=1", env="B=2")"#;
         assert_eq!(extract_all_string_args("env", body), vec!["A=1", "B=2"]);

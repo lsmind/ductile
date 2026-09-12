@@ -9,6 +9,7 @@ Pipeline("regchain", "auto-prompt 回归链：五段裸 agent + 结构化字段�
 
   .proc("req", llm(req_analyst))
     .desc("S0 需求提炼：从模糊用户故事提取结构化需求（must_have/constraints/scale/users/out_of_scope）")
+    .constraint(constraints)
   .proc("arch", llm(architect))
     .desc("S1 架构设计：基于结构化需求做模块划分与选型，needs_verify 标注没把握项")
     .when(@req.must_have)

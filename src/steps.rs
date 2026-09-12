@@ -9,7 +9,7 @@ use crate::ast::*;
 use crate::dslresult::{encode_structured_result, parse_dsl_result_block};
 use crate::textargs::{
     expand_fs_path, extract_all_string_args, extract_first_bare_arg, extract_first_string,
-    extract_string_arg, resolve_vars,
+    extract_string_arg, resolve_vars, strip_wrapping_quotes,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -164,6 +164,24 @@ thread_local! {
     static NODE_CTX: RefCell<Option<NodeCtxInner>> = const { RefCell::new(None) };
 }
 
+/// v0.18.1：合成 prompt 落盘文件名用——当前管线/节点名（无 ctx → unknown）。
+fn inner_pipeline_name() -> String {
+    NODE_CTX.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|i| i.pipeline_name.clone())
+            .unwrap_or_else(|| "unknown".into())
+    })
+}
+fn inner_proc_name() -> String {
+    NODE_CTX.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|i| i.proc_name.clone())
+            .unwrap_or_else(|| "unknown".into())
+    })
+}
+
 struct NodeCtxInner {
     pipeline_name: String,
     pipeline_desc: String,
@@ -177,6 +195,10 @@ struct NodeCtxInner {
     upstream_contracts: Vec<String>,
     /// 下游消费者（引用本 proc 的后续节点）——位置信息：你的产出给谁用。
     downstream: Vec<String>,
+    /// v0.18.1：本 proc 之前的节点声明的链级约束（.constraint(fields) 生产者 +
+    /// 字段名）。合成时从 results 提取实时值——预提取只存"从哪个节点取哪些
+    /// 字段"，值在 synthesize 时拿（results 那时才齐）。
+    constraint_sources: Vec<(String, Vec<String>)>, // (producer_name, fields)
 }
 
 pub struct NodeCtx;
@@ -231,6 +253,15 @@ impl NodeCtx {
             .filter_map(|i| i.when.clone())
             .filter(|w| !w.trim().is_empty())
             .collect();
+        // v0.18.1：本 proc 之前声明的链级约束源（.constraint(fields) 生产者）。
+        // 声明序在前的生产者才算——约束随数据流向下游，不回溯。
+        let constraint_sources: Vec<(String, Vec<String>)> = pl
+            .procs
+            .iter()
+            .take_while(|p| p.name != proc.name)
+            .filter(|p| !p.constraint_fields.is_empty())
+            .map(|p| (p.name.clone(), p.constraint_fields.clone()))
+            .collect();
         // 下游消费者：声明序在本 proc 之后、refs/when 引用本 proc 的节点。
         // 位置语义：你的产出是它们的上游——字段稳定性和粒度要为它们负责。
         let downstream: Vec<String> = pl
@@ -267,6 +298,7 @@ impl NodeCtx {
                 when_conds,
                 upstream_contracts,
                 downstream,
+                constraint_sources,
             })
         });
         NodeCtxGuard
@@ -342,6 +374,25 @@ impl NodeCtx {
                 let mut cons = Vec::new();
                 for w in &inner.when_conds {
                     cons.push(format!("本节点仅在条件「{}」成立时执行（引擎门禁）", w));
+                }
+                // v0.18.1 链级约束：上游 .constraint(fields) 生产者的字段实时值。
+                // 与 .when 门禁同段注入——用户级约束（没有程序员/预算少）与
+                // 引擎门禁同级在场，不被 guide 模板效应挤出。字段缺席
+                // （生产者失败/未跑）则跳过——fail-closed 交给 .when 层。
+                for (producer, fields) in &inner.constraint_sources {
+                    if let Some(val) = results.get(producer) {
+                        for f in fields {
+                            if let Some(v) =
+                                crate::dslresult::extract_field(f, &val.as_text())
+                            {
+                                let v_trunc = v.chars().take(2000).collect::<String>();
+                                cons.push(format!(
+                                    "用户约束（来自「{}」，贯穿全链，任何设计/拆解/任务分配不得违背）：{}",
+                                    producer, v_trunc
+                                ));
+                            }
+                        }
+                    }
                 }
                 cons.extend(inner.upstream_contracts.iter().cloned());
                 if !cons.is_empty() {
@@ -910,6 +961,17 @@ fn exec_llm(
                         "    -> llm auto-prompt: synthesized {} chars",
                         p.chars().count()
                     );
+                    // v0.18.1 合成 prompt 落盘：归因不再靠推。盲评翻案需要
+                    // 回放当时完整上下文——日志只记字数等于黑盒。
+                    if let Some(dir) = std::env::var_os("DUCTILE_SYNTH_DIR") {
+                        let fname = format!(
+                            "{}/synth_{}_{}.txt",
+                            dir.to_string_lossy(),
+                            inner_pipeline_name(),
+                            inner_proc_name()
+                        );
+                        let _ = std::fs::write(&fname, &p);
+                    }
                     p
                 }
                 None => return Err("llm requires prompt=\"...\" or input=\"...\" (auto-prompt needs an agent with .desc or system)".into()),
@@ -1870,12 +1932,21 @@ pub fn exec_script_call(
     let mut command = Command::new(interp);
     command.arg(&card.path);
     for (k, v) in &call_args {
-        command.env(format!("DUCTILE_ARG_{}", k.to_uppercase()), v);
+        // v0.18.4：搬运处卫生——param 经 @ref/resolve_vars 后可能带序列化
+        // 引号（反馈单#2：脚本侧 int('"16"') 炸 import，九臂全灭而管线绿灯）。
+        // env 注入前统一剥一层对称包围引号，错误炸在搬运处而非脚本深处。
+        command.env(
+            format!("DUCTILE_ARG_{}", k.to_uppercase()),
+            strip_wrapping_quotes(v),
+        );
     }
     // 未给的参数也传空串（脚本侧可区分"给了空值"与"没这个参数"）
     for (k, v) in &declared {
         if !call_args.contains_key(k) {
-            command.env(format!("DUCTILE_ARG_{}", k.to_uppercase()), v.clone());
+            command.env(
+                format!("DUCTILE_ARG_{}", k.to_uppercase()),
+                strip_wrapping_quotes(v),
+            );
         }
     }
     command.env("DUCTILE_TOPIC", topic);
@@ -2428,6 +2499,7 @@ mod tests {
             contract: crate::ast::Contract::default(),
             deliver: false,
             needs: vec![],
+            constraint_fields: vec![],
             foreach: None,
             deliver_refs: Vec::new(),
             foreach_var: String::new(),
@@ -2509,6 +2581,46 @@ mod tests {
         pl.procs.push(mk_proc("x", ""));
         let _g = NodeCtx::set(&pl, &pl.procs[0]);
         assert!(NodeCtx::synthesize_auto_prompt("t", &BTreeMap::new(), "", "", "").is_none());
+    }
+
+    #[test]
+    fn auto_prompt_injects_chain_constraint_values() {
+        // v0.18.1：上游 .constraint(fields) 声明的字段，实时值注入「继承的约束」段
+        let mut pl = crate::ast::Pipeline::default();
+        pl.name = "regchain".into();
+        let mut up = mk_proc("req", "S0 需求提炼");
+        up.constraint_fields = vec!["constraints".into()];
+        pl.procs.push(up);
+        let mut me = mk_proc("brk", "S2 任务拆解");
+        let mut im = default_impl();
+        im.refs = vec!["req".into()];
+        me.plan.push(im);
+        pl.procs.push(me);
+
+        let mut results = BTreeMap::new();
+        results.insert(
+            "req".to_string(),
+            Value::Text(
+                "§§FIELDS§§must_have=[\"归档\"]§§constraints=团队无程序员，预算少，先跑起来§§RAW§§xx"
+                    .into(),
+            ),
+        );
+
+        let _g = NodeCtx::set(&pl, &pl.procs[1]);
+        let out = NodeCtx::synthesize_auto_prompt("AI测试员", &results, "tickets,deps", "g", "s")
+            .expect("synthesized");
+        assert!(
+            out.contains("用户约束（来自「req」，贯穿全链"),
+            "链级约束段: {}",
+            out
+        );
+        assert!(
+            out.contains("团队无程序员，预算少，先跑起来"),
+            "约束实时值: {}",
+            out
+        );
+        // 声明为 constraint 的字段值不截成 200——全文在场
+        assert!(out.contains("先跑起来"));
     }
 
     #[test]

@@ -142,6 +142,16 @@ pub struct Proc {
     /// 审计员真正要逐条核对的 req 清单进不了合成上下文——单比较 when 文法
     /// 表达不了"门禁 brk + 依赖 req"，这是语言表达力缺口不是作者漏写。
     pub needs: Vec<String>,
+    /// v0.18.1：链级约束字段声明（`.constraint(constraints)`）——挂在本
+    /// 生产者节点上，声明"我的这个输出字段承载用户级约束"。引擎在下游
+    /// 任何节点合成 auto-prompt 时，从本节点**结果**中提取该字段的实时值，
+    /// 注入「继承的约束」段（与 .when 门禁同级注入）。与 .contract(invariants=)
+    /// 的区别：invariants 是作者手写的静态不变式，constraint 是从运行时
+    /// 产出中提取的动态语义约束——用户故事里的"没有程序员/预算少"只有
+    /// req 节点跑完才存在，静态声明写不出来。动机：game 场景三臂盲评
+    /// s2 -16.3——arch 消化了"无程序员"进 risks，brk 上下文里约束在场
+    /// 却被 guide 的 ticket 字段清单挤出（模板效应），任务单无 owner 分配。
+    pub constraint_fields: Vec<String>,
     /// v0.14b：deliver 引用（`.deliver(@report)` 的 @ref）——关键节点集的根。
     /// 旧版只置 is_deliver 丢弃参数，关键性判定无从谈起（实测 bug）。
     pub deliver_refs: Vec<String>,
@@ -378,6 +388,7 @@ mod tests {
                     contract: Default::default(),
                     deliver: false,
                     needs: vec![],
+                    constraint_fields: vec![],
                     deliver_refs: vec![],
                     foreach: None,
                     foreach_var: String::new(),
@@ -395,6 +406,7 @@ mod tests {
                     contract: Default::default(),
                     deliver: false,
                     needs: vec![],
+                    constraint_fields: vec![],
                     deliver_refs: vec![],
                     foreach: None,
                     foreach_var: String::new(),
@@ -428,6 +440,7 @@ mod tests {
                 contract: Default::default(),
                 deliver: false,
                 needs: vec![],
+                constraint_fields: vec![],
                 deliver_refs: vec![],
                 foreach: None,
                 foreach_var: String::new(),

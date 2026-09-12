@@ -1,0 +1,24 @@
+// prompt_evolve.pipeline — 提示词自动进化环（v0.18.3 评估函数机制）
+// 三层：①probe（机器判「有没有错」：结构不变量零 LLM）②judge 批语（外部裁判）
+//       ③doctor（LLM 判「为什么+怎么改」：读 guide 原文+探针报告+批语 → 处方）
+// 处方可执行（add/replace/remove + old/new fragment），预期效果可证伪——下轮 probe 复检。
+// 用法：DUCTILE_DATA=/tmp/regchain_data DUCTILE_CONFIG=/tmp/regchain_data/regconf_doctor.toml \
+//       ductile run pipelines/prompt_evolve.pipeline "<臂名，如 g9c>"
+Pipeline("prompt_evolve", "提示词自动进化环：probe→批语→诊断→处方", cwd="/tmp/regchain_data")
+
+  .proc("arm", run("echo {topic}"))
+    .desc("目标臂名（产物前缀）")
+  .proc("probe", run("python3 /home/beef/projects/ductile/scripts/probe_invariants.py /tmp/regchain_data/{topic}_brk.txt"))
+    .desc("① 机器探针：结构不变量检查（零 LLM）")
+  .proc("guide_cur", run("grep -A6 'agents.breaker' /tmp/regchain_data/regconf9c.toml"))
+    .desc("取当前 breaker guide 原文")
+    .when(@probe.probe_score)
+  .proc("verdicts", run("cat /tmp/regchain_data/c187r0_c181_s2.txt /tmp/regchain_data/c187r1_c181_s2.txt /tmp/regchain_data/c187r2_c181_s2.txt"))
+    .desc("取三轮盲评批语（裁判对产物的内容批评）")
+  .proc("doctor", llm(prompt_doctor, prompt="当前 breaker 配置：\n{@guide_cur}\n\n探针报告：\n{@probe}\n\n三轮盲评批语：\n{@verdicts}"))
+    .desc("② 提示词医生：诊断根因 + 开出处方（可证伪）")
+  .proc("rx", write(to="/tmp/regchain_data/{topic}_rx.json", content=@doctor))
+    .desc("处方落盘")
+    .when(@doctor.diagnoses)
+  .proc("deliver")
+    .deliver(@rx)

@@ -95,7 +95,7 @@ pub struct ErrorRecord {
     pub attempts: u32,
 }
 
-const MSG_MAX: usize = 500;
+const MSG_MAX: usize = 2000;
 const RAW_MAX: usize = 4096;
 
 /// 引擎原生错误锚点（全小写匹配，模式串本身小写）。
@@ -849,7 +849,8 @@ mod tests {
         let long = "x".repeat(10_000);
         let r = ErrorRecord::new("p", "i", &long, 1);
         assert!(r.raw.chars().count() <= 4097); // 4096 + ellipsis
-        assert!(r.message.chars().count() <= 501);
+                                                // v0.18.4：MSG_MAX 500 → 2000（反馈单#3：err_msg 截断伤诊断）
+        assert!(r.message.chars().count() <= 2001); // 2000 + ellipsis
     }
 
     #[test]

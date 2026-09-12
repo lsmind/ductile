@@ -877,6 +877,7 @@ mod tests {
             contract: Default::default(),
             deliver: false,
             needs: vec![],
+            constraint_fields: vec![],
             deliver_refs: vec![],
             foreach: None,
             foreach_var: String::new(),

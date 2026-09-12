@@ -1,0 +1,44 @@
+// regchain8c.pipeline — 问询链：提示词教会"主动问"而非臆造
+// 结构：req(8B，不确定项进 open_questions) → resolve(27B 上级裁决，产出 resolved_constraints)
+//       → arch/brk/audit(8B)。.constraint 挂 resolve——全链继承裁决后的干净约束。
+// 双配置：regconf8c.toml 全 light=8B 问询链；regconf27c.toml=27B 问询链对照（落盘同 g8c_*，
+//         跑完手动 cp 到 g27c_* 以免覆盖）。用法：
+// DUCTILE_DATA=/tmp/regchain_data DUCTILE_CONFIG=<conf> ductile run pipelines/regchain8c.pipeline "<故事>"
+Pipeline("regchain8c", "8B 问询链：下级提问上级裁决", cwd="/tmp/regchain_data")
+
+  .proc("req", llm(req_analyst))
+    .desc("S0 需求草案(8B)：constraints 只收原话直接支撑项，不确定项进 open_questions 向上级提问")
+  .proc("resolve", llm(resolver, prompt="原始用户描述：{topic} ||| 下游需求分析师提出的问题：{@req.open_questions}"))
+    .desc("S0.5 上级裁决(27B)：逐条回答 open_questions，产出全链最终约束 resolved_constraints")
+    .when(@req.must_have)
+    .constraint(resolved_constraints)
+
+  .proc("arch", llm(architect))
+    .desc("S1 架构设计(8B)")
+    .when(@resolve.resolved_constraints)
+  .proc("brk", llm(breaker))
+    .desc("S2 任务拆解(8B)：每张 ticket 带 owner")
+    .when(@arch.modules)
+  .proc("audit", llm(auditor))
+    .desc("S3 审计门(8B)")
+    .when(@brk.tickets)
+    .needs(@req)
+
+  .proc("d_req", write(to="/tmp/regchain_data/g9f_req.txt", content=@req))
+    .desc("落盘 S0 草案（含 open_questions）")
+    .when(@req.must_have)
+  .proc("d_res", write(to="/tmp/regchain_data/g9f_resolve.txt", content=@resolve))
+    .desc("落盘裁决（answers + resolved_constraints）")
+    .when(@resolve.resolved_constraints)
+  .proc("d_arch", write(to="/tmp/regchain_data/g9f_arch.txt", content=@arch))
+    .desc("落盘 S1 产物")
+    .when(@arch.modules)
+  .proc("d_brk", write(to="/tmp/regchain_data/g9f_brk.txt", content=@brk))
+    .desc("落盘 S2 产物")
+    .when(@brk.tickets)
+  .proc("m", write(to="/tmp/regchain_data/g9f_audit.txt", content=@audit))
+    .desc("落盘审计产物")
+    .when(@audit.score)
+
+  .proc("deliver")
+    .deliver(@m)

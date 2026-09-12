@@ -16,6 +16,9 @@ pub enum TypeError {
     CostNegative(String, String),
     EmptyPlan(String),
     UnknownFunction(String, String, String),
+    /// v0.18.4：.when 条件解析失败提前到 check 期（此前 run 才炸——fail-late，
+    /// 外部反馈单#1：check 绿灯 + run 崩溃的"链式名解析漏检"同款病根）。
+    BadWhenCondition(String, String, String, String),
 }
 
 impl std::fmt::Display for TypeError {
@@ -35,6 +38,13 @@ impl std::fmt::Display for TypeError {
                     f,
                     "[{}] impl '{}' unknown function '{}' — fail-closed",
                     proc, impl_name, func
+                )
+            }
+            TypeError::BadWhenCondition(proc, impl_name, cond, msg) => {
+                write!(
+                    f,
+                    "[{}] impl '{}' bad .when({}) — {} — fail-closed at check",
+                    proc, impl_name, cond, msg
                 )
             }
         }
@@ -68,6 +78,19 @@ fn check_proc(proc: &Proc, known: &std::collections::BTreeSet<&str>) -> Vec<Type
                     proc.name.clone(),
                     impl_.name.clone(),
                 ));
+            }
+            // v0.18.4：.when 条件静态校验——parse_when 是纯函数，check 期即可
+            // 全量解析。裸 @proc（缺 .field）、空算子数等此前 run 才暴露
+            // （fail-late），现在 check 期拦截。
+            if let Some(cond) = &impl_.when {
+                if let Err(msg) = crate::when::parse_when(cond) {
+                    errs.push(TypeError::BadWhenCondition(
+                        proc.name.clone(),
+                        impl_.name.clone(),
+                        cond.clone(),
+                        msg,
+                    ));
+                }
             }
             if impl_.enabled && !impl_.stub {
                 let func = detect_func(&impl_.body_text);
@@ -109,6 +132,7 @@ mod tests {
             contract: Default::default(),
             deliver: false,
             needs: vec![],
+            constraint_fields: vec![],
             deliver_refs: vec![],
             foreach: None,
             foreach_var: String::new(),
@@ -202,6 +226,33 @@ mod tests {
             "{:?}",
             errs
         );
+    }
+
+    // ── v0.18.4 .when 静态校验（反馈单#1：fail-late → fail-fast）──
+    #[test]
+    fn bare_when_ref_caught_at_check() {
+        // .when(@arm) 裸引用（缺 .field）——此前 run 期才炸（All paths failed），现在 check 期拦截
+        let mut i = mk_impl("guarded", Cost::default());
+        i.when = Some("@arm".into());
+        let pl = mk_pipeline(vec![mk_proc("probe", vec![i])]);
+        let errs = check_pipeline(&pl);
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, TypeError::BadWhenCondition(..))),
+            "bare @ref must fail check: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn valid_when_condition_passes_check() {
+        let mut i = mk_impl("guarded", Cost::default());
+        i.when = Some("@gate.score >= 0.75".into());
+        let pl = mk_pipeline(vec![mk_proc("p", vec![i])]);
+        let errs = check_pipeline(&pl);
+        assert!(!errs
+            .iter()
+            .any(|e| matches!(e, TypeError::BadWhenCondition(..))));
     }
 
     // ── TypeError display ──

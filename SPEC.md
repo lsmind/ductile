@@ -895,7 +895,9 @@ ductile script detach <name>            注销
 - 契约卡从 scripts 表加载；未注册的脚本名 fail-closed 硬错（错误信息列出全部已注册脚本）
 - `k=v` 值支持 `{topic}`、`@proc.field` 上游引用、契约 `default=X` 兜底
 - **必填参数缺失/为空 → 硬错；契约未声明的幻觉参数 → 硬错**（契约即接口）
-- 传参经环境变量 `DUCTILE_ARG_<NAME>`、`DUCTILE_TOPIC`；脚本侧 `getenv` 取参
+- 传参经环境变量 `DUCTILE_ARG_<NAME>`、`DUCTILE_TOPIC`；脚本侧 `getenv` 取参。
+  env 注入前引擎自动剥掉一层对称包围引号（v0.18.4 参数卫生：`@ref`/`resolve_vars`
+  搬运可能引入序列化引号，此前脚本侧 `int('"16"')` 炸在深处而管线绿灯——现在炸在搬运处或被剥净）
 - 输出复用 `##DSL_RESULT` 协议（见 §7）；无协议块时整体 stdout 作为结果（>5000 字符截断）
 - timeout/retries 走契约头
 

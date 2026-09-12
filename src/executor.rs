@@ -563,7 +563,7 @@ fn l4_finalize(
             format!(
                 "{}: {}",
                 k,
-                v.as_text().chars().take(200).collect::<String>()
+                v.as_text().chars().take(2000).collect::<String>()
             )
         })
         .collect::<Vec<_>>()
@@ -571,14 +571,14 @@ fn l4_finalize(
     let (verdict, evidence) = match fatal {
         Some(msg) => (
             "fail",
-            format!("critical: {}", msg.chars().take(200).collect::<String>()),
+            format!("critical: {}", msg.chars().take(2000).collect::<String>()),
         ),
         None => (
             "pass",
             if deliver_summary.is_empty() {
                 "no deliver proc; all procs completed".to_string()
             } else {
-                deliver_summary.chars().take(200).collect::<String>()
+                deliver_summary.chars().take(2000).collect::<String>()
             },
         ),
     };
@@ -1110,6 +1110,7 @@ mod tests {
                 contract: Default::default(),
                 deliver: false,
                 needs: vec![],
+                constraint_fields: vec![],
                 deliver_refs: vec![],
                 foreach: None,
                 foreach_var: String::new(),
