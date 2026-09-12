@@ -5,7 +5,6 @@
 //! 替代旧版 .gcf 文件系统。
 
 use crate::core::ast::*;
-use crate::harvest::civil_from_days;
 use rusqlite::{params, Connection};
 use std::collections::BTreeSet;
 use std::fs;
@@ -246,26 +245,6 @@ pub fn init_db() {
 }
 
 // ── Timestamp ──
-
-fn now_ts() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-        + 8 * 3600; // CST (UTC+8), matches harvest::fmt_ts convention
-    let days = secs.div_euclid(86400);
-    let (y, m, d) = civil_from_days(days);
-    let rem = secs.rem_euclid(86400);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
-        y,
-        m,
-        d,
-        rem / 3600,
-        (rem % 3600) / 60,
-        rem % 60
-    )
-}
 
 // ── Row types ──
 
@@ -1050,6 +1029,7 @@ pub fn search_fts(query: &str, limit: usize) -> Vec<FtsRow> {
 // ── v0.12 脚本契约库（脚本即 API） ──
 
 use crate::core::script_card::{Concurrency, ScriptCard};
+use crate::L0_physical::time::now_ts;
 
 /// 注册（upsert）脚本契约。契约解析已在 script::parse_contract 完成。
 pub fn script_attach_conn(conn: &Connection, card: &ScriptCard) -> Result<(), String> {

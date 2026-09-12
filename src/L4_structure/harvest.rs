@@ -666,35 +666,11 @@ pub(crate) fn normalize(cmd: &str) -> String {
 }
 
 fn fmt_ts(ts: f64) -> String {
-    if ts <= 0.0 {
+    // L0 时间原语薄委托：负数/NaN → "?"（历史约定），CST 无秒展示格式
+    if !ts.is_finite() {
         return "?".into();
     }
-    let secs = ts as i64 + 8 * 3600; // CST
-    let days = secs.div_euclid(86400);
-    let (y, m, d) = civil_from_days(days);
-    let rem = secs.rem_euclid(86400);
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}",
-        y,
-        m,
-        d,
-        rem / 3600,
-        (rem % 3600) / 60
-    )
-}
-
-/// Howard Hinnant's civil_from_days (days since 1970-01-01 → y/m/d).
-pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
+    crate::L0_physical::time::fmt_ts_cst(ts as i64, " ", false)
 }
 
 // ── v0.12.1 JSON 解析器与命令提取单测（纯函数，零 I/O）──

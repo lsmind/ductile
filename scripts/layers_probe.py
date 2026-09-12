@@ -18,10 +18,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "src")
 ORDER = {"L4_structure": 4, "L3_dsl": 3, "L2_orchestration": 2,
          "L1_feedback": 1, "L0_physical": 0}
-AMNESTY = {
-    ("L0_physical/db", "L4_structure/harvest"):
-        "civil_from_days 纯时间函数待下沉到 L0（记账宽免，勿新增同类）",
-}
+AMNESTY = {}  # 白名单清零（v0.18.5：civil_from_days 已下沉 L0_physical/time.rs）
 
 def probe():
     issues, cross = [], set()
