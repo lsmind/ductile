@@ -35,5 +35,9 @@ jobs:
           pip install maturin pytest langchain-core
           maturin build --release
           pip install target/wheels/*.whl
+      - name: Attach test fixture scripts
+        run: |
+          ductile script attach examples/scripts/word_stats.py
+          ductile script attach examples/scripts/make_report.sh
       - name: Pytest
         run: pytest python/tests -q
