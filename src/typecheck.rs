@@ -19,6 +19,11 @@ pub enum TypeError {
     /// v0.18.4：.when 条件解析失败提前到 check 期（此前 run 才炸——fail-late，
     /// 外部反馈单#1：check 绿灯 + run 崩溃的"链式名解析漏检"同款病根）。
     BadWhenCondition(String, String, String, String),
+    /// v0.18.5：script() body 静态校验提前到 check 期（此前 run 才炸——
+    /// 外部反馈单#5.1：`.args()`/`.env()`/`.timeout()` 链式后缀被并入
+    /// 脚本名（"invalid script name 'x)  .args(k=v'"），两次生产事故同族，
+    /// check 绿灯 + run 崩溃的 fail-late）。
+    BadScriptBody(String, String, String, String),
 }
 
 impl std::fmt::Display for TypeError {
@@ -45,6 +50,13 @@ impl std::fmt::Display for TypeError {
                     f,
                     "[{}] impl '{}' bad .when({}) — {} — fail-closed at check",
                     proc, impl_name, cond, msg
+                )
+            }
+            TypeError::BadScriptBody(proc, impl_name, body, msg) => {
+                write!(
+                    f,
+                    "[{}] impl '{}' bad script body '{}' — {} — fail-closed at check (反馈单#5.1: 链式 .args/.env/.timeout 须内联为 script(name, k=v))",
+                    proc, impl_name, body, msg
                 )
             }
         }
@@ -88,6 +100,21 @@ fn check_proc(proc: &Proc, known: &std::collections::BTreeSet<&str>) -> Vec<Type
                         proc.name.clone(),
                         impl_.name.clone(),
                         cond.clone(),
+                        msg,
+                    ));
+                }
+            }
+            // v0.18.5（反馈单#5.1）：script() body 静态校验——parse_script_body
+            // 是纯函数，check 期即可全量解析。链式 .args()/.env()/.timeout()
+            // 后缀被并入脚本名、非 k=v 参数等此前 run 才暴露（fail-late，
+            // S0BP/S0BQ 两次生产事故同款），现在 check 期拦截。
+            let func = detect_func(&impl_.body_text);
+            if func == "script" {
+                if let Err(msg) = crate::script::parse_script_body(&impl_.body_text) {
+                    errs.push(TypeError::BadScriptBody(
+                        proc.name.clone(),
+                        impl_.name.clone(),
+                        impl_.body_text.trim().to_string(),
                         msg,
                     ));
                 }

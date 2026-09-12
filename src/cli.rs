@@ -6,6 +6,15 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 pub fn run(args: &[String]) -> Result<i32, String> {
+    // 反馈单#5.2：--version / -V — 版本+构建信息（生产排查"我跑的是哪个构建"）
+    if args.len() >= 2 && (args[1] == "--version" || args[1] == "-V") {
+        println!(
+            "ductile {} (build {})",
+            env!("CARGO_PKG_VERSION"),
+            option_env!("DUCTILE_BUILD_HASH").unwrap_or("dev")
+        );
+        return Ok(0);
+    }
     if args.len() < 2 {
         print_usage();
         return Ok(1);
