@@ -33,6 +33,7 @@ jobs:
       - name: Install maturin + package
         run: |
           pip install maturin pytest langchain-core
-          maturin develop --release
+          maturin build --release
+          pip install target/wheels/*.whl
       - name: Pytest
         run: pytest python/tests -q
