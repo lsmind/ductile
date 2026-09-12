@@ -172,7 +172,7 @@ Pipeline("name", "optional description", cwd="...", env=["K=V", ...])
 |------|--------------|------|
 | `web_search` | `web_search(query="...")` | 网页搜索 |
 | `mcp_search` | `mcp_search(query="...", engine=zai)` | MCP 搜索 |
-| `llm` | `llm(prompt=@prev, model="gpt-4o-mini", system="...", schema="title,url")` | OpenAI 兼容 LLM；`prompt`/`input` 同义；`schema` 时 stdout 含 `##DSL_RESULT` |
+| `llm` | `llm(analyst)` 或 `llm(analyst, prompt="{topic}", schema="title,url")` | OpenAI 兼容 LLM。**推荐 agent 形态**：模型档位/system/schema 全在 config `[agents.X]` 统一管理（换模型不改管线），裸参数写法（`model=` 硬编码）只用于一次性小抽取。`prompt`/`input` 同义；不写 `prompt=` 时按节点图位置自动合成八段认知上下文（v0.17，§14.1）；`schema` 时 stdout 含 `##DSL_RESULT` |
 | `write` | `write(to="path", content=@prev)` | 写文件 |
 | `read` | `read(from="path")` | 读文件 |
 | `run` | `run("shell command")` | 执行 shell 命令 |
