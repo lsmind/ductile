@@ -1,85 +1,83 @@
 # Ductile
 
-> 声明式流水线引擎 —— 声明意图，引擎自动处理路由、降级、质量控制和认知上下文。
+> 声明式 LLM 流水线引擎 —— 把质量从玄学变成结构。Rust 单二进制，SQLite 单文件全记录。
 
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
+[![CI](https://github.com/lsmind/ductile/actions/workflows/ci.yml/badge.svg)](https://github.com/lsmind/ductile/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-417%20passed-brightgreen.svg)](#测试)
-[![PyPI](https://img.shields.io/badge/PyPI-0.15.0-blue.svg)](https://pypi.org/project/ductile/)
+[![Tests](https://img.shields.io/badge/Tests-418%20passed-brightgreen.svg)](#测试)
+[![PyPI](https://img.shields.io/badge/PyPI-0.13.1-blue.svg)](https://pypi.org/project/ductile/)
 
 ---
 
-## 为什么是 Ductile
+## 先说一个行业真相
 
-跑过 LLM 流水线的人都撞过同一堵墙：**流程跑通了，质量靠玄学**。约束在第二段被
-消化成散文、第三段模型开始臆造、第四段工整地输出一堆没人认领的任务单——每一步
-都绿灯，整体是废品。
+把 LLM 串成流水线，质量不升反降。我们实测（三轮独立盲评，judge=27B）：
 
-Ductile 的回答是把三类人工判断变成引擎结构：
-
-**1. 不确定性管理 → 数值优化。** 你声明"做什么 + 有哪些备选路径"，引擎选路、
-降级、淘汰废路径。web 挂了滑到 mcp，裁判打分 < 80 deliver 被门住（fail-closed），
-连续失败 3 次永久 BLOCKED。不写 `if/else/try/catch`。
-
-**2. 上下文管理 → 认知合成。** `llm(agent)` 不写 prompt 时，引擎按节点在图中的
-位置自动合成八段认知上下文：身份、主题、上游输入预览、继承约束、下游消费者、
-开放动作、错误记忆、输出契约（v0.17）。LLM 不再"瞎接活"。
-
-**3. 质量进化 → 可证伪循环。** 结构探针（零 LLM 判"有没有错"）+ 盲评批语（判
-"好不好"）+ 提示词医生（判"为什么+怎么改"）组成自动进化环（v0.18.3），处方
-应用后重跑复检，预期不兑现就回滚。
-
-### 实测数据（game 场景，三轮独立盲评，judge=27B）
-
-| 配置 | s2 深拆解盲评 | 说明 |
+| 配置 | 盲评分 | 结论 |
 |---|---|---|
-| 裸 27B | 66.7–79.3（波动大） | 单发无结构 |
-| 五段链（v0.17 前） | 56.7–59.3 | **约束逐跳衰减，比裸模型还差** |
-| + 约束继承（v0.18.1） | 差距 -16.3 → -9.7 | `.constraint` 全链注入 |
-| + owner 槽位（v0.18.2） | **+14.7，反超裸模型** | 约束有落点 |
-| + 问询链（防臆造） | **82.7（+15）** | 下级提问上级裁决 |
+| 裸 27B 单发 | 66.7–79.3 | 有波动但没有结构病 |
+| 五段结构化链 | **56.7–59.3** | **比裸模型差 16 分** |
+| + `.constraint` 链级约束继承 | 差距 -16.3 → -9.7 | 约束不再逐跳蒸发 |
+| + owner 槽位（约束有了落点） | **+14.7，反超裸模型** | 结构第一次赢 |
+| + 问询链（防臆造） | **82.7** | 裸模型永远到不了 |
 
-最有说服力的一条曲线是第一行到第四行：**结构化管线从"比裸模型差 16 分"走到
-"反超 15 分"**——差距不是靠换更大的模型填的，是靠把约束送到位、留好槽位填的。
+**约束逐跳衰减：链上每加一段，约束被稀释一分，上限 = 最弱一段。** 这是结构化管线自身的病，不是模型的错。大多数框架假装这病不存在——Ductile 是第一个把它当引擎结构问题对待、并给出完整实测治疗曲线的。
 
-### 和现有工具的区别
+## 三个别人没有的优势
 
-| 能力 | Ductile | LangGraph / AutoGen | Airflow / Prefect |
-|------|---------|---------------------|--------------------|
-| 声明式流程定义 | ✅ 纯文本 | ⚠️ 代码+图 | ✅ DAG |
-| 多路径自动降级 | ✅ 内核 | ❌ 手写 | ❌ 手写 |
-| e-graph 等价类 + CSE | ✅ | ❌ | ❌ |
-| 认知上下文自动合成 | ✅ v0.17 | ❌ 全手拼 prompt | ❌ |
-| 链级约束继承 | ✅ v0.18 | ❌ | ❌ |
-| 提示词自动进化环 | ✅ v0.18.3 | ❌ | ❌ |
-| 认知层（契约/canary/incident/L4） | ✅ v0.15 | ❌ | ❌ |
-| SQLite 单文件全记录 | ✅ | ❌ | ⚠️ 外部 DB |
-| 零改接入外部脚本 | ✅ 5 行 DSL_RESULT | ❌ Tool 类 | ⚠️ Operator |
+### 1. 质量靠可证伪循环，不靠玄学
 
-路由层只解决"选哪个模型"，编排框架只解决"怎么连起来"。Ductile 把选择 + 降级 +
-上下文 + 约束传递 + 自学习塞进一个引擎。
-
-## 安装
-
-```bash
-pip install ductile          # 或源码：cargo build --release
+```text
+探针（零 LLM，判"有没有错"）→ 盲评（判"好不好"）→ 医生 LLM（判"为什么+怎么改"）
+→ 处方 apply → 重跑 → 探针复检 → 预期不兑现 → 自动回滚
 ```
 
-Windows 依赖 Git Bash，见 [docs/WINDOWS.md](docs/WINDOWS.md)。
+实测：9B 模型输出烂任务单（42.7 分），机器医生读探针报告开出 4 张处方，42.7 → **64.0**（+21.3）。其中一张处方触发"算术反噬"导致输出崩溃——进化环当场捕获并选择性回滚，复检 88 分。**机器处方与人工三轮实锤的处方逐条对齐，还比人工多抓一处。** LLM 的每次建议都自带死刑复核程序。
 
-## 30 秒看懂
+### 2. LLM 是系统里的节点，不是系统的中心
+
+- **LLM 输出一律不进 shell**（引擎物理禁止，不是提示词劝告）
+- est 算术、票数对账、枚举校验永远归机器——LLM 只产票面
+- 每条热补丁带 `origin` 出处（human / llm:model），谁的改动谁负责，可按物种统计存活率
+- "有没有错"永远由确定性机器回答；LLM 只回答"为什么"和"怎么改"
+
+### 3. 接入成本趋近于零
+
+- 任何语言的外部脚本，打印 `##DSL_RESULT` 结构化协议即可被编排——不写 Tool 类，不包 wrapper
+- 多路径降级是内核语义：`web -> ...` 失败自动滑到 `mcp -> ...`，连续失败永久 BLOCKED，不写 if/else/try/catch
+- `.pick(egraph)` 一行开启 e-graph 等价类熔合，等价 proc 只跑一次
+- 引擎按节点在图中的位置自动合成八段认知上下文（身份/上游预览/继承约束/下游消费者/错误记忆/输出契约），prompt 不再手拼
+- LangChain 一行接入：`ductile.langchain_tools()`
+
+## 和现有工具的区别
+
+| 能力 | Ductile | LangGraph / AutoGen | Airflow / Prefect |
+|------|---------|---------------------|-------------------|
+| 链级约束继承（治衰减） | ✅ v0.18 | ❌ | ❌ |
+| owner 槽位 / 问询链（防臆造） | ✅ | ❌ | ❌ |
+| 提示词自动进化环（可证伪） | ✅ | ❌ | ❌ |
+| 多路径自动降级 | ✅ 内核 | ⚠️ 手写 | ❌ 手写 |
+| 认知上下文自动合成 | ✅ | ❌ 手拼 prompt | ❌ |
+| 认知回传（契约/canary/incident/L4 复核） | ✅ v0.15 | ❌ | ❌ |
+| 零改接入外部脚本 | ✅ 5 行协议 | ❌ Tool 类 | ⚠️ Operator |
+| Rust 单二进制 + SQLite 单文件 | ✅ | ❌ | ⚠️ 外部 DB |
+
+路由层只解决"选哪个模型"，编排框架只解决"怎么连起来"。**Ductile 解决"连起来之后质量为什么崩、怎么治"。**
+
+## 30 秒示例
 
 ```
 Pipeline("research")
   .proc("search")
     .plan(
       web -> web_search(query="{topic}").tags(#search, #web).retry(n=3),
-      mcp -> mcp_search(query="{topic}").tags(#search, #mcp)
+      mcp  -> mcp_search(query="{topic}").tags(#search, #mcp)
     )
   .proc("gate")
     .plan(g -> run("judge.sh {topic}").tags(#judge))
   .proc("write_report")
-    .when(@gate.score < 80)
+    .when(@gate.score >= 80)
     .plan(w -> write(to="~/output/report.md", content=@search))
   .proc("deliver")
     .deliver(@write_report)
@@ -89,52 +87,35 @@ Pipeline("research")
 ductile run research.pipeline "RISC-V 架构"
 ```
 
-web 失败自动滑到 mcp；裁判 < 80 deliver 被门住。**你只管声明，引擎自己学。**
+web 失败自动滑到 mcp；裁判 < 80 deliver 被门住（fail-closed）。**你只管声明，引擎管质量。**
 
-## 三个真实场景（全部盲评验证）
+## 安装
 
-**防臆造约束**：用户说"预算有限"，需求节点臆造成"不能外包"，毒害全链。问询链
-（req 提问 → resolver 裁决 → `.constraint` 全链继承）让约束只来自原话：+15 分。
+```bash
+pip install ductile          # 或源码：cargo build --release
+```
 
-**约束要有落点**：任务单 schema 没有 owner 字段，注入再强的约束也写不进去。加一个
-ticket 内嵌 owner 槽位 + 白名单 guide：-9.7 → **+14.7**。
-
-**提示词自动进化**：9B 输出 7 张粗票，机器医生读探针报告开处方（数量锚/owner 枚举/
-priority），42.7 → 64.0（+21.3）；处方里的"自检清单"触发算术反噬导致输出崩溃，
-可证伪环捕获并选择性回滚，复检 88 分。**机器开的处方和人工三轮实锤的处方逐条对齐，
-还比人工多抓了一处。**
-
-## 核心能力索引
-
-- **超网络（`.hyper`）**：不确定时生成运行图再执行 — [SPEC §2.4b](SPEC.md)
-- **e-graph 熔合 + CSE**：`.pick(egraph)` 一行开启等价 proc 只跑一次 — [SPEC §3.0](SPEC.md)
-- **auto-prompt 认知合成**：八段上下文，盲评"英文 system 干中文活"的 10+ 分坑自动填平 — [SPEC §14](SPEC.md)
-- **问询链 / owner 槽位 / 进化环**：LLM 管线四大配方 — [SPEC §14](SPEC.md)
-- **裁判分离**：质量门槛 = 独立 judge + `.when(@judge.score < 80)`，产出者不自证清白 — [SPEC §3.7](SPEC.md)
-- **热补丁**：`ductile patch` 不改源文件禁用/调整任意节点
-- **认知层**：契约卡/canary/incident/L4 复核/shelve — [docs/cognition_spec.md](docs/cognition_spec.md)
-- **Shell 安全门**：`DUCTILE_RESTRICT_SHELL=1` 多租户收紧 — [SPEC §6a.4](SPEC.md)
-- **LangChain 一行接入**：`ductile.langchain_tools()` — [SPEC §11](SPEC.md)
+Windows 依赖 Git Bash，见 [docs/WINDOWS.md](docs/WINDOWS.md)。
 
 ## 给 AI 协作者
 
-Ductile 为 AI 协作设计。把 [SPEC.md](SPEC.md) 喂给你的 AI 助手（完整安装/编写/
-执行/调优/配方），或：
+Ductile 为 AI 协作设计。把 [SPEC.md](SPEC.md) 喂给你的 AI 助手（完整安装/编写/执行/调优/配方，§14 是 LLM 管线四大配方），或直接说：
 
 > 请阅读 https://github.com/lsmind/ductile/blob/main/SPEC.md 后帮我写 pipeline。
 
-写 .pipeline 的铁律（外部实测血泪）：**抄范本，禁止凭记忆**——v0.18.4 起
-`.when` 条件 check 期静态校验兜底。
+写 .pipeline 的铁律：**抄范本，禁止凭记忆**——v0.18.4 起引擎在 check 期静态校验兜底。
 
-## 代码结构
+## 更多
 
-核心在 `src/`（解析、编排、执行、超网络、认知层）；Python 包与 LLM 桥在
-`python/`、`bridge/`。细节以源码为准。
+- [SPEC.md](SPEC.md) —— 完整引擎规格（给 LLM 读，教全用法）
+- [docs/cognition_spec.md](docs/cognition_spec.md) —— 认知回传系统：七层误差信号栈 + 归因五分类
+- 核心在 `src/`（30 个 Rust 模块，2.2 万行）；Python 包与 LLM 桥在 `python/`、`bridge/`
 
 ## 测试
 
 ```bash
-cargo test --lib     # 417 passed / 0 failed
+cargo test --lib     # 418 passed / 0 failed
+./selftest.pipeline  # 九重探针门禁 SELFTEST-PASS
 ```
 
 ## License
