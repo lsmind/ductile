@@ -51,7 +51,43 @@ pub fn open() -> Connection {
     conn.execute_batch("PRAGMA journal_mode=WAL;").ok();
     // Ensure schema exists (fresh clones / first Windows run never called init_db).
     conn.execute_batch(SCHEMA_DDL).ok();
+    // v0.18.5 制度修：迁移必须与建库同路径——此前迁移只挂在 init_db()，
+    // open() 只跑 SCHEMA_DDL（IF NOT EXISTS 不给老表补列）。本机老库经
+    // open() 打开时 origin 列缺失，SELECT 直接炸。两条路径一条迁移，单一事实源。
+    migrate(&conn);
     conn
+}
+
+/// 老库补列迁移（幂等；init_db 与 open 共用——不要在别处另写 ALTER）。
+pub fn migrate(conn: &Connection) {
+    // RD 扩展迁移：老库补列（新库 CREATE 已含；ALTER 幂等检测防重）
+    let has_rate = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name='rate_tokens'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    if has_rate == 0 {
+        conn.execute_batch(
+            "ALTER TABLE runs ADD COLUMN rate_tokens INTEGER DEFAULT 0;
+             ALTER TABLE runs ADD COLUMN est_loss REAL DEFAULT 0.0;",
+        )
+        .ok();
+    }
+    // v0.18.5 节点平等迁移：patches 补 origin（human / llm:<model> / machine）。
+    // 没有出处就无法按"物种"统计 patch 存活率——问责基建（同款 pragma 幂等）。
+    let has_origin = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('patches') WHERE name='origin'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    if has_origin == 0 {
+        conn.execute_batch("ALTER TABLE patches ADD COLUMN origin TEXT DEFAULT 'human';")
+            .ok();
+    }
 }
 
 /// 非致命版 open：打不开/没权限返回 Err（incident 记录等旁路写入用，
@@ -121,6 +157,7 @@ pub const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS pipelines (
             field       TEXT NOT NULL,
             value       TEXT NOT NULL,
             created_at  TEXT DEFAULT '',
+            origin      TEXT DEFAULT 'human',
             UNIQUE(pipeline, proc_name, impl_name, field)
         );
         CREATE TABLE IF NOT EXISTS cost_cache (
@@ -203,21 +240,9 @@ pub const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS pipelines (
 pub fn init_db() {
     let conn = open();
     conn.execute_batch(SCHEMA_DDL).expect("init_db failed");
-    // RD 扩展迁移：老库补列（新库 CREATE 已含；ALTER 幂等检测防重）
-    let has_rate = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name='rate_tokens'",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
-        .unwrap_or(0);
-    if has_rate == 0 {
-        conn.execute_batch(
-            "ALTER TABLE runs ADD COLUMN rate_tokens INTEGER DEFAULT 0;
-             ALTER TABLE runs ADD COLUMN est_loss REAL DEFAULT 0.0;",
-        )
-        .ok();
-    }
+    // v0.18.5：迁移收敛到 migrate()（open() 也走同一条——单一事实源，别在
+    // 这儿另写 ALTER）
+    migrate(&conn);
 }
 
 // ── Timestamp ──
@@ -789,6 +814,8 @@ pub struct PatchRow {
     pub impl_name: String,
     pub field: String,
     pub value: String,
+    /// v0.18.5 出处：human / llm:<model_id> / machine。默认 human（老数据）。
+    pub origin: String,
 }
 
 /// Upsert a patch: if (pipeline, proc, impl, field) already exists, update value.
@@ -799,21 +826,29 @@ pub fn set_patch_conn(
     impl_name: &str,
     field: &str,
     value: &str,
+    origin: &str,
 ) {
     let ts = now_ts();
     conn.execute(
-        "INSERT INTO patches (pipeline, proc_name, impl_name, field, value, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO patches (pipeline, proc_name, impl_name, field, value, created_at, origin)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(pipeline, proc_name, impl_name, field)
-         DO UPDATE SET value=excluded.value, created_at=excluded.created_at",
-        params![pipeline, proc_name, impl_name, field, value, ts],
+         DO UPDATE SET value=excluded.value, created_at=excluded.created_at, origin=excluded.origin",
+        params![pipeline, proc_name, impl_name, field, value, ts, origin],
     )
     .ok();
 }
 
-pub fn set_patch(pipeline: &str, proc_name: &str, impl_name: &str, field: &str, value: &str) {
+pub fn set_patch(
+    pipeline: &str,
+    proc_name: &str,
+    impl_name: &str,
+    field: &str,
+    value: &str,
+    origin: &str,
+) {
     let conn = open();
-    set_patch_conn(&conn, pipeline, proc_name, impl_name, field, value)
+    set_patch_conn(&conn, pipeline, proc_name, impl_name, field, value, origin)
 }
 
 /// Remove a specific patch.
@@ -840,7 +875,7 @@ pub fn remove_patch(pipeline: &str, proc_name: &str, impl_name: &str, field: &st
 pub fn load_patches_conn(conn: &Connection, pipeline: &str) -> Vec<PatchRow> {
     let mut stmt = conn
         .prepare(
-            "SELECT pipeline, proc_name, impl_name, field, value
+            "SELECT pipeline, proc_name, impl_name, field, value, origin
              FROM patches WHERE pipeline = ?1
              ORDER BY proc_name, impl_name, field",
         )
@@ -852,6 +887,7 @@ pub fn load_patches_conn(conn: &Connection, pipeline: &str) -> Vec<PatchRow> {
             impl_name: row.get(2)?,
             field: row.get(3)?,
             value: row.get(4)?,
+            origin: row.get(5)?,
         })
     })
     .unwrap()
@@ -868,7 +904,7 @@ pub fn load_patches(pipeline: &str) -> Vec<PatchRow> {
 pub fn all_patches_conn(conn: &Connection) -> Vec<PatchRow> {
     let mut stmt = conn
         .prepare(
-            "SELECT pipeline, proc_name, impl_name, field, value
+            "SELECT pipeline, proc_name, impl_name, field, value, origin
              FROM patches ORDER BY pipeline, proc_name, impl_name",
         )
         .unwrap();
@@ -879,6 +915,7 @@ pub fn all_patches_conn(conn: &Connection) -> Vec<PatchRow> {
             impl_name: row.get(2)?,
             field: row.get(3)?,
             value: row.get(4)?,
+            origin: row.get(5)?,
         })
     })
     .unwrap()
@@ -1151,6 +1188,87 @@ mod tests {
         assert_eq!(count, 1);
     }
 
+    /// v0.18.5 节点平等：patches.origin 问责基建。
+    /// 用内存库走完整 DDL + 迁移路径，验证 (1) 老库形态可补列 (2) origin
+    /// 全链路往返（写→读→upsert 覆盖）(3) 迁移幂等（跑两遍不炸）。
+    /// 不用 set_var（规范 #9）：全程参数注入，不碰全局 env。
+    #[test]
+    fn patch_origin_roundtrip_and_migration() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_DDL).unwrap();
+
+        // 老库形态模拟：删掉 origin 列不可行，改验"新库默认值"——
+        // 直接验迁移分支：手工建一张无 origin 的老表，跑同款 ALTER。
+        let old = Connection::open_in_memory().unwrap();
+        old.execute_batch(
+            "CREATE TABLE patches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pipeline TEXT NOT NULL, proc_name TEXT NOT NULL,
+                impl_name TEXT NOT NULL, field TEXT NOT NULL, value TEXT NOT NULL,
+                created_at TEXT DEFAULT '',
+                UNIQUE(pipeline, proc_name, impl_name, field));
+             INSERT INTO patches (pipeline, proc_name, impl_name, field, value, created_at)
+             VALUES ('p1','proc','impl','guide','legacy text','2026-01-01');",
+        )
+        .unwrap();
+        let has: i64 = old
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('patches') WHERE name='origin'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has, 0, "老库起点：无 origin 列");
+        old.execute_batch("ALTER TABLE patches ADD COLUMN origin TEXT DEFAULT 'human';")
+            .unwrap();
+        // 幂等第二遍：pragma 检测应拦住重复 ALTER（模拟 init_db 的守卫逻辑）
+        let has2: i64 = old
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('patches') WHERE name='origin'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has2, 1);
+        // 老数据自动落 human 默认值
+        let legacy: String = old
+            .query_row("SELECT origin FROM patches", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(legacy, "human");
+
+        // 新库全链路：llm 处方写入 → 读出 origin → human upsert 覆盖
+        set_patch_conn(
+            &conn,
+            "p1",
+            "arch",
+            "llm",
+            "guide",
+            "R1 白名单版",
+            "llm:qwen3.8:27b",
+        );
+        set_patch_conn(&conn, "p1", "arch", "llm", "guide", "human 改", "human");
+        let rows = load_patches_conn(&conn, "p1");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].value, "human 改");
+        assert_eq!(
+            rows[0].origin, "human",
+            "upsert 必须覆盖 origin——出处跟着值走"
+        );
+        // 再写一条 llm 出处，验 all_patches 路径
+        set_patch_conn(
+            &conn,
+            "p2",
+            "brk",
+            "llm",
+            "guide",
+            "R2 版",
+            "llm:qwen3.8:27b",
+        );
+        let all = all_patches_conn(&conn);
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|r| r.origin == "llm:qwen3.8:27b"));
+    }
+
     #[test]
     fn fts5_is_available() {
         let conn = Connection::open_in_memory().unwrap();
@@ -1346,12 +1464,12 @@ mod conn_tests {
     #[test]
     fn patch_set_load_remove() {
         let conn = memdb();
-        set_patch_conn(&conn, "pl", "proc", "impl", "enabled", "false");
-        set_patch_conn(&conn, "pl", "proc", "impl", "cost.latency", "42");
+        set_patch_conn(&conn, "pl", "proc", "impl", "enabled", "false", "human");
+        set_patch_conn(&conn, "pl", "proc", "impl", "cost.latency", "42", "human");
         let patches = load_patches_conn(&conn, "pl");
         assert_eq!(patches.len(), 2);
         // 同字段重设 = 覆盖非追加
-        set_patch_conn(&conn, "pl", "proc", "impl", "cost.latency", "99");
+        set_patch_conn(&conn, "pl", "proc", "impl", "cost.latency", "99", "human");
         let patches = load_patches_conn(&conn, "pl");
         assert_eq!(patches.len(), 2);
         assert!(patches

@@ -1450,12 +1450,17 @@ fn cmd_patch_set(
     field: &str,
     value: &str,
 ) -> Result<i32, String> {
-    db::set_patch(pipeline, proc_name, impl_name, field, value);
+    // v0.18.5 出处标注：默认 human；进化环（doctor 处方经 rx_apply）等
+    // 程序化写 patch 的路径须显式声明 origin（如 llm:qwen3.8:27b）。
+    // DUCTILE_PATCH_ORIGIN 是给脚本/agent 的注入通道，人手敲命令不受影响。
+    let origin = std::env::var("DUCTILE_PATCH_ORIGIN").unwrap_or_else(|_| "human".into());
+    db::set_patch(pipeline, proc_name, impl_name, field, value, &origin);
     println!(
         "✓ Patched: {}.{}.{} = {}",
         pipeline, proc_name, impl_name, field
     );
     println!("  {} = {}", field, value);
+    println!("  origin: {}", origin);
     println!("\nNext `ductile run` will use this override. Source file not modified.");
     Ok(0)
 }
@@ -1473,6 +1478,7 @@ fn cmd_patch_list() -> Result<i32, String> {
             p.pipeline, p.proc_name, p.impl_name, p.field
         );
         println!("    → {}", p.value);
+        println!("    origin: {}", p.origin);
     }
     Ok(0)
 }

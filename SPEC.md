@@ -364,6 +364,14 @@ ductile patch clear <pipeline>
 
 - 动作：运行时覆盖节点属性，不改源文件
 - 存储在 SQLite patches 表（UPSERT 语义）
+- **v0.18.5 出处标注（节点平等问责基建）**：每条 patch 带 `origin` 列——
+  `human` / `llm:<model_id>` / `machine`。人手敲命令默认 `human`；程序化写
+  patch 的路径（进化环 doctor 处方、agent 工具调用）**必须**经
+  `DUCTILE_PATCH_ORIGIN` 环境变量显式声明出处（如
+  `DUCTILE_PATCH_ORIGIN=llm:qwen3.8:27b ductile patch …`）。upsert 覆盖时
+  origin 跟着新值走。`patch list` 逐条显示 origin。有了出处才能按"物种"
+  统计 patch 存活率（human patch vs llm patch 谁的处方更能过 probe 复检）。
+  老库自动迁移补列，存量行默认 `human`。
 
 **可 patch 字段：**
 
