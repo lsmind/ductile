@@ -28,57 +28,8 @@
 //! - `concurrency` — safe(随便并发) / exclusive(不许与自身并发) / serial(禁并发)
 //! - `effects` — none/fs/net/process/system，声明副作用面（诚实声明是作者责任）
 
+use crate::core::script_card::{Concurrency, ScriptCard};
 use std::collections::BTreeMap;
-
-/// 一张脚本契约卡。LLM 通过 `ductile script show <name>` 读这张卡即可调用，
-/// 无需阅读脚本本体。
-#[derive(Debug, Clone, PartialEq)]
-pub struct ScriptCard {
-    pub name: String,
-    pub path: String,
-    pub lang: String,
-    pub desc: String,
-    /// 原始 params 声明（逗号分隔的 `name(type, required|default=X)`）
-    pub params: String,
-    /// 原始 output 声明（逗号分隔的 `field(type)`）
-    pub output: String,
-    pub pure: bool,
-    pub idempotent: bool,
-    pub concurrency: Concurrency,
-    /// 原始 effects 声明（逗号分隔：none/fs/net/process/system）
-    pub effects: String,
-    pub timeout_secs: u64,
-    pub retries: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Concurrency {
-    Safe,
-    Exclusive,
-    Serial,
-}
-
-impl Concurrency {
-    pub fn parse(s: &str) -> Result<Self, String> {
-        match s.trim() {
-            "safe" => Ok(Concurrency::Safe),
-            "exclusive" => Ok(Concurrency::Exclusive),
-            "serial" => Ok(Concurrency::Serial),
-            other => Err(format!(
-                "unknown concurrency '{}' (known: safe/exclusive/serial)",
-                other
-            )),
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Concurrency::Safe => "safe",
-            Concurrency::Exclusive => "exclusive",
-            Concurrency::Serial => "serial",
-        }
-    }
-}
 
 /// lang → 解释器二进制。注册时校验，未知 lang fail-closed。
 pub fn lang_interpreter(lang: &str) -> Result<&'static str, String> {

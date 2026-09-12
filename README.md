@@ -109,7 +109,7 @@ Ductile 为 AI 协作设计。把 [SPEC.md](SPEC.md) 喂给你的 AI 助手（�
 
 - [SPEC.md](SPEC.md) —— 完整引擎规格（给 LLM 读，教全用法）
 - [docs/cognition_spec.md](docs/cognition_spec.md) —— 认知回传系统：七层误差信号栈 + 归因五分类
-- 核心在 `src/`（30 个 Rust 模块，2.2 万行）；Python 包与 LLM 桥在 `python/`、`bridge/`
+- 核心在 `src/`（30 个 Rust 模块按七层认知栈物理分层，见 `docs/LAYERS.md`，层边界由 selftest 探针守护）；Python 包与 LLM 桥在 `python/`、`bridge/`；一次性实验脚本归档在 `experiments/`
 
 ## 测试
 

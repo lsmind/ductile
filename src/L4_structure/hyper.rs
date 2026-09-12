@@ -2,7 +2,7 @@
 //! Kinds: `chain` | `gate` (explicit ports) | `bundle` | `xor`. Runtime runs pipelines only.
 //! Legacy `.stage` desugars to vertices + hedges.
 
-use crate::ast::Pipeline;
+use crate::core::ast::Pipeline;
 use crate::parser::{parse_pipeline, parse_pipeline_file, ParseError};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -1591,7 +1591,7 @@ pub fn struct_sig_from_hyper(spec: &HyperSpec) -> StructSig {
 
 /// Infer a structural sig from an executable pipeline (for reuse against .hyper).
 pub fn struct_sig_from_pipeline(pl: &Pipeline) -> StructSig {
-    let procs: Vec<&crate::ast::Proc> = pl
+    let procs: Vec<&crate::core::ast::Proc> = pl
         .procs
         .iter()
         .filter(|p| !p.deliver && p.name != "deliver")
@@ -1608,7 +1608,7 @@ pub fn struct_sig_from_pipeline(pl: &Pipeline) -> StructSig {
     let mut tags_v = Vec::new();
 
     for (i, proc) in procs.iter().enumerate() {
-        let tags = crate::ast::proc_tags(proc);
+        let tags = crate::core::ast::proc_tags(proc);
         let role = infer_role(proc, &tags);
         roles.push(role.as_str());
         tags_v.push(tags);
@@ -1661,7 +1661,7 @@ pub fn struct_sig_from_pipeline(pl: &Pipeline) -> StructSig {
     }
 }
 
-fn infer_role(proc: &crate::ast::Proc, tags: &BTreeSet<String>) -> HyperRole {
+fn infer_role(proc: &crate::core::ast::Proc, tags: &BTreeSet<String>) -> HyperRole {
     let has = |k: &str| tags.iter().any(|t| t == k);
     if has("judge") || has("gate") {
         return HyperRole::Judge;
@@ -1968,8 +1968,8 @@ pub fn node_sig_from_stage(stage: &HyperStage) -> NodeSig {
     }
 }
 
-pub fn node_sig_from_proc(proc: &crate::ast::Proc) -> NodeSig {
-    let tags = crate::ast::proc_tags(proc);
+pub fn node_sig_from_proc(proc: &crate::core::ast::Proc) -> NodeSig {
+    let tags = crate::core::ast::proc_tags(proc);
     let enabled: Vec<_> = proc.plan.iter().filter(|i| i.enabled).collect();
     let op = enabled
         .first()
@@ -2071,7 +2071,7 @@ fn op_from_tags_role(tags: &BTreeSet<String>, role: &HyperRole) -> String {
     }
 }
 
-fn body_preview_proc(proc: &crate::ast::Proc) -> String {
+fn body_preview_proc(proc: &crate::core::ast::Proc) -> String {
     proc.plan
         .iter()
         .find(|i| i.enabled)

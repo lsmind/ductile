@@ -5,8 +5,8 @@
 //! （exists/stat/ls/rm/cp/mkdir/disk）、桥接脚本调用（search/llm）、
 //! 读写与 shell 执行（read/write/run/sh）。
 
-use crate::ast::*;
-use crate::dslresult::{encode_structured_result, parse_dsl_result_block};
+use crate::core::ast::*;
+use crate::core::dslresult::{encode_structured_result, parse_dsl_result_block};
 use crate::textargs::{
     expand_fs_path, extract_all_string_args, extract_first_bare_arg, extract_first_string,
     extract_string_arg, resolve_vars, strip_wrapping_quotes,
@@ -206,7 +206,7 @@ pub struct NodeCtx;
 impl NodeCtx {
     /// exec_proc 入口调用；guard Drop 清理。所有字符串预提取（inner 不借引用，
     /// 生命周期与 guard 绑定，无悬垂）。
-    pub fn set(pl: &crate::ast::Pipeline, proc: &crate::ast::Proc) -> NodeCtxGuard {
+    pub fn set(pl: &crate::core::ast::Pipeline, proc: &crate::core::ast::Proc) -> NodeCtxGuard {
         let refs_set: std::collections::BTreeSet<String> = proc
             .plan
             .iter()
@@ -383,7 +383,7 @@ impl NodeCtx {
                     if let Some(val) = results.get(producer) {
                         for f in fields {
                             if let Some(v) =
-                                crate::dslresult::extract_field(f, &val.as_text())
+                                crate::core::dslresult::extract_field(f, &val.as_text())
                             {
                                 let v_trunc = v.chars().take(2000).collect::<String>();
                                 cons.push(format!(
@@ -443,7 +443,7 @@ impl NodeCtx {
 }
 
 /// 上游 p 是否被本 proc 的任一 .when 引用（@p 或 @p.field 形态）。
-fn when_refs(p: &crate::ast::Proc, plan: &[crate::ast::Impl]) -> bool {
+fn when_refs(p: &crate::core::ast::Proc, plan: &[crate::core::ast::Impl]) -> bool {
     plan.iter().any(|i| {
         i.when
             .as_ref()
@@ -581,7 +581,7 @@ impl PipelineCtx {
     /// exec_pipeline 入口调用；返回 guard，Drop 时清理。
     /// cwd 规范化（bash -c cd + pwd）：$VAR / $(...) / ~ 展开 + 相对路径判定。
     /// 失败 fail-closed：cwd 坏 = 整流必错，panic 于 exec_pipeline 转硬错误。
-    pub fn set(pl: &crate::ast::Pipeline) -> Option<PipelineCtxGuard> {
+    pub fn set(pl: &crate::core::ast::Pipeline) -> Option<PipelineCtxGuard> {
         if pl.cwd.is_none() && pl.env.is_empty() {
             return None;
         }
@@ -2313,7 +2313,7 @@ mod tests {
         let t = r.as_text();
         assert!(t.starts_with("§§FIELDS§§"), "{}", &t[..40.min(t.len())]);
         assert_eq!(
-            crate::dslresult::extract_field("score", &t),
+            crate::core::dslresult::extract_field("score", &t),
             Some("85".into())
         );
     }
@@ -2505,13 +2505,13 @@ mod tests {
 
     // ── v0.17 auto-prompt ──
 
-    fn mk_proc(name: &str, desc: &str) -> crate::ast::Proc {
-        crate::ast::Proc {
+    fn mk_proc(name: &str, desc: &str) -> crate::core::ast::Proc {
+        crate::core::ast::Proc {
             name: name.into(),
             description: desc.into(),
             plan: Vec::new(),
             checks: Vec::new(),
-            contract: crate::ast::Contract::default(),
+            contract: crate::core::ast::Contract::default(),
             deliver: false,
             needs: vec![],
             constraint_fields: vec![],
@@ -2539,7 +2539,7 @@ mod tests {
     }
 
     fn auto_prompt_synthesizes_identity_topic_upstream() {
-        let mut pl = crate::ast::Pipeline::default();
+        let mut pl = crate::core::ast::Pipeline::default();
         pl.name = "proj_chain".into();
         pl.description = "项目开发全链".into();
         let mut up = mk_proc("req", "S0 需求提炼");
@@ -2592,7 +2592,7 @@ mod tests {
     #[test]
     fn auto_prompt_needs_identity() {
         // 无 desc 无 system → None（不合成空洞 prompt）
-        let mut pl = crate::ast::Pipeline::default();
+        let mut pl = crate::core::ast::Pipeline::default();
         pl.procs.push(mk_proc("x", ""));
         let _g = NodeCtx::set(&pl, &pl.procs[0]);
         assert!(NodeCtx::synthesize_auto_prompt("t", &BTreeMap::new(), "", "", "").is_none());
@@ -2601,7 +2601,7 @@ mod tests {
     #[test]
     fn auto_prompt_injects_chain_constraint_values() {
         // v0.18.1：上游 .constraint(fields) 声明的字段，实时值注入「继承的约束」段
-        let mut pl = crate::ast::Pipeline::default();
+        let mut pl = crate::core::ast::Pipeline::default();
         pl.name = "regchain".into();
         let mut up = mk_proc("req", "S0 需求提炼");
         up.constraint_fields = vec!["constraints".into()];

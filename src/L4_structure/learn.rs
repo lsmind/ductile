@@ -3,7 +3,7 @@
 //! 不依赖执行记录。直接从 tag 序列结构发现重复模式。
 //! 输出：重复 tag 序列 + 压缩率。
 
-use crate::ast::*;
+use crate::core::ast::*;
 use crate::parser::parse_pipeline_file;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn extract_tag_seqs_basic() {
-        use crate::ast::Cost;
+        use crate::core::ast::Cost;
         let pl = Pipeline {
             name: "test".into(),
             description: String::new(),

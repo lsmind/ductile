@@ -946,25 +946,33 @@ ductile script detach <name>            注销
 
 ### 10.1 模块地图
 
+v0.18.5 起源码按七层认知栈物理分层（`docs/LAYERS.md` 是带依赖铁律的完整地图，
+`scripts/layers_probe.py` 是 selftest 门禁）。速览：
+
 ```
 src/
-├── parser.rs     # DSL 解析（.pipeline 主体 + .eval 策略文件）
-├── ast.rs        # 类型（Impl/Proc/Pipeline/Policy/CostSpec/CostValue）
-├── typecheck.rs  # 类型检查
-├── executor.rs   # 编排主干（exec_pipeline/exec_proc/foreach/retry/patches）— 697 行
-├── steps.rs      # step_registry 注册表（清单即表）+ 21 个内置执行器
-│                 #   进程：spawn/procs/kill/wait（PROC_TABLE + process_group(0) 自立进程组）
-│                 #   文件：exists/stat/ls/rm/cp/mkdir/disk（rm 拒绝 / 与 $HOME）
-│                 #   读写：read/write/run/sh + search/llm/merge + script(name,...)
-├── textargs.rs   # 纯文本解析原语：detect_func/resolve_vars(@proc.field)/extract_*
-├── dslresult.rs  # ##DSL_RESULT 协议：parse_dsl_result_block/encode/extract_field/est_loss
-├── ranking.rs    # 偏好学习（ImplPrefs 乘性权重 ×1.1/÷1.5 clamp[0.05,20]）+ 排序 + 失败惩罚
-├── eval.rs       # 裁判分离运行时：Evaluator/CostSource(measure 实测)/CostCacheStore
-├── egraph.rs     # e-graph 等价类 + CSE + when-载体熔合守卫
-├── db.rs         # SQLite 层：22 个 *_conn(conn) 注入内核 + 全局薄壳；SCHEMA_DDL 单一事实源
-├── script.rs     # v0.12 脚本契约：契约头解析/lang 解释器/cse_safe 判定
-└── cli.rs        # 命令分发 + 纯参数解析（split_run_args/parse_promote_args）
+├── interface/        # 横切入口：cli（命令分发）、api（pyo3，32 pub fn）
+├── core/             # 层间共享词汇：ast（类型）、dslresult（协议）、script_card（契约卡）
+├── L4_structure/     # 结构经验：hyper/learn/grow/promote/harvest
+├── L3_dsl/           # 形式层：parser/typecheck/when/config/version
+├── L2_orchestration/ # 执行层：executor/steps/egraph/eval/script/registry/textargs/ranking
+├── L1_feedback/      # 回传层：errflow/canary/incident/l4/shelve
+└── L0_physical/      # 物理层：db（SQLite，18 表）+ canary/l4/shelve 三张 schema.sql
 ```
+
+模块职责速记（完整版见 docs/LAYERS.md）：
+
+- `executor`（L2）：编排主干（exec_pipeline/exec_proc/foreach/retry/patches）
+- `steps`（L2）：step_registry 注册表 + 21 个内置执行器
+  （进程：spawn/procs/kill/wait；文件：exists/stat/ls/rm/cp/mkdir/disk；
+  读写：read/write/run/sh + search/llm/merge + script(name,...)）
+- `textargs`（L2）：纯文本解析原语：detect_func/resolve_vars(@proc.field)/extract_*
+- `ranking`（L2）：偏好学习（ImplPrefs 乘性权重 ×1.1/÷1.5 clamp[0.05,20]）+ 排序
+- `eval`（L2）：裁判分离运行时：Evaluator/CostSource(measure 实测)/CostCacheStore
+- `egraph`（L2）：e-graph 等价类 + CSE + when-载体熔合守卫
+- `script`（L2）：v0.12 脚本契约：契约头解析/lang 解释器/cse_safe 判定
+- `db`（L0）：SQLite 层：22 个 *_conn(conn) 注入内核 + 全局薄壳；SCHEMA_DDL 单一事实源
+- `cli`（interface）：命令分发 + 纯参数解析（split_run_args/parse_promote_args）
 
 兼容性：executor 对拆出符号保留 re-export（`executor::detect_func` 等旧路径不变）。
 

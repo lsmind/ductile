@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::dslresult;
+use crate::core::dslresult;
 
 /// 错误码（十二类，v0.14c 扩充）。`code()` 返回静态串供编码。
 /// 划界原则：同一类的错误共享同一处置策略（strategy）与下游响应（respond）。
@@ -406,9 +406,9 @@ impl ErrorRecord {
 }
 
 /// 值是否为错误值（Left）。true = 上游失败。
-pub fn is_error_value(val: &crate::ast::Value) -> bool {
+pub fn is_error_value(val: &crate::core::ast::Value) -> bool {
     match val {
-        crate::ast::Value::Text(t) => dslresult::extract_field("err", t)
+        crate::core::ast::Value::Text(t) => dslresult::extract_field("err", t)
             .map(|v| v == "1")
             .unwrap_or(false),
         _ => false,
@@ -539,7 +539,10 @@ pub fn respond(code: ErrCode) -> Response {
 }
 
 /// refs 中已死亡（Left）的上游列表。
-pub fn dead_refs(results: &BTreeMap<String, crate::ast::Value>, refs: &[String]) -> Vec<String> {
+pub fn dead_refs(
+    results: &BTreeMap<String, crate::core::ast::Value>,
+    refs: &[String],
+) -> Vec<String> {
     refs.iter()
         .filter(|r| results.get(*r).map(is_error_value).unwrap_or(false))
         .cloned()
@@ -557,10 +560,10 @@ pub fn code_of(encoded: &str) -> ErrCode {
 /// 定义：deliver proc 的引用闭包——`.deliver(@report)` → report → 其 impl refs
 /// 逐层 BFS 回溯，凡是主产出链上的 proc 都是关键节点；不在链上的 = 旁路
 /// （日志/通知/监控类）。无 deliver proc 的管线 = 全部关键（保守默认，v0.9 兼容）。
-pub fn critical_set(pl: &crate::ast::Pipeline) -> std::collections::BTreeSet<String> {
+pub fn critical_set(pl: &crate::core::ast::Pipeline) -> std::collections::BTreeSet<String> {
     use std::collections::{BTreeSet, VecDeque};
     let mut critical: BTreeSet<String> = BTreeSet::new();
-    let deliverers: Vec<&crate::ast::Proc> = pl.procs.iter().filter(|p| p.deliver).collect();
+    let deliverers: Vec<&crate::core::ast::Proc> = pl.procs.iter().filter(|p| p.deliver).collect();
     if deliverers.is_empty() {
         for p in &pl.procs {
             critical.insert(p.name.clone());
@@ -595,8 +598,8 @@ pub fn critical_set(pl: &crate::ast::Pipeline) -> std::collections::BTreeSet<Str
 /// 终局裁决：关键 proc 上存在 Left → 致命（返回该 proc 名）。
 /// 旁路 Left 不致命——主产出不受旁路失败牵连（调整行为：容忍+标记）。
 pub fn fatal_left(
-    pl: &crate::ast::Pipeline,
-    partial: &BTreeMap<String, crate::ast::Value>,
+    pl: &crate::core::ast::Pipeline,
+    partial: &BTreeMap<String, crate::core::ast::Value>,
 ) -> Option<String> {
     let critical = critical_set(pl);
     partial
@@ -620,7 +623,7 @@ pub fn strategy_for(code: ErrCode, critical: bool) -> Action {
 /// 隐式传播（v0.14，无 DSL 面）：下游执行前检查上游引用，任一 Left → 本 proc
 /// 落 Left（err_code 继承上游根因，err_msg 标记传播来源）。返回 true = 应短路。
 pub fn upstream_left(
-    results: &BTreeMap<String, crate::ast::Value>,
+    results: &BTreeMap<String, crate::core::ast::Value>,
     refs: &[String],
 ) -> Option<String> {
     for r in refs {
@@ -856,7 +859,7 @@ mod tests {
     #[test]
     fn is_error_value_detects_left() {
         let r = ErrorRecord::new("p", "i", "boom", 1);
-        let v = crate::ast::Value::Text(r.encode());
+        let v = crate::core::ast::Value::Text(r.encode());
         assert!(is_error_value(&v));
     }
 
@@ -865,8 +868,8 @@ mod tests {
         // 正常脚本输出（无 err 字段）
         let normal =
             dslresult::encode_structured_result(&[("score".to_string(), "85".to_string())], "raw");
-        assert!(!is_error_value(&crate::ast::Value::Text(normal)));
-        assert!(!is_error_value(&crate::ast::Value::Text(
+        assert!(!is_error_value(&crate::core::ast::Value::Text(normal)));
+        assert!(!is_error_value(&crate::core::ast::Value::Text(
             "plain text".into()
         )));
     }
@@ -877,8 +880,11 @@ mod tests {
     fn upstream_left_detects_dead_dep() {
         let err = ErrorRecord::new("render", "ffmpeg", "boom timeout", 1).encode();
         let mut results = BTreeMap::new();
-        results.insert("render".to_string(), crate::ast::Value::Text(err));
-        results.insert("search".to_string(), crate::ast::Value::Text("ok".into()));
+        results.insert("render".to_string(), crate::core::ast::Value::Text(err));
+        results.insert(
+            "search".to_string(),
+            crate::core::ast::Value::Text("ok".into()),
+        );
         assert_eq!(
             upstream_left(&results, &["search".to_string(), "render".to_string()]),
             Some("render".to_string())
@@ -1111,13 +1117,16 @@ mod tests {
         let err =
             ErrorRecord::new("render", "ffmpeg", "Permission denied (os error 13)", 1).encode();
         let mut results = BTreeMap::new();
-        results.insert("render".to_string(), crate::ast::Value::Text(err));
-        results.insert("search".to_string(), crate::ast::Value::Text("ok".into()));
+        results.insert("render".to_string(), crate::core::ast::Value::Text(err));
+        results.insert(
+            "search".to_string(),
+            crate::core::ast::Value::Text("ok".into()),
+        );
         let dead = dead_refs(&results, &["search".to_string(), "render".to_string()]);
         assert_eq!(dead, vec!["render".to_string()]);
         assert_eq!(
             code_of(&match results["render"] {
-                crate::ast::Value::Text(ref t) => t.clone(),
+                crate::core::ast::Value::Text(ref t) => t.clone(),
                 _ => String::new(),
             }),
             ErrCode::Permission
@@ -1166,7 +1175,7 @@ mod tests {
 
     // ── 关键节点判定（v0.14b） ──
 
-    fn mini_pipeline() -> crate::ast::Pipeline {
+    fn mini_pipeline() -> crate::core::ast::Pipeline {
         // gen → report → deliver 主链；notify 旁路
         crate::parser::parse_pipeline(
             "Pipeline(\"x\")\n  .proc(\"gen\")\n    .plan(a -> run(\"echo @seed\"))\n  .proc(\"report\")\n    .plan(r -> run(\"echo @gen\"))\n  .proc(\"notify\")\n    .plan(n -> run(\"echo side\"))\n  .proc(\"deliver\")\n    .deliver(@report)\n",
@@ -1190,12 +1199,15 @@ mod tests {
         let mut partial = BTreeMap::new();
         // 旁路死 → 不致命
         let side = ErrorRecord::new("notify", "n", "Connection refused", 1).encode();
-        partial.insert("notify".to_string(), crate::ast::Value::Text(side));
-        partial.insert("gen".to_string(), crate::ast::Value::Text("ok".into()));
+        partial.insert("notify".to_string(), crate::core::ast::Value::Text(side));
+        partial.insert(
+            "gen".to_string(),
+            crate::core::ast::Value::Text("ok".into()),
+        );
         assert_eq!(fatal_left(&pl, &partial), None);
         // 主链死 → 致命
         let main = ErrorRecord::new("gen", "a", "Connection refused", 1).encode();
-        partial.insert("gen".to_string(), crate::ast::Value::Text(main));
+        partial.insert("gen".to_string(), crate::core::ast::Value::Text(main));
         assert_eq!(fatal_left(&pl, &partial), Some("gen".to_string()));
     }
 

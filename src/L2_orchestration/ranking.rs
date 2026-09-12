@@ -4,7 +4,7 @@
 //! clamp 上下界）、滑动窗口失败惩罚（连败 3 次 → ∞）、静态/成本排序、
 //! 近期运行统计（load_recent_runs）。排序公式：effective = base×(1+penalty)/w。
 
-use crate::ast::*;
+use crate::core::ast::*;
 use crate::db;
 use std::collections::BTreeMap;
 

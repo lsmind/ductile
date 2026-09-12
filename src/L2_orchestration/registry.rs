@@ -4,7 +4,7 @@
 //! 结构性复用请用 `ductile hyper similar`（role + 边 + gate；tags 仅排序）。
 //! parse/run/discover 时仍可能提示 tag 重合，仅作检索线索。
 
-use crate::ast::*;
+use crate::core::ast::*;
 use crate::db;
 use std::collections::BTreeSet;
 
@@ -122,7 +122,7 @@ pub fn load_all_entries() -> Vec<ProcEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::Cost;
+    use crate::core::ast::Cost;
 
     #[allow(dead_code)]
     fn mk_pipeline(name: &str) -> Pipeline {

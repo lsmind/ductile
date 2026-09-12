@@ -8,7 +8,7 @@ Pipeline("prompt_evolve", "提示词自动进化环：probe→批语→诊断→
 
   .proc("arm", run("echo {topic}"))
     .desc("目标臂名（产物前缀）")
-  .proc("probe", run("python3 /home/beef/projects/ductile/scripts/probe_invariants.py /tmp/regchain_data/{topic}_brk.txt"))
+  .proc("probe", run("python3 /home/beef/projects/ductile/experiments/probe_invariants.py /tmp/regchain_data/{topic}_brk.txt"))
     .desc("① 机器探针：结构不变量检查（零 LLM）")
   .proc("guide_cur", run("grep -A6 'agents.breaker' /tmp/regchain_data/regconf9c.toml"))
     .desc("取当前 breaker guide 原文")

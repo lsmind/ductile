@@ -20,7 +20,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::ast::Value;
+use crate::core::ast::Value;
 
 /// 比较算子（文法 OP）。
 #[derive(Debug, Clone, PartialEq)]

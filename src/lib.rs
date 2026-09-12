@@ -3,38 +3,24 @@
 //! Core library: parse, typecheck, execute .pipeline files.
 //! Python bindings via pyo3.
 
-pub mod api;
-pub mod ast;
-pub mod config;
-pub mod db;
-pub mod dslresult;
-pub mod egraph;
-pub mod errflow;
-pub mod eval;
-pub mod executor;
-pub mod grow;
-pub mod harvest;
-pub mod hyper;
-pub mod learn;
-pub mod parser;
-pub mod promote;
-pub mod ranking;
-pub mod registry;
-pub mod script;
-pub mod steps;
-pub mod textargs;
-pub mod typecheck;
-pub mod version;
-pub mod when;
+pub mod L0_physical;
+pub mod L1_feedback;
+pub mod L2_orchestration;
+pub mod L3_dsl;
+pub mod L4_structure;
+pub mod core;
+pub mod interface;
 
-pub mod canary;
-pub mod incident;
-pub mod l4;
-pub mod shelve;
+pub use L0_physical::db;
+pub use L1_feedback::*;
+pub use L2_orchestration::*;
+pub use L3_dsl::*;
+pub use L4_structure::*;
+// interface 的符号默认不进根命名空间（cli::run 会与本文件 pyo3 fn run 撇清
+// 歧义）；外部用 ductile::interface::cli 路径访问。
+pub use interface::api;
 
-pub mod cli;
-
-pub use ast::*;
+pub use core::ast::*;
 pub use egraph::{
     build_egraph, critical_path, extract_plan, parallel_groups, EClass, EGraph, ENode,
     ExtractedPlan, UnionFind,
@@ -239,7 +225,7 @@ fn graph(path: &str) -> PyResult<String> {
 fn cli_main(py: Python) -> PyResult<i32> {
     let sys = py.import("sys")?;
     let args: Vec<String> = sys.getattr("argv")?.extract()?;
-    crate::cli::run(&args).map_err(PyRuntimeError::new_err)
+    crate::interface::cli::run(&args).map_err(PyRuntimeError::new_err)
 }
 
 #[pymodule]

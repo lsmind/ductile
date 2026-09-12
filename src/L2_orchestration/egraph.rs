@@ -17,7 +17,7 @@
 //! 兼容层：build_egraph / parallel_groups / critical_path 保留原签名，
 //! 内部改为在 e-class 压缩图上计算，executor/cli 不感知重构。
 
-use crate::ast::*;
+use crate::core::ast::*;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 // ── Union-find over e-class ids ──

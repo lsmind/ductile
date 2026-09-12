@@ -9,7 +9,7 @@
 //!   而是 [`NullEval`]（无操作）与 [`PolicyEval`]（真实挂载）的多态统一。
 //! - **Factory**：[`cost_source()`] / [`evaluator()`] —— 由数据构造策略对象。
 
-use crate::ast::{CostValue, Pipeline, Policy};
+use crate::core::ast::{CostValue, Pipeline, Policy};
 use std::collections::BTreeMap;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -396,7 +396,7 @@ mod tests {
     fn null_eval_is_noop() {
         // NullEval.apply 不改管线——由 policy_probe 真跑覆盖集成路径，
         // 这里钉死工厂行为：None → NullEval（类型层面不可直接比较，验证 apply 不 panic 且权重不动）
-        let mut pl = crate::ast::Pipeline::default();
+        let mut pl = crate::core::ast::Pipeline::default();
         let before = pl.weights.clone();
         NullEval.apply(&mut pl, "t");
         assert_eq!(pl.weights.latency, before.latency);

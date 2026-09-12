@@ -6,7 +6,7 @@
 //!   - EmptyPlan: non-deliver proc has empty plan
 //!   - UnknownFunction: enabled impl body calls a non-registered function (fail-closed)
 
-use crate::ast::*;
+use crate::core::ast::*;
 use crate::steps::{is_probe_stub, known_functions};
 use crate::textargs::detect_func;
 

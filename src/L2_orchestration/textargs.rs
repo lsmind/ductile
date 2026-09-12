@@ -5,8 +5,8 @@
 //! （extract_string_arg / extract_first_string / extract_all_string_args）。
 //! 全部为纯函数，无 I/O、无全局状态——单元测试的理想单元。
 
-use crate::ast::Value;
-use crate::dslresult::extract_field;
+use crate::core::ast::Value;
+use crate::core::dslresult::extract_field;
 use std::collections::BTreeMap;
 
 // ── Function detection ──
@@ -476,8 +476,10 @@ mod tests {
 
     #[test]
     fn resolve_proc_field_from_structured() {
-        let encoded =
-            crate::dslresult::encode_structured_result(&[("score".into(), "85".into())], "raw");
+        let encoded = crate::core::dslresult::encode_structured_result(
+            &[("score".into(), "85".into())],
+            "raw",
+        );
         let mut results = BTreeMap::new();
         results.insert("gate".into(), Value::Text(encoded));
         assert_eq!(resolve_vars("@gate.score", "t", &results), "85");
@@ -485,7 +487,8 @@ mod tests {
 
     #[test]
     fn resolve_proc_field_missing_keeps_marker() {
-        let encoded = crate::dslresult::encode_structured_result(&[("x".into(), "1".into())], "r");
+        let encoded =
+            crate::core::dslresult::encode_structured_result(&[("x".into(), "1".into())], "r");
         let mut results = BTreeMap::new();
         results.insert("gate".into(), Value::Text(encoded));
         let out = resolve_vars("@gate.score", "t", &results);

@@ -3,7 +3,7 @@
 //! v0.4: No level/scope in header or proc. Tags (#tag) only on leaf impls.
 //! Pipeline header: Pipeline("name") — no effects, no min_level.
 
-use crate::ast::*;
+use crate::core::ast::*;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
@@ -288,7 +288,7 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
     let mut pick_by = "cost + history".to_string();
     let mut description = String::new();
     let mut proc_when: Option<String> = None;
-    let mut contract: Option<crate::ast::Contract> = None;
+    let mut contract: Option<crate::core::ast::Contract> = None;
 
     // Parse proc body: .plan(...) .pick .check(...) .foreach(...) .deliver(...) .desc(...)
     while idx < lines.len() {
@@ -512,7 +512,7 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
                     }
                 }
             }
-            contract = Some(crate::ast::Contract {
+            contract = Some(crate::core::ast::Contract {
                 outputs,
                 invariants,
             });
@@ -2067,9 +2067,9 @@ mod prim_tests {
     #[test]
     fn contract_check_l1_missing_field_and_l2_invariant() {
         // executor::check_contract 纯函数级：L1 缺字段 / L2 谓词违例 / 全通过
-        use crate::ast::Contract;
+        use crate::core::ast::Contract;
         use crate::executor::check_contract;
-        let mk = |outputs: Vec<&str>, invariants: Vec<&str>| crate::ast::Proc {
+        let mk = |outputs: Vec<&str>, invariants: Vec<&str>| crate::core::ast::Proc {
             name: "p".into(),
             description: String::new(),
             plan: vec![],

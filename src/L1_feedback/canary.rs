@@ -29,7 +29,7 @@ pub fn normalize_expect(expect: &str) -> String {
 /// canary 校验：把 run 出的结果文本按 expect 谓词求值。
 /// 复用 when.rs 求值器；结果构造为 BTreeMap 单元素（与 check_contract 同法）。
 pub fn eval_expect(expect: &str, result_text: &str) -> bool {
-    use crate::ast::Value;
+    use crate::core::ast::Value;
     let mut results = std::collections::BTreeMap::new();
     results.insert("self".to_string(), Value::Text(result_text.to_string()));
     crate::when::eval_cond_str(expect, &std::collections::BTreeMap::new(), &results)

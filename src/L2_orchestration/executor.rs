@@ -4,7 +4,7 @@
 //! retry with exponential backoff, variable resolution, shell command execution,
 //! ##DSL_RESULT protocol, record (GCF) logging.
 
-use crate::ast::*;
+use crate::core::ast::*;
 use crate::db;
 use crate::egraph;
 use crate::errflow;
@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 use std::time::Instant;
 
-pub use crate::dslresult::{
+pub use crate::core::dslresult::{
     encode_structured_result, est_loss_field_coverage, extract_field, parse_dsl_result_block,
 };
 pub use crate::textargs::{
@@ -233,7 +233,7 @@ pub fn exec_pipeline(
             let root_msg = results
                 .get(&fatal_proc)
                 .and_then(|v| match v {
-                    Value::Text(t) => crate::dslresult::extract_field("err_msg", t),
+                    Value::Text(t) => crate::core::dslresult::extract_field("err_msg", t),
                     _ => None,
                 })
                 .unwrap_or_else(|| "unknown error".to_string());
@@ -306,7 +306,7 @@ pub fn exec_pipeline(
                             // Ignore/Wait/Switch 对引用者的共同语义 = 方法切换：
                             // 只封锁真正引用死源的 impl，未引用的备选照跑（切换方法）。
                             // Wait 的"等待"由分层顺序天然提供（上游已吃满 Retry 预算）。
-                            let surviving: Vec<crate::ast::Impl> = proc
+                            let surviving: Vec<crate::core::ast::Impl> = proc
                                 .plan
                                 .iter()
                                 .filter(|imp| !imp.refs.iter().any(|r| dead.contains(r)))
@@ -420,7 +420,7 @@ pub fn exec_pipeline(
         let root_msg = results
             .get(&fatal_proc)
             .and_then(|v| match v {
-                Value::Text(t) => crate::dslresult::extract_field("err_msg", t),
+                Value::Text(t) => crate::core::dslresult::extract_field("err_msg", t),
                 _ => None,
             })
             .unwrap_or_else(|| "unknown error".to_string());
@@ -613,7 +613,7 @@ pub fn check_contract(proc: &Proc, value: &Value) -> Result<(), String> {
     };
     // L1 outputs：字段存在性
     for f in &c.outputs {
-        if crate::dslresult::extract_field(f, text).is_none() {
+        if crate::core::dslresult::extract_field(f, text).is_none() {
             return Err(format!(
                 "contract violation: proc '{}' missing required output field '{}'",
                 proc.name, f

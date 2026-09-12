@@ -4,7 +4,7 @@
 //! pipelines / procs / runs / compositions。
 //! 替代旧版 .gcf 文件系统。
 
-use crate::ast::*;
+use crate::core::ast::*;
 use crate::harvest::civil_from_days;
 use rusqlite::{params, Connection};
 use std::collections::BTreeSet;
@@ -1049,7 +1049,7 @@ pub fn search_fts(query: &str, limit: usize) -> Vec<FtsRow> {
 
 // ── v0.12 脚本契约库（脚本即 API） ──
 
-use crate::script::{Concurrency, ScriptCard};
+use crate::core::script_card::{Concurrency, ScriptCard};
 
 /// 注册（upsert）脚本契约。契约解析已在 script::parse_contract 完成。
 pub fn script_attach_conn(conn: &Connection, card: &ScriptCard) -> Result<(), String> {
@@ -1355,7 +1355,7 @@ mod conn_tests {
             output: "words=int".into(),
             pure: true,
             idempotent: true,
-            concurrency: crate::script::Concurrency::Safe,
+            concurrency: crate::core::script_card::Concurrency::Safe,
             effects: "none".into(),
             timeout_secs: 60,
             retries: 1,

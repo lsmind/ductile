@@ -3,13 +3,13 @@
 // 用法：DUCTILE_DATA=/tmp/regchain_data ductile run pipelines/reggame3.pipeline game
 Pipeline("reggame3", "三臂3轮盲评（ductile27/ductile8/裸27）", cwd="/tmp/regchain_data")
 
-  .proc("r0", run("REG_ROUND=0 python3 /home/beef/projects/ductile/scripts/reggame_materials.py > game_mat0.log 2>&1 && DUCTILE_CONFIG=/tmp/regchain_data/regconf.toml ductile run /home/beef/projects/ductile/pipelines/regjudge3.pipeline 盲评0 > game_judge0.log 2>&1 && grep -q 'executed successfully' game_judge0.log && echo r0-ok"))
+  .proc("r0", run("REG_ROUND=0 python3 /home/beef/projects/ductile/experiments/reggame_materials.py > game_mat0.log 2>&1 && DUCTILE_CONFIG=/tmp/regchain_data/regconf.toml ductile run /home/beef/projects/ductile/pipelines/regjudge3.pipeline 盲评0 > game_judge0.log 2>&1 && grep -q 'executed successfully' game_judge0.log && echo r0-ok"))
     .desc("轮 0：材料（甲=g27 乙=g8 丙=gbar）+ 盲评")
-  .proc("r1", run("{ echo '@r0'; } > gt1.txt && grep -q r0-ok gt1.txt && REG_ROUND=1 python3 /home/beef/projects/ductile/scripts/reggame_materials.py > game_mat1.log 2>&1 && DUCTILE_CONFIG=/tmp/regchain_data/regconf.toml ductile run /home/beef/projects/ductile/pipelines/regjudge3.pipeline 盲评1 > game_judge1.log 2>&1 && grep -q 'executed successfully' game_judge1.log && echo r1-ok"))
+  .proc("r1", run("{ echo '@r0'; } > gt1.txt && grep -q r0-ok gt1.txt && REG_ROUND=1 python3 /home/beef/projects/ductile/experiments/reggame_materials.py > game_mat1.log 2>&1 && DUCTILE_CONFIG=/tmp/regchain_data/regconf.toml ductile run /home/beef/projects/ductile/pipelines/regjudge3.pipeline 盲评1 > game_judge1.log 2>&1 && grep -q 'executed successfully' game_judge1.log && echo r1-ok"))
     .desc("轮 1：轮转一位（乙=g27 丙=g8 甲=gbar）")
-  .proc("r2", run("{ echo '@r1'; } > gt2.txt && grep -q r1-ok gt2.txt && REG_ROUND=2 python3 /home/beef/projects/ductile/scripts/reggame_materials.py > game_mat2.log 2>&1 && DUCTILE_CONFIG=/tmp/regchain_data/regconf.toml ductile run /home/beef/projects/ductile/pipelines/regjudge3.pipeline 盲评2 > game_judge2.log 2>&1 && grep -q 'executed successfully' game_judge2.log && echo r2-ok"))
+  .proc("r2", run("{ echo '@r1'; } > gt2.txt && grep -q r1-ok gt2.txt && REG_ROUND=2 python3 /home/beef/projects/ductile/experiments/reggame_materials.py > game_mat2.log 2>&1 && DUCTILE_CONFIG=/tmp/regchain_data/regconf.toml ductile run /home/beef/projects/ductile/pipelines/regjudge3.pipeline 盲评2 > game_judge2.log 2>&1 && grep -q 'executed successfully' game_judge2.log && echo r2-ok"))
     .desc("轮 2：再轮转（丙=g27 甲=g8 乙=gbar）")
-  .proc("tally", run("{ echo '@r2'; } > gt3.txt && grep -q r2-ok gt3.txt && python3 /home/beef/projects/ductile/scripts/reggame_tally.py > game_tally.log 2>&1 && grep -q REGGAME-DONE game_tally.log && echo tally-ok"))
+  .proc("tally", run("{ echo '@r2'; } > gt3.txt && grep -q r2-ok gt3.txt && python3 /home/beef/projects/ductile/experiments/reggame_tally.py > game_tally.log 2>&1 && grep -q REGGAME-DONE game_tally.log && echo tally-ok"))
     .desc("3 轮聚合")
   .proc("report", run("{ echo '@tally'; } > gt4.txt && grep -q tally-ok gt4.txt && cat game_tally.log && echo REGGAME-PASS"))
     .desc("终报")

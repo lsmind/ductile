@@ -7,13 +7,14 @@
 //!   *execution* failure returns `{"ok":false,"error":...}` so agents can route on it.
 //! - All JSON building goes through small pure functions (unit-tested below).
 
-use crate::ast::ExecResult;
-use crate::ast::Pipeline;
+use crate::core::ast::ExecResult;
+use crate::core::ast::Pipeline;
+use crate::core::script_card::ScriptCard;
 use crate::db::{self, ProcRow, RunRow};
 use crate::egraph::{build_egraph, critical_path, parallel_groups};
 use crate::executor::exec_pipeline;
 use crate::parser::{parse_pipeline_file, parse_policy_file};
-use crate::script::{cse_safe, ScriptCard};
+use crate::L2_orchestration::script::cse_safe;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -231,8 +232,8 @@ pub fn run_row_json(r: &RunRow) -> String {
     )
 }
 
-pub fn value_json(v: &crate::ast::Value) -> String {
-    use crate::ast::Value;
+pub fn value_json(v: &crate::core::ast::Value) -> String {
+    use crate::core::ast::Value;
     match v {
         Value::Text(t) => format!("{{\"type\":\"text\",\"value\":\"{}\"}}", escape_json(t)),
         Value::File(f) => format!("{{\"type\":\"file\",\"path\":\"{}\"}}", escape_json(f)),
@@ -255,14 +256,16 @@ pub fn exec_result_json(r: &ExecResult) -> String {
             let code = partial
                 .values()
                 .find_map(|v| match v {
-                    crate::ast::Value::Text(t) => crate::dslresult::extract_field("err_code", t),
+                    crate::core::ast::Value::Text(t) => {
+                        crate::core::dslresult::extract_field("err_code", t)
+                    }
                     _ => None,
                 })
                 .unwrap_or_default();
             let mut parts: Vec<String> = Vec::new();
             for (k, v) in partial {
                 let entry = match v {
-                    crate::ast::Value::Text(t) if t.starts_with("§§FIELDS§§") => {
+                    crate::core::ast::Value::Text(t) if t.starts_with("§§FIELDS§§") => {
                         match decode_internal_fields(&t) {
                             Some(fields) => {
                                 let items: Vec<String> = fields
@@ -276,7 +279,7 @@ pub fn exec_result_json(r: &ExecResult) -> String {
                             None => format!(
                                 "\"{}\":{}",
                                 escape_json(&k),
-                                value_json(&crate::ast::Value::Text(t.clone()))
+                                value_json(&crate::core::ast::Value::Text(t.clone()))
                             ),
                         }
                     }
@@ -504,11 +507,11 @@ pub fn script_call_json_core(
             format!(", {}", kv.join(", "))
         }
     );
-    let impl_ = crate::ast::Impl {
+    let impl_ = crate::core::ast::Impl {
         name: "api_call".into(),
         description: String::new(),
         tags: BTreeSet::new(),
-        cost: crate::ast::Cost::default(),
+        cost: crate::core::ast::Cost::default(),
         enabled: true,
         when: None,
         refs: Vec::new(),
@@ -521,11 +524,11 @@ pub fn script_call_json_core(
         Ok(v) => {
             // ##DSL_RESULT 块解码为干净字段（agent/前端不读 §§FIELDS§§ 内部编码）
             let text = match &v {
-                crate::ast::Value::Text(t) => t.as_str(),
+                crate::core::ast::Value::Text(t) => t.as_str(),
                 _ => "",
             };
             match decode_internal_fields(text)
-                .or_else(|| crate::dslresult::parse_dsl_result_block(text))
+                .or_else(|| crate::core::dslresult::parse_dsl_result_block(text))
             {
                 Some(fields) => {
                     let items: Vec<String> = fields
@@ -620,8 +623,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::Value;
-    use crate::script::{Concurrency, ScriptCard};
+    use crate::core::ast::Value;
+    use crate::core::script_card::{Concurrency, ScriptCard};
     use std::collections::BTreeSet;
 
     fn card(name: &str, params: &str, pure: bool, conc: Concurrency) -> ScriptCard {
@@ -760,8 +763,14 @@ mod tests {
             "run timed out after 5s: ffmpeg",
             2,
         );
-        p.insert("render".to_string(), crate::ast::Value::Text(rec.encode()));
-        p.insert("search".to_string(), crate::ast::Value::Text("hits".into()));
+        p.insert(
+            "render".to_string(),
+            crate::core::ast::Value::Text(rec.encode()),
+        );
+        p.insert(
+            "search".to_string(),
+            crate::core::ast::Value::Text("hits".into()),
+        );
         let fail2 = exec_result_json(&ExecResult::Failed {
             error: "All paths failed for proc: render".into(),
             partial: p,
