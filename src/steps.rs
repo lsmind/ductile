@@ -970,7 +970,22 @@ fn exec_llm(
                             inner_pipeline_name(),
                             inner_proc_name()
                         );
-                        let _ = std::fs::write(&fname, &p);
+                        // v0.18.5 制度修：证据链写入不许静默失败（原 let _ = 吞错，
+                        // 指向不存在目录时归因材料无声丢失——与上面注释的承诺矛盾）。
+                        // 先建目录；写失败必须大声喊出来，盲评回放依赖这份材料。
+                        if let Err(e) = std::fs::create_dir_all(&dir) {
+                            eprintln!(
+                                "    !! synth evidence NOT saved: mkdir {} failed: {}",
+                                dir.to_string_lossy(),
+                                e
+                            );
+                        } else if let Err(e) = std::fs::write(&fname, &p) {
+                            eprintln!(
+                                "    !! synth evidence NOT saved: write {} failed: {}",
+                                fname,
+                                e
+                            );
+                        }
                     }
                     p
                 }
