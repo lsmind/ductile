@@ -81,7 +81,19 @@ Pipeline("name", "optional description", cwd="...", env=["K=V", ...])
 >    （有界 Reroute）；阶梯耗尽 → 汇总错误。`model=` 实参完全旁路阶梯（探测
 >    场景）。阶梯引用未定义档位 / `tier=` 不在阶梯内 → 硬错误（fail-closed）。
 >    结果自动附 `meta_tier`/`meta_model_id` 字段。档位是语义能力级，非裸模型名。
-> 6. **auto-prompt 认知上下文合成（v0.17）**：`llm(agent)` 不写 `prompt=` 时，
+> **v0.18 三刀半（约束继承 + owner 槽位 + 提示词进化环）**：
+>
+> 7. **`.constraint(fields)` 链级约束继承（v0.18.1）**：proc 修饰符
+>    `.constraint(resolved_constraints)` 声明某个上游结构化字段为**链级约束**。
+>    引擎提取该字段的实时值（2000 字符窗口），自动注入**所有下游节点**合成
+>    prompt 的"继承的约束（贯穿全链，任何设计/拆解/任务分配不得违背）"段。
+>    与 `.contract(invariants=)` 的分工：contract 是**静态手写不变式**（人写死），
+>    constraint 是**运行时字段提取**（上游 LLM 产出什么就继承什么）。
+>    动机：约束在链上逐跳衰减（中游节点消化进散文，下游靠运气接住）。
+>    实证：s2 段盲评 -16.3 → 收窄；合成 prompt 全文落盘（见 §3.8）。
+>    语法：`.constraint(constraints)` 裸字段名（@ref/空/带括号硬错误）。
+>
+> 8. **auto-prompt 认知上下文合成（v0.17）**：`llm(agent)` 不写 `prompt=` 时，
 >    引擎按节点在图中的位置/属性/功能自动合成 prompt（认知上下文管理，
 >    cognition spec §4 pull 模型）。八段结构：**身份**（管线+节点+desc）→
 >    **主题**（topic 原文）→ **上游输入**（refs/.when 引用的上游 §§FIELDS§§
@@ -123,6 +135,11 @@ Pipeline("name", "optional description", cwd="...", env=["K=V", ...])
   - 语义联动：① egraph 建排序边（needs 声明的上游先执行）；② 合成器把 needs 并入 upstream 引用集合（进入 LLM 上下文）
   - 典型场景：审计/裁判节点 `.when(@上游产出存在)` 只声明门禁，但审计清单脚手架来自更早的节点——用 `.needs` 把清单喂进上下文。实证：regchain audit 节点挂 `.needs(@req)` 后盲评 s3 段 -7.3 → +8.0
   - 判别法：如果缺了这个上游的**内容**产出质量会掉，用 `.needs`；如果缺了这个上游的**状态**流程走不通，用 `.when`
+- **`.constraint(fields)` 修饰符（v0.18.1）**：把上游某个结构化字段声明为链级约束，引擎注入所有下游节点的合成 prompt（"继承的约束"段）。
+  - 语法：`.constraint(resolved_constraints)` —— 参数是**裸字段名**（不带 `@`）；声明处所在的 proc 即约束生产者，字段值从该 proc 的 §§FIELDS§§ 提取
+  - 挂在"产出干净约束清单"的节点上（如问询链的 resolver：schema 含 `resolved_constraints` 字段）
+  - 硬错误形态：`.constraint(@x)`（带 @）、`.constraint()`（空）、`.constraint(a+b)`（带括号）
+  - 动机：用户隐含约束（"没有程序员"）在中游节点被消化成散文后，下游能否接住靠运气——constraint 让它结构化在场、不逐跳衰减。实证：game 场景 s2 盲评 -16.3 收窄，配 owner 槽位后 +14.7 反超裸模型
 
 ### 1.4 变量替换规则
 
@@ -842,6 +859,9 @@ key2=value2
 | `script 'X' not attached` | 先 `ductile script attach <file>` 注册 |
 | `param 'k' not in contract` | 调用传了契约未声明的参数，`ductile script show X` 查契约 |
 | `missing required param` | 必填参数缺失或为空 |
+| `bad .when(@x) ... fail-closed at check`（v0.18.4） | when 条件静态解析失败：裸 `@proc` 引用缺 `.field`（须 `@proc.field`）、空算子数等。**check 期拦截**，改好再 run |
+| `agent ladder references undefined tier` | 配置文件缺 `[models.<tier>]` 段——独立 config.toml 必须带全 `[llm]` + `[models.*]`，不能只写 `[agents.*]` |
+| `llm bridge: schema requested but no JSON object in model output` | 小模型被重 guide 压垮输出不了 JSON。降 guide 负重，或 agent 配 `tiers = "light,medium"` 加兜底档位 |
 
 ---
 
@@ -1151,3 +1171,96 @@ LLM 结果**一律不进 bash**。`echo '@ref'`、`echo x='@ref' >/dev/null` 都
 1. **结构化字段**：`.when(@proc.field ...)` / 契约 invariants（Rust 侧求值）
 2. **`write` 内置动词落盘**：`write(to="f.md", content=@plan)` 后 `cat f.md`——
    write 在 Rust 侧解析 `@ref`，不过 shell
+
+---
+
+## 14. LLM 管线配方（v0.18 实战沉淀）
+
+> 本章是"怎么用好"的操作手册：四个经过盲评验证的配方 + 提示词工程实测规律。
+> 所有数据来自 game 场景三轮独立盲评（judge=qwen3.8:27b，甲乙丙位置轮转，0-100 打分禁并列）。
+
+### 14.1 五段生成链（基座形态）
+
+```
+req(需求分析) → arch(架构) → brk(任务拆解) → audit(审计门)
+```
+
+每段一个 `[agents.x]`（schema 强制结构化），`.when(@上游.字段)` 串联，
+audit 挂 `.needs(@req)` 拿原始需求做审计脚手架。这是最简可用形态。
+
+### 14.2 问询链（防臆造约束——最重要的一条）
+
+**问题**：需求节点会把推测写成事实（"预算有限" → 臆造"不能外包"），下游全链被毒。
+
+**配方**：req 和 resolve 两个节点，中间一次"下级提问上级裁决"：
+
+```
+.proc("req", llm(req_analyst))                        // schema 含 open_questions
+.proc("resolve", llm(resolver, prompt="原始用户描述：{topic} ||| 下游需求分析师提出的问题：{@req.open_questions}"))
+  .when(@req.must_have)
+  .constraint(resolved_constraints)                    // 裁决后的干净约束 → 全链继承
+.proc("arch", llm(architect)).when(@resolve.resolved_constraints)
+.proc("brk", llm(breaker)).when(@arch.modules)
+.proc("audit", llm(auditor)).when(@brk.tickets).needs(@req)
+```
+
+resolver 的 system 写死**两类推断纪律**：
+- 限制性推断（缩小方案空间的解读，如"预算有限"→"不能外包"）——必须原话明确禁止才成立
+- 可执行化推断（"没有程序员"→"技术实现交付外部合约开发"）——应当收录
+
+实证：27B 问询链 82.7 vs 裸 27B 67.7（**+15**）；8B 问询链 36.3（模型太小救不动提问臂）。
+
+### 14.3 owner 槽位（约束要有落点）
+
+约束送到了门口，schema 还要留门。任务拆解类 schema 的每张 ticket 内嵌 `owner` 字段
+（对齐裸模型自发涌现的形态——不要放顶层）。guide 里给白名单："团队只有6名美术和策划——
+owner 只能是『策划A-E/美术』或『外部合约开发』"。
+
+实证弧线（同场景 s2 段，vs 裸模型）：-16.3 →（.constraint 注入）-9.7 →（+owner 槽位）**+14.7 反超**。
+
+### 14.4 提示词自动进化环（评估函数机制化）
+
+人工循环（盲评→读批语→改 guide→重跑→回滚）固化为三层管线：
+
+1. **probe**（`scripts/probe_invariants.py`，零 LLM）：结构不变量检查——票数锚/字段完整/
+   desc 负重/est 对账（机器连加，LLM 算不对）/依赖单向/owner 白名单。输出 `##DSL_RESULT`
+   probe_score + issues，`.when` 可门禁。
+2. **批语**：盲评 judge 的 notes（内容层批评）
+3. **doctor**（`[agents.prompt_doctor]` + `pipelines/prompt_evolve.pipeline`）：读 guide 原文
+   +探针报告+批语 → diagnoses（根因）+ prescriptions（target/action/old/new 可执行处方）
+   + expected_effects（可证伪预期）。`scripts/rx_apply.py` 把处方写回 toml。
+
+**验收实录**：g9c（9B 通用 guide，42.7 分）回放 → doctor 四张处方 vs 人工三轮实锤处方逐条对齐，
+R1 owner 枚举比人工版更严。但全量应用后 9B 直接输出不了 JSON（brk 崩）——回滚 R4（自检清单）
+后 probe 88 分结构项全绿。**可证伪环完整咬合：处方→apply→重跑→复检→选择性回滚**。
+
+### 14.5 提示词工程五律（实测，9B 档）
+
+| 律 | 实测证据 |
+|---|---|
+| ① 数量锚定有效 | "15-25 张"把 7 票拉到 20+（无锚=最省力输出） |
+| ② 字段清单要全 | 六字段显式+示例；漏列必丢 |
+| ③ desc 负重要轻 | "三要素"压垮（desc 全空）；一句话 30-60 字+示例是甜剂量 |
+| ④ 算术指令反噬 | est 连加自检 → total_est=0.0 且 owner 退化；27B 也算不对 20 项连加——对账交引擎 |
+| ⑤ 结构修正边际递减 | 防倒置/owner 到人不再加分（裁判打内容深度） |
+
+**guide 详尽度与模型能力反相关**：加压 guide 对 9B +21.3（补短板），对 27B **-4.0**
+（格式清单挤出内容深度——预算论证、时间线消失）。27B 档位的正确姿势：约束递到手、
+留好 owner 槽位、然后闭嘴。
+
+### 14.6 模型档位选择（27B=甜点位实测）
+
+| 档位 | s2 深拆解盲评 | 定位 |
+|---|---|---|
+| 裸 27B | 66.7-79.3（波动大） | 对照臂 |
+| **27B 问询链** | **82.7** | 主力：直提链 84 同级 |
+| 9B 加压 guide | 61-64（触顶） | s0 提问臂 + 粗拆解 |
+| 8B 问询链 | 32-36 | 不可用于深推理 |
+
+### 14.7 工程纪律（外部实测反馈单，v0.18.4 已修）
+
+- **写 .pipeline 抄范本，禁止凭记忆**——链式名解析类错误 check 曾漏检（v0.18.4 起
+  `.when` 条件 check 期静态校验，裸 `@proc` 引用直接拦截）
+- **参数序列化引号**在 env 注入前被引擎剥净（`int('"16"')` 类错误炸在搬运处）
+- **err_msg 截断 2000 字符**——诊断信息不再丢关键栈
+- LLM 输出一律不进 bash（§13.5 血泪规则不变）

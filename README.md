@@ -1,259 +1,140 @@
 # Ductile
 
-> 声明式流水线引擎 —— 声明意图，引擎自动处理路由、降级和质量控制。
+> 声明式流水线引擎 —— 声明意图，引擎自动处理路由、降级、质量控制和认知上下文。
 
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-384%2B%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/Tests-417%20passed-brightgreen.svg)](#测试)
 [![PyPI](https://img.shields.io/badge/PyPI-0.15.0-blue.svg)](https://pypi.org/project/ductile/)
-[![CI](https://github.com/lsmind/ductile/actions/workflows/ci.yml/badge.svg)](https://github.com/lsmind/ductile/actions/workflows/ci.yml)
 
 ---
 
-## Ductile 是什么
+## 为什么是 Ductile
 
-你写一个 `.pipeline` 文本文件，声明"做什么"和"有哪些备选路径"。引擎负责剩下的全部：选哪条路、怎么降级、什么时候淘汰废路径。
+跑过 LLM 流水线的人都撞过同一堵墙：**流程跑通了，质量靠玄学**。约束在第二段被
+消化成散文、第三段模型开始臆造、第四段工整地输出一堆没人认领的任务单——每一步
+都绿灯，整体是废品。
 
-一句话：**把不确定性管理从人工判断变成引擎的自适应数值优化。**
+Ductile 的回答是把三类人工判断变成引擎结构：
+
+**1. 不确定性管理 → 数值优化。** 你声明"做什么 + 有哪些备选路径"，引擎选路、
+降级、淘汰废路径。web 挂了滑到 mcp，裁判打分 < 80 deliver 被门住（fail-closed），
+连续失败 3 次永久 BLOCKED。不写 `if/else/try/catch`。
+
+**2. 上下文管理 → 认知合成。** `llm(agent)` 不写 prompt 时，引擎按节点在图中的
+位置自动合成八段认知上下文：身份、主题、上游输入预览、继承约束、下游消费者、
+开放动作、错误记忆、输出契约（v0.17）。LLM 不再"瞎接活"。
+
+**3. 质量进化 → 可证伪循环。** 结构探针（零 LLM 判"有没有错"）+ 盲评批语（判
+"好不好"）+ 提示词医生（判"为什么+怎么改"）组成自动进化环（v0.18.3），处方
+应用后重跑复检，预期不兑现就回滚。
+
+### 实测数据（game 场景，三轮独立盲评，judge=27B）
+
+| 配置 | s2 深拆解盲评 | 说明 |
+|---|---|---|
+| 裸 27B | 66.7–79.3（波动大） | 单发无结构 |
+| 五段链（v0.17 前） | 56.7–59.3 | **约束逐跳衰减，比裸模型还差** |
+| + 约束继承（v0.18.1） | 差距 -16.3 → -9.7 | `.constraint` 全链注入 |
+| + owner 槽位（v0.18.2） | **+14.7，反超裸模型** | 约束有落点 |
+| + 问询链（防臆造） | **82.7（+15）** | 下级提问上级裁决 |
+
+最有说服力的一条曲线是第一行到第四行：**结构化管线从"比裸模型差 16 分"走到
+"反超 15 分"**——差距不是靠换更大的模型填的，是靠把约束送到位、留好槽位填的。
 
 ### 和现有工具的区别
 
-| 能力 | Ductile | LangGraph / AutoGen | Airflow / Prefect | 传统路由层 |
-|------|---------|---------------------|--------------------|-----------|
-| 声明式流程定义 | ✅ 纯文本 | ⚠️ 代码+图 | ✅ DAG | ❌ |
-| 多路径自动降级 | ✅ 内核 | ❌ 手写 | ❌ 手写 | ⚠️ 静态 |
-| e-graph 等价类熔合（union-only） | ✅ v0.10 | ❌ | ❌ | ❌ |
-| CSE（等价 proc 只跑一次） | ✅ v0.10 | ❌ | ❌ | ❌ |
-| 运行时自适应惩罚 | ✅ 独家 | ❌ | ❌ | ❌ |
-| 同构发现 + 打散重组 | ✅ | ❌ | ❌ | ❌ |
-| 超网络生成运行图（`.hyper`） | ✅ | ⚠️ 代码建图 | ⚠️ DAG 定义 | ❌ |
-| 热补丁（不改源文件） | ✅ | ❌ | ❌ | ❌ |
-| 认知层（契约/canary/incident/L4 复核） | ✅ v0.15 | ❌ | ❌ | ❌ |
-| SQLite 统一存储 | ✅ 单文件 | ❌ | ✅ 外部 DB | ❌ |
-| 版本快照 | ✅ 内置 | ❌ | ❌ | ❌ |
-| 零改接入外部工具 | ✅ 5 行 echo | ❌ Tool 类 | ❌ Operator | ⚠️ 适配器 |
-| 零外部服务依赖 | ✅ 内嵌 SQLite，无 DB server | ❌ Python 生态 | ✅ 需外部 DB | 各异 |
+| 能力 | Ductile | LangGraph / AutoGen | Airflow / Prefect |
+|------|---------|---------------------|--------------------|
+| 声明式流程定义 | ✅ 纯文本 | ⚠️ 代码+图 | ✅ DAG |
+| 多路径自动降级 | ✅ 内核 | ❌ 手写 | ❌ 手写 |
+| e-graph 等价类 + CSE | ✅ | ❌ | ❌ |
+| 认知上下文自动合成 | ✅ v0.17 | ❌ 全手拼 prompt | ❌ |
+| 链级约束继承 | ✅ v0.18 | ❌ | ❌ |
+| 提示词自动进化环 | ✅ v0.18.3 | ❌ | ❌ |
+| 认知层（契约/canary/incident/L4） | ✅ v0.15 | ❌ | ❌ |
+| SQLite 单文件全记录 | ✅ | ❌ | ⚠️ 外部 DB |
+| 零改接入外部脚本 | ✅ 5 行 DSL_RESULT | ❌ Tool 类 | ⚠️ Operator |
 
-**路由层只解决"选哪个模型"，编排框架只解决"怎么连起来"。Ductile 把选择 + 降级 + 自学习 + 热补丁 + 零改接入塞进一个引擎。**
+路由层只解决"选哪个模型"，编排框架只解决"怎么连起来"。Ductile 把选择 + 降级 +
+上下文 + 约束传递 + 自学习塞进一个引擎。
 
 ## 安装
 
 ```bash
-pip install ductile
+pip install ductile          # 或源码：cargo build --release
 ```
 
-从源码（需 [Rust](https://rustup.rs/)）：
-
-```bash
-cargo build --release
-```
-
-Windows：`run`/`spawn` 依赖 Git Bash；说明见 [docs/WINDOWS.md](docs/WINDOWS.md)。
+Windows 依赖 Git Bash，见 [docs/WINDOWS.md](docs/WINDOWS.md)。
 
 ## 30 秒看懂
-
-写一个 `.pipeline` 文件：
 
 ```
 Pipeline("research")
   .proc("search")
     .plan(
-      web -> web_search(query="{topic}")
-        .tags(#search, #web)
-        .retry(n=3),
-      mcp -> mcp_search(query="{topic}")
-        .tags(#search, #mcp)
+      web -> web_search(query="{topic}").tags(#search, #web).retry(n=3),
+      mcp -> mcp_search(query="{topic}").tags(#search, #mcp)
     )
-
   .proc("gate")
-    .plan(
-      g -> run("judge.sh {topic}")   # 裁判独立：stdout 末尾输出 ##DSL_RESULT score=85
-        .tags(#judge)
-    )
-
+    .plan(g -> run("judge.sh {topic}").tags(#judge))
   .proc("write_report")
-    .when(@gate.score < 80)          # 分数不达标 → 走返工路径，废品不进门
-    .plan(
-      w -> write(to="~/output/report.md", content=@search)
-        .tags(#write, #file)
-    )
-
+    .when(@gate.score < 80)
+    .plan(w -> write(to="~/output/report.md", content=@search))
   .proc("deliver")
     .deliver(@write_report)
 ```
-
-运行：
 
 ```bash
 ductile run research.pipeline "RISC-V 架构"
 ```
 
-web 路径失败 → 自动滑到 mcp；裁判打分 < 80 → deliver 被门住（fail-closed）。连续失败 3 次 → 永久跳过。**你只管声明，引擎自己学。**
+web 失败自动滑到 mcp；裁判 < 80 deliver 被门住。**你只管声明，引擎自己学。**
 
-## 核心能力
+## 三个真实场景（全部盲评验证）
 
-### 超网络（`.hyper`）
+**防臆造约束**：用户说"预算有限"，需求节点臆造成"不能外包"，毒害全链。问询链
+（req 提问 → resolver 裁决 → `.constraint` 全链继承）让约束只来自原话：+15 分。
 
-不确定时用超网络**生成**运行图，再执行：
+**约束要有落点**：任务单 schema 没有 owner 字段，注入再强的约束也写不进去。加一个
+ticket 内嵌 owner 槽位 + 白名单 guide：-9.7 → **+14.7**。
 
-```bash
-ductile hyper build examples/hyper/unstructured_extract.hyper -o out.pipeline
-ductile hyper check examples/hyper/unstructured_extract.hyper examples/scripts/unstructured-extract.pipeline
-```
+**提示词自动进化**：9B 输出 7 张粗票，机器医生读探针报告开处方（数量锚/owner 枚举/
+priority），42.7 → 64.0（+21.3）；处方里的"自检清单"触发算术反噬导致输出崩溃，
+可证伪环捕获并选择性回滚，复检 88 分。**机器开的处方和人工三轮实锤的处方逐条对齐，
+还比人工多抓了一处。**
 
-`chain` / `gate` / `bundle` / `xor` 见 [SPEC §2.4b](SPEC.md)。LLM 只取入边数据（`@ref`）。仓库自测周期：[docs/DEVCYCLE.md](docs/DEVCYCLE.md)。
+## 核心能力索引
 
-### e-graph 等价类 + 受限熔合（v0.10 新增）
+- **超网络（`.hyper`）**：不确定时生成运行图再执行 — [SPEC §2.4b](SPEC.md)
+- **e-graph 熔合 + CSE**：`.pick(egraph)` 一行开启等价 proc 只跑一次 — [SPEC §3.0](SPEC.md)
+- **auto-prompt 认知合成**：八段上下文，盲评"英文 system 干中文活"的 10+ 分坑自动填平 — [SPEC §14](SPEC.md)
+- **问询链 / owner 槽位 / 进化环**：LLM 管线四大配方 — [SPEC §14](SPEC.md)
+- **裁判分离**：质量门槛 = 独立 judge + `.when(@judge.score < 80)`，产出者不自证清白 — [SPEC §3.7](SPEC.md)
+- **热补丁**：`ductile patch` 不改源文件禁用/调整任意节点
+- **认知层**：契约卡/canary/incident/L4 复核/shelve — [docs/cognition_spec.md](docs/cognition_spec.md)
+- **Shell 安全门**：`DUCTILE_RESTRICT_SHELL=1` 多租户收紧 — [SPEC §6a.4](SPEC.md)
+- **LangChain 一行接入**：`ductile.langchain_tools()` — [SPEC §11](SPEC.md)
 
-`.pick(egraph)` 一行开启。等价 proc 自动并入同一 e-class（同构合并、merge 交换/结合律、write→read 对消），执行时每 class 只跑一个代表，其余 CSE 共享结果。实现为 **union-only**（不合成新节点，可证终止），不是完整 egg 式 equality saturation；并行组目前只做拓扑分层，层内仍串行。**when-载体守卫（v0.11.1）**：挂 `.when()` 裁判路由的 impl 不参与熔合——否则 judge→consumer 依赖边会被抹掉，deliver 抢跑、判决落空。
+## 给 AI 协作者
 
-```bash
-ductile graph your.pipeline   # 看 e-class 明细 / 融合规则命中 / CSE 别名 / 静态提取计划
-```
+Ductile 为 AI 协作设计。把 [SPEC.md](SPEC.md) 喂给你的 AI 助手（完整安装/编写/
+执行/调优/配方），或：
 
-### 声明意图，不写控制流
+> 请阅读 https://github.com/lsmind/ductile/blob/main/SPEC.md 后帮我写 pipeline。
 
-不写 `if/else/try/catch`。声明路径和优先级，引擎自动排序、降级、短路。
-
-### 越跑越聪明
-
-每个路径保留最近 20 次记录。失败率 > 10% → 指数惩罚。连续失败 3 次 → 自动 BLOCKED。不需要手调参数。
-
-### 评价与流程分离（裁判分离）
-
-**评价与流程分离（v0.11「裁判分离」）**：`.pipeline` 只描述流程；权重与 cost 来源写在 `.eval` 策略文件，`ductile run x.pipeline "topic" --policy p.eval` 挂载。cost 支持两形态：直接数值，或 `latency=measure("bench.sh {topic}")` 链接测试脚本实测取值（缓存 24h）。`.cost()/.check()/.ensure()` 已退役——质量门槛改用独立 judge proc（输出 `##DSL_RESULT score=N`）+ `.when(@judge.score < 80)` 路由；未知函数 fail-closed（`<noop>` 假成功已删除）。执行实测 latency_ms 落库。
-
-`.when(cond)` 支持两种写法（v0.11.1）：内联（`x -> body.when(cond)`，impl 级）与块级（`.when(cond)` 独立成行，下推到该 proc 全部 impls，内联优先）。块级条件里的 `@judge.field` 引用自动建 DAG 边保证裁判先执行；求值 fail-closed（坏条件/缺席裁判不放行）。实测：`score=72` → deliver 放行；`score=85` → `All paths failed for proc: deliver` + degraded 置位（exit 1）。
-
-### 裁判分离的质量门槛（v0.11）
-
-`.cost()/.check()/.ensure()` 已退役。质量门槛 = 独立 judge proc（输出 `##DSL_RESULT score=N`）+ 下游 `.when(@judge.score < 80)` 路由——产出者不自证清白，裁判缺席/坏条件一律不放行（fail-closed）。
-
-### 热补丁
-
-不改源文件，一行命令禁用/调整任意节点：
-
-```bash
-ductile patch research search web enabled false
-ductile patch research summarize s1 retry 5
-```
-
-### 认知层（v0.15）
-
-引擎不只记录成败，还回答"为什么失败、谁的责任、该不该改认知"：
-
-- **节点契约卡**：`.contract(outputs="score", invariants="@self.score >= 80")` 执行后确定性校验，违例自动落事故
-- **canary 已知好输入库**：五分类归因的判别面——canary 绿=上游投毒，红=本地问题；无 canary 通过记录禁止本地 patch
-- **incident 一等实体**：失败自动聚合为带 L0-L2 分层信号的事故，close 带 resolution 可审计
-- **L4 端到端复核**：冷启动 log-only 攒标签，≥8 标签且一致率 ≥70% 才升格拦截（复核者先被校准）
-- **shelve 搁置队列**：判别实验结果模糊时强制搁置，绝不写错误认知
-
-```bash
-ductile canary add research judge '已知好输入' '@self.score >= 80'
-ductile incident list
-ductile l4 status
-DUCTILE_L4=1 ductile run research.pipeline "topic"
-```
-
-设计全文：[docs/cognition_spec.md](docs/cognition_spec.md) · DSL 面：[SPEC §13](SPEC.md)
-
-### Shell 安全门（可选）
-
-默认允许 `run`/`sh`/`spawn`（本地可信操作员模型）。多租户或不可信输入场景请显式收紧：
-
-```bash
-DUCTILE_RESTRICT_SHELL=1 ductile run app.pipeline   # 或：ductile run app.pipeline --restrict-shell
-# 临时放开：DUCTILE_UNSAFE_SHELL=1
-```
-
-受限模式下 shell 算子 fail-closed；`write`/`read`/`ls`/`llm` 等非 shell 算子不受影响。
-
-### LLM 非结构化 → 结构化
-
-```bash
-cp config.toml.example config.toml   # 填写 [llm] api_key / base_url / model
-# 或：export OPENAI_API_KEY=...   （环境变量优先于文件）
-ductile run examples/scripts/unstructured-extract.pipeline
-```
-
-`llm(prompt=@raw, schema="title,url,topic")` 经 `bridge/llm_bridge.py` 调用模型；带 `schema` 时 stdout 附 `##DSL_RESULT`，下游用 `@extract.title` / `.when`。竞品同场景草图见 [`docs/COMPETITORS.md`](docs/COMPETITORS.md)（LangGraph / CrewAI / AutoGen / Prefect 离线矩阵：`python benches/competitors/run_compare.py`）。
-
-配置解析见引擎 [`src/config.rs`](src/config.rs)（与 bridge 共用同一套查找顺序与优先级）。
-
-### 同构发现 + 打散重组
-
-导入多个 pipeline 后，自动识别跨 pipeline 的相似节点。从零件库按 tag 组装新流水线。
-
-### SQLite 统一存储
-
-pipeline 库、执行记录、proc 注册、组合方案、热补丁——全部一个 `.db` 文件。
-
-### 零改接入
-
-任何脚本 stdout 末尾打 5 行就能返回结构化数据，引擎自动解析，下游直接 `@proc.field` 引用。
-
----
-
-## 🤖 让 AI 帮你用 Ductile
-
-Ductile 专为 AI 协作设计。**把 [SPEC.md](SPEC.md) 喂给你的 AI 助手**，它就能：
-
-1. **自动安装** — `pip install ductile`
-2. **编写 pipeline** — 按 SPEC 语法生成 `.pipeline` 文件
-3. **执行和管理** — 调用全部 CLI 命令
-4. **热补丁调优** — 根据执行结果动态 patch
-5. **同构发现** — 跨 pipeline 搜索可复用节点
-
-### 使用方法
-
-把下面这段话发给你的 AI 助手（ChatGPT / Claude / Gemini / 任何支持工具调用的 Agent）：
-
-> 请阅读以下 Ductile DSL 规格文档，然后帮我完成流水线任务。
-> 
-> [粘贴 SPEC.md 全文，或提供链接：https://github.com/lsmind/ductile/blob/main/SPEC.md]
-
-AI 读完 SPEC 后，你就可以直接用自然语言下指令：
-
-- *"帮我写一个搜索+总结+写报告的 pipeline"*
-- *"把 search 节点的 web 路径禁掉，看看效果"*
-- *"分析一下我这几个 pipeline 有没有可以复用的节点"*
-- *"给 research pipeline 加个版本快照"*
-
-AI 会自动生成正确的 `.pipeline` 文件和 CLI 命令。
-
----
-
-## LangChain 插件接口（v0.13）
-
-Python 混合包（Rust 核心 + Python 适配层），`ductile.langchain_tools()` 一行接入：
-
-```python
-import ductile
-
-tools = ductile.langchain_tools()   # 6 个内省/执行工具 + 每个脚本契约一个类型化工具
-agent = create_react_agent(llm, tools, prompt)   # 或任何 LangChain Agent
-```
-
-- **6 个基础工具**：`ductile_list_scripts` / `ductile_list_procs` / `ductile_pipeline_info` / `ductile_stats` / `ductile_recent_runs` / `ductile_run` / `ductile_call_script`
-- **每脚本契约一个类型化工具**：从契约卡自动生成 docstring + 参数 schema（`ductile_script_word_stats(text: str)`），LLM 不读脚本体
-- **失败是数据不是异常**：执行失败返回 `{"ok":false,"error":...}`，agent 可按 JSON 路由；创作错误（解析/类型检查）才抛异常
-- 脚本 attach 后重新调用 `langchain_tools()` 即时刷新工具集
+写 .pipeline 的铁律（外部实测血泪）：**抄范本，禁止凭记忆**——v0.18.4 起
+`.when` 条件 check 期静态校验兜底。
 
 ## 代码结构
 
-核心在 `src/`（解析、编排、执行、超网络、API）；Python 包与 LLM 桥在 `python/`、`bridge/`。细节以源码为准。
-
-## 设计哲学
-
-- **声明意图** — 备选与门槛写进 DSL，由引擎选路与学习  
-- **数据流喂模型** — LLM 消费 `@ref` 入边，而非整库上下文  
-
-说明：[docs/DESIGN.md](docs/DESIGN.md) · 语法：[SPEC.md](SPEC.md)
+核心在 `src/`（解析、编排、执行、超网络、认知层）；Python 包与 LLM 桥在
+`python/`、`bridge/`。细节以源码为准。
 
 ## 测试
 
 ```bash
-cargo test --lib
+cargo test --lib     # 417 passed / 0 failed
 ```
 
 ## License
