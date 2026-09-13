@@ -1,0 +1,7 @@
+Pipeline("cmp4_task_good", "本管线的目标是把用户故事转写成俳句（5-7-5 三行，主题：秋夜）", cwd="/tmp/cmp4_data")
+
+  .proc("gen", run("echo '秋夜虫声寂（5）/ 月下归档百万卷（7）/ 晨光唤新篇（5）'"))
+    .desc("匹配交付：真俳句 5-7-5（重做后的合格交付）")
+
+  .proc("deliver", run("echo done"))
+    .deliver(@gen)

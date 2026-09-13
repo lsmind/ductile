@@ -1,0 +1,42 @@
+#!/usr/bin/env -S ductile run
+// cmp4_l4.pipeline — 对比项目4：l4 Enforcing vs LogOnly（端到端交付质量）
+// 问题：校准升格后的 L4 拦截（fail verdict 掐死管线）vs 只记录不拦截，
+//       最终交付物的质量差多少？（Enforcing 逼出重做）
+// 编排模式：selftest 同款——run 链 exit code + needs 排序
+// 前置：/tmp/cmp4_seed/ 需有 tally_pass.log（REGCHAIN-PASS）+ 8 条 reviews 的种子库
+// 前置：DUCTILE_CONFIG=/tmp/regchain_data/regconf.toml（agents：req_analyst/architect/blind_judge…）
+// 用法：DUCTILE_CONFIG=/tmp/regchain_data/regconf.toml DUCTILE_DATA=/tmp/cmp4_data ductile run pipelines/cmp4_l4.pipeline "x"
+Pipeline("cmp4_l4", "l4 Enforcing vs LogOnly 交付质量盲评对比", cwd="/tmp/cmp4_data")
+
+  // ── 准备：臂 A 库 calibrate 到 Enforcing；臂 B 库保持 LogOnly ──
+  .proc("prep", run("mkdir -p /tmp/cmp4a /tmp/cmp4b && cp /tmp/cmp4_seed/ductile.db /tmp/cmp4a/ductile.db && cp /tmp/cmp4_seed/ductile.db /tmp/cmp4b/ductile.db && DUCTILE_DATA=/tmp/cmp4a ductile l4 calibrate /tmp/cmp4_seed/tally_pass.log > /tmp/cmp4_data/prep_a.log 2>&1 && echo prep-ok"))
+    .desc("臂A calibrate→Enforcing；臂B 原样 LogOnly")
+
+  // ── 同一"意图错配"任务跑两臂 ──
+  .proc("run_a", run("DUCTILE_DATA=/tmp/cmp4a DUCTILE_L4_REVIEW=1 ductile run /home/beef/projects/ductile/pipelines/cmp4_task_bad.pipeline x > /tmp/cmp4_data/run_a.log 2>&1; grep -q 'L4 enforcing' /tmp/cmp4_data/run_a.log && echo blocked || echo not-blocked"))
+    .desc("臂A：Enforcing（预期 fail 拦截 → exit 1）")
+    .needs(@prep)
+  .proc("run_b", run("DUCTILE_DATA=/tmp/cmp4b DUCTILE_L4_REVIEW=1 ductile run /home/beef/projects/ductile/pipelines/cmp4_task_bad.pipeline x > /tmp/cmp4_data/run_b.log 2>&1 && grep -q 'executed successfully' /tmp/cmp4_data/run_b.log && echo passed-through"))
+    .desc("臂B：LogOnly（预期 fail 只记录 → 放行）")
+    .needs(@prep)
+
+  // ── 臂A 重跑正确任务（Enforcing 逼出重做）──
+  .proc("run_a2", run("DUCTILE_DATA=/tmp/cmp4a DUCTILE_L4_REVIEW=1 ductile run /home/beef/projects/ductile/pipelines/cmp4_task_good.pipeline x > /tmp/cmp4_data/run_a2.log 2>&1 && grep -q 'executed successfully' /tmp/cmp4_data/run_a2.log && echo redo-ok"))
+    .desc("臂A 二跑：正确意图（重做后交付）")
+    .needs(@run_a, @run_b)
+
+  // ── 盲评 ──
+  .proc("mat", run("python3 /home/beef/projects/ductile/experiments/cmp4_materials.py > /tmp/cmp4_data/cmp4_mat.log 2>&1 && echo mat-ok"))
+    .desc("两臂交付物匿名化")
+    .needs(@run_a2)
+  .proc("m0", read(from="/tmp/cmp4_data/cmp_s0.txt"))
+    .needs(@mat)
+  .proc("j0", llm(blind_judge, prompt="{@m0}"))
+    .desc("盲评：交付物对任务的达成度")
+    .needs(@m0)
+  .proc("d_j", write(to="/tmp/cmp4_data/cmp_judge_s0.txt", content=@j0))
+    .desc("落盘盲评")
+    .when(@j0.scores)
+
+  .proc("deliver", run("echo cmp4-round-done"))
+    .deliver(@d_j)

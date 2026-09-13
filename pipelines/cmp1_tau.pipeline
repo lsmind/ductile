@@ -1,0 +1,38 @@
+#!/usr/bin/env -S ductile run
+// cmp1_tau.pipeline — 对比项目1：τ_off 自报阶梯 vs 固定高档（质量-成本帕累托）
+// 问题：light 起步 + 自报升档的产出质量 vs 全量 27B，差多少分？省的 token 值不值？
+// 编排模式：selftest 同款——run 链 exit code 断言 + @ref 排序（不用 .when 门禁，
+// 纯 Text 输出无字段可判，fail-closed 语义见 L3_dsl/when.rs）
+// 前置：DUCTILE_CONFIG=/tmp/regchain_data/regconf.toml（agents：req_analyst/architect/blind_judge…）
+// 用法：DUCTILE_CONFIG=/tmp/regchain_data/regconf.toml DUCTILE_DATA=/tmp/cmp1_data ductile run pipelines/cmp1_tau.pipeline "<story>"
+Pipeline("cmp1_tau", "τ_off 阶梯 vs 固定高档盲评对比", cwd="/tmp/cmp1_data")
+
+  // ── 臂 A：阶梯（light 起步，τ_off 自报升档）──
+  .proc("a_req", llm(req_analyst, tier=light))
+    .desc("臂A S0：light 档起步（τ_off 协议注入）")
+  .proc("d_a_req", write(to="/tmp/cmp1_data/cmp_ladder_req.txt", content=@a_req))
+    .desc("落盘臂A S0 产物")
+    .when(@a_req.must_have)
+
+  // ── 臂 B：固定高档 27B ──
+  .proc("b_req", llm(req_analyst, tier=high))
+    .desc("臂B S0：27B 固定档")
+  .proc("d_b_req", write(to="/tmp/cmp1_data/cmp_fixed_req.txt", content=@b_req))
+    .desc("落盘臂B S0 产物")
+    .when(@b_req.must_have)
+
+  // ── 材料生成 + 盲评（文件读取排序：@d_a_req/@d_b_ref 存在即先执行）──
+  .proc("mat", run("CMP_TB=/tmp/cmp1_data CMP_FILE_FMT='{tb}/cmp_{arm}_{seg}.txt' CMP_SEGS='{\"s0\": [[\"甲\",\"ladder\",\"req\"], [\"乙\",\"fixed\",\"req\"]]}' CMP_RUBRIC='{\"s0\": \"需求提炼：隐含约束捕获、结构清晰、无幻觉、范围边界明确\"}' python3 /home/beef/projects/ductile/experiments/cmp_materials.py > /tmp/cmp1_data/cmp_mat.log 2>&1 && echo mat-ok"))
+    .desc("两臂产物匿名化（甲乙 REG_ROUND 轮换）")
+    .needs(@d_a_req, @d_b_req)
+  .proc("m0", read(from="/tmp/cmp1_data/cmp_s0.txt"))
+    .needs(@mat)
+  .proc("j0", llm(blind_judge, prompt="{@m0}"))
+    .desc("盲评（独立裁判）")
+    .needs(@m0)
+  .proc("d_j", write(to="/tmp/cmp1_data/cmp_judge_s0.txt", content=@j0))
+    .desc("落盘盲评")
+    .when(@j0.scores)
+
+  .proc("deliver", run("echo cmp1-round-done"))
+    .deliver(@d_j)

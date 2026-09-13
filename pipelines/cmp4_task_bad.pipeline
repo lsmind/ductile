@@ -1,0 +1,7 @@
+Pipeline("cmp4_task_bad", "本管线的目标是把用户故事转写成俳句（5-7-5 三行，主题：秋夜）", cwd="/tmp/cmp4_data")
+
+  .proc("gen", run("echo '{\"must_have\": \"素材归档\", \"constraints\": \"低预算\", \"scale\": \"每天几十GB\", \"users\": \"5人团队\", \"out_of_scope\": \"自动剪辑\"}'"))
+    .desc("错配交付：要求俳句，却交付结构化需求 JSON（意图违背形态）")
+
+  .proc("deliver", run("echo done"))
+    .deliver(@gen)

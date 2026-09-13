@@ -1,0 +1,7 @@
+Pipeline("cmp2_bad", "制造 class2 incident：坏 agent 名", cwd="/tmp/cmp2_data")
+
+  .proc("gen", llm(judge_x, prompt="给这个故事打分：一只狼救了一只兔子，主题是救赎。输出 JSON：score(0-100) + reason"))
+    .desc("坏 agent 名：judge_x 不存在 → 失败落 incident（上游投毒形态）")
+
+  .proc("deliver", run("echo done"))
+    .deliver(@gen)

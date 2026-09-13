@@ -1,0 +1,39 @@
+#!/usr/bin/env -S ductile run
+// cmp3_route.pipeline — 对比项目3：学习选路 vs 静态档位（选路质量+成本）
+// 问题：impl_prefs 学习偏好选的档位 vs 写死 medium 档，产出质量与成本差多少？
+//       （成本从 runs 表读两臂 token/latency，盲评读质量）
+// 编排模式：selftest 同款——run 链 exit code + needs 排序
+// 前置：DUCTILE_CONFIG=/tmp/regchain_data/regconf.toml（agents：req_analyst/architect/blind_judge…）
+// 用法：DUCTILE_CONFIG=/tmp/regchain_data/regconf.toml DUCTILE_DATA=/tmp/cmp3_data ductile run pipelines/cmp3_route.pipeline "<story>"
+Pipeline("cmp3_route", "学习选路 vs 静态档位盲评对比", cwd="/tmp/cmp3_data")
+
+  // ── 臂 A：学习选路（agent 声明 tiers，无 tier= → 走 impl_prefs）──
+  .proc("a_req", llm(req_analyst))
+    .desc("臂A S0：学习选路（prefs 生效，阶梯可升档）")
+  .proc("d_a", write(to="/tmp/cmp3_data/cmp_pref_req.txt", content=@a_req))
+    .desc("落盘臂A 产物")
+    .when(@a_req.must_have)
+
+  // ── 臂 B：静态档位 medium ──
+  .proc("b_req", llm(req_analyst, tier=medium))
+    .desc("臂B S0：medium 固定档（对照）")
+  .proc("d_b", write(to="/tmp/cmp3_data/cmp_static_req.txt", content=@b_req))
+    .desc("落盘臂B 产物")
+    .when(@b_req.must_have)
+
+  // ── 材料生成（两臂一段 s0）──
+  .proc("mat", run("CMP_TB=/tmp/cmp3_data CMP_FILE_FMT='{tb}/cmp_{arm}_{seg}.txt' CMP_SEGS='{\"s0\": [[\"甲\",\"pref\",\"req\"], [\"乙\",\"static\",\"req\"]]}' CMP_RUBRIC='{\"s0\": \"需求提炼：隐含约束捕获、结构清晰、无幻觉、范围边界明确\"}' python3 /home/beef/projects/ductile/experiments/cmp_materials.py > /tmp/cmp3_data/cmp_mat.log 2>&1 && echo mat-ok"))
+    .desc("匿名化（pref 臂 vs static 臂）")
+    .needs(@d_a, @d_b)
+
+  .proc("m0", read(from="/tmp/cmp3_data/cmp_s0.txt"))
+    .needs(@mat)
+  .proc("j0", llm(blind_judge, prompt="{@m0}"))
+    .desc("盲评（独立裁判）")
+    .needs(@m0)
+  .proc("d_j", write(to="/tmp/cmp3_data/cmp_judge_s0.txt", content=@j0))
+    .desc("落盘盲评")
+    .when(@j0.scores)
+
+  .proc("deliver", run("echo cmp3-round-done"))
+    .deliver(@d_j)

@@ -1,0 +1,37 @@
+#!/usr/bin/env -S ductile run
+// cmp2_triage.pipeline — 对比项目2：自动 triage 归因 vs 无 triage（incident 处置效率）
+// 问题：incident 落库后自动判别（canary 重跑→green/red）vs 只落库不判别，
+//       操作者拿到手的归因质量/信息量差多少？（产物=triage 报告文本）
+// 编排模式：selftest 同款——run 链 exit code + needs 排序（纯 Text 无字段可门禁）
+// 前置：DUCTILE_CONFIG=/tmp/regchain_data/regconf.toml（agents：req_analyst/architect/blind_judge…）
+// 用法：DUCTILE_CONFIG=/tmp/regchain_data/regconf.toml DUCTILE_DATA=/tmp/cmp2_data ductile run pipelines/cmp2_triage.pipeline "x"
+Pipeline("cmp2_triage", "自动 triage 归因 vs 无 triage 盲评对比", cwd="/tmp/cmp2_data")
+
+  // ── 制造同构 incident：坏 agent 名（class2 上游投毒）──
+  .proc("mk_inc", run("DUCTILE_DATA=/tmp/cmp2_data ductile run /home/beef/projects/ductile/pipelines/cmp2_bad.pipeline badagent-incident > /tmp/cmp2_data/cmp2_bad.log 2>&1; echo mk-inc-done"))
+
+  // ── 臂 A：自动 triage ──
+  .proc("tri", run("DUCTILE_DATA=/tmp/cmp2_data ductile incident list > /tmp/cmp2_data/inc_list.txt 2>&1 && ID=$(grep -oE '^#[0-9]+' /tmp/cmp2_data/inc_list.txt | head -1 | tr -d '#') && [ -n $ID ] && DUCTILE_DATA=/tmp/cmp2_data ductile incident triage $ID > /tmp/cmp2_data/cmp_triaged.txt 2>&1 && echo tri-ok"))
+    .desc("臂A：incident 自动 triage（canary 重跑判别）")
+    .needs(@mk_inc)
+
+  // ── 臂 B：无 triage（落库即止）──
+  .proc("raw", run("DUCTILE_DATA=/tmp/cmp2_data ductile incident list > /tmp/cmp2_data/cmp_raw_inc.txt 2>&1 && echo raw-ok"))
+    .desc("臂B：仅落库（无判别）")
+    .needs(@mk_inc)
+
+  // ── 盲评 ──
+  .proc("mat", run("python3 /home/beef/projects/ductile/experiments/cmp2_materials.py > /tmp/cmp2_data/cmp2_mat.log 2>&1 && echo mat-ok"))
+    .desc("两份处置报告匿名化")
+    .needs(@tri, @raw)
+  .proc("m0", read(from="/tmp/cmp2_data/cmp_s0.txt"))
+    .needs(@mat)
+  .proc("j0", llm(blind_judge, prompt="{@m0}"))
+    .desc("盲评：归因质量/可操作性/信息量")
+    .needs(@m0)
+  .proc("d_j", write(to="/tmp/cmp2_data/cmp_judge_s0.txt", content=@j0))
+    .desc("落盘盲评")
+    .when(@j0.scores)
+
+  .proc("deliver", run("echo cmp2-round-done"))
+    .deliver(@d_j)
