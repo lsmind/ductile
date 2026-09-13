@@ -87,6 +87,22 @@ pub fn migrate(conn: &Connection) {
         conn.execute_batch("ALTER TABLE patches ADD COLUMN origin TEXT DEFAULT 'human';")
             .ok();
     }
+    // v0.18.6 P0-刀2：incidents 补 triage/triage_at（判别自动化落点）。
+    // 老库同款 pragma 幂等迁移。
+    let has_triage = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('incidents') WHERE name='triage'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    if has_triage == 0 {
+        conn.execute_batch(
+            "ALTER TABLE incidents ADD COLUMN triage TEXT DEFAULT '';
+             ALTER TABLE incidents ADD COLUMN triage_at TEXT DEFAULT '';",
+        )
+        .ok();
+    }
 }
 
 /// 非致命版 open：打不开/没权限返回 Err（incident 记录等旁路写入用，
@@ -210,7 +226,9 @@ pub const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS pipelines (
             evidence    TEXT DEFAULT '',
             status      TEXT NOT NULL DEFAULT 'open',
             created_at  TEXT DEFAULT '',
-            closed_at   TEXT DEFAULT ''
+            closed_at   TEXT DEFAULT '',
+            triage      TEXT DEFAULT '',
+            triage_at   TEXT DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status);
         CREATE TABLE IF NOT EXISTS l4_reviews (
@@ -282,6 +300,9 @@ pub struct IncidentRow {
     pub status: String,
     pub created_at: String,
     pub closed_at: String,
+    /// v0.18.6 P0-刀2：判别 triage 结果（green/red/ambiguous/nocanary）
+    pub triage: String,
+    pub triage_at: String,
 }
 
 /// v0.15 canary 行（canary.rs 的查询载体）

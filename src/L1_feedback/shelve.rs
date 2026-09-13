@@ -42,6 +42,18 @@ pub fn classify_discriminant(pass_rate: Option<f64>) -> Discriminant {
     }
 }
 
+impl Discriminant {
+    /// v0.18.6 P0-刀2：triage 落库标签（incidents.triage 列）。
+    pub fn to_label(&self) -> &'static str {
+        match self {
+            Discriminant::Green => "green",
+            Discriminant::Red => "red",
+            Discriminant::Ambiguous => "ambiguous",
+            Discriminant::NoCanary => "nocanary",
+        }
+    }
+}
+
 /// 搁置进 designer 审队列（模糊判别的唯一合法去向）。
 pub fn shelve_conn(
     conn: &Connection,

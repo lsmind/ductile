@@ -852,6 +852,65 @@ fn exec_search(
     }
 }
 
+/// v0.18.6 P0-刀1：llm 节点成功后自动播种 canary。
+/// input = resolved_prompt（输入快照——canary 语义是「已知好输入」）
+/// expect = schema 首字段非空（契约的最小可判形态；无 schema 用默认 @self.ok==1）
+/// 旁路静默（open_try 失败/写失败都不搞死主管线）；cap 与去重在 seed_canary_conn 内。
+fn seed_canary_after_llm_success(resolved_prompt: &str, schema: &str) {
+    if resolved_prompt.is_empty() {
+        return;
+    }
+    let Ok(conn) = crate::db::open_try() else {
+        return;
+    };
+    let pipeline = inner_pipeline_name();
+    let proc = inner_proc_name();
+    let first_field = schema.split(',').next().map(|s| s.trim()).unwrap_or("");
+    let expect = if first_field.is_empty() {
+        String::new()
+    } else {
+        format!("@self.{} != \"\"", first_field)
+    };
+    if let Some(id) = crate::canary::seed_canary_conn(
+        &conn,
+        &pipeline,
+        &proc,
+        resolved_prompt,
+        &expect,
+        "auto-seed: first win",
+    ) {
+        eprintln!(
+            "    -> canary auto-seeded #{} for {}::{}",
+            id, pipeline, proc
+        );
+    }
+}
+
+/// v0.18.6 P0-刀2：canary 重跑（判别实验的执行半边）。
+/// 用归档的输入快照原样再打一次 llm bridge，返回 stdout（含 ##DSL_RESULT 字段）。
+/// bridge 启动失败/非零退出 → None（判别证据未取得，调用方落 NoCanary）。
+/// 默认模型（config.toml [llm]）——快照未存 model（canary 语义是「已知好输入」，
+/// 模型漂移本身就是要检测的信号之一，不钉死）。
+pub fn replay_canary_llm(input: &str) -> Option<String> {
+    if input.trim().is_empty() {
+        return None;
+    }
+    let bridge = find_bridge("llm_bridge.py");
+    if bridge.is_empty() {
+        return None;
+    }
+    let out = std::process::Command::new("python3")
+        .arg(&bridge)
+        .arg("--prompt")
+        .arg(input)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
 fn exec_llm(
     _impl_: &Impl,
     topic: &str,
@@ -1017,6 +1076,8 @@ fn exec_llm(
         && extract_string_arg("model", body).is_empty();
     let mut ladder: Vec<String> = Vec::new();
     let mut tier_idx = 0usize;
+    // v0.18.6 P0-刀4：τ_off 协议注入文本（阶梯节点专用，非阶梯不注入）
+    let mut partial_note = String::new();
     if use_ladder {
         let agent = agent_cfg.as_ref().unwrap();
         let tiers_cfg = crate::config::load_tiers_config();
@@ -1030,6 +1091,18 @@ fn exec_llm(
         )?;
         ladder = l;
         tier_idx = idx;
+        // v0.18.6 P0-刀4（PyroDash 2607.20327 借鉴）：τ_off 自报协议注入。
+        // 阶梯节点在输出契约外多报两个字段——模型中途自认能力不足时
+        // escalate=true + partial=已完成的推理/已确定的字段。引擎据此单次
+        // 升档并携带 partial（从精确失败点续做，不整个重跑）。策略在引擎
+        // 层不在权重里：模型只发自报信号，信不信由引擎校准。
+        partial_note = format!(
+            "\n\n# 能力自评协议（可选）\n如果你在作答过程中判断本任务超出你的能力（例如需要更长的多步推理、\
+更专业的领域知识、或你对答案没有把握），在输出的 JSON 对象中额外加入字段：\n\
+\"escalate\": true\n\"partial\": \"<你已完成的推理过程或已确定的字段，尽量具体>\"\n\
+其余字段照常输出。不需要求助时不要输出这两个字段。partial 会被转交给\
+更强的模型续做——写得越具体，续做质量越高，你已完成的工作不会被浪费。"
+        );
     }
     eprintln!(
         "    -> llm: model={} schema={} input.len={}{}",
@@ -1057,7 +1130,8 @@ fn exec_llm(
 
     let mut args: Vec<String> = Vec::new();
     args.push("--prompt".into());
-    args.push(resolved_prompt.clone());
+    // 刀4：阶梯节点的 prompt 追加自评协议
+    args.push(format!("{}{}", resolved_prompt, partial_note));
     if !resolved_template.is_empty() {
         args.push("--template".into());
         args.push(resolved_template);
@@ -1069,7 +1143,7 @@ fn exec_llm(
     }
     if !resolved_schema.is_empty() {
         args.push("--schema".into());
-        args.push(resolved_schema);
+        args.push(resolved_schema.clone());
     }
     if !count.is_empty() {
         args.push("--count".into());
@@ -1083,6 +1157,8 @@ fn exec_llm(
         let agent_timeout = agent_cfg.as_ref().map(|a| a.timeout_secs).unwrap_or(0);
         let mut last_err = String::new();
         let mut i = tier_idx;
+        // 刀4：上游档位传来的 partial（PyroDash 单次交接语义——带部分轨迹升档）
+        let mut carried_partial: Option<String> = None;
         while i < ladder.len() {
             let tier_name = &ladder[i];
             let Some(tier) = tiers_cfg.tiers.get(tier_name) else {
@@ -1090,6 +1166,16 @@ fn exec_llm(
                 return Err(format!("tier '{}' vanished from config mid-run", tier_name));
             };
             let mut t_args = args.clone();
+            // 刀4：携带 partial 续做（不从零重跑——上游已完成的工作是资产）
+            if let Some(p) = &carried_partial {
+                t_args[1] = format!(
+                    "{}\n\n# 上一档位（较弱模型）的自报升级与部分工作\n\
+它判断本任务超出其能力，请求更强的模型续做。它已完成的工作：\n{}\n\
+请在此基础上继续完成，不要从零重做；如果它的部分结论有错，指出并纠正。",
+                    t_args[1], p
+                );
+                carried_partial = None;
+            }
             t_args.push("--model".into());
             t_args.push(tier.model.clone());
             eprintln!(
@@ -1107,12 +1193,47 @@ fn exec_llm(
                         if !kvs.is_empty() {
                             eprintln!(
                                 "    -> llm result: {} fields (tier={})",
-                                kvs.len(),
-                                tier_name
+                                kvs.len(), tier_name
                             );
+                            // 刀4：τ_off 检测——模型自报 escalate=true 时携带 partial
+                            // 升档续做（PyroDash 单次交接）。只有还有更高档可升才交棒；
+                            // 顶档自报 = 诚实记录后接受（不强求也不丢弃）。
+                            let escal: String = kvs
+                                .iter()
+                                .find(|(k, _)| k == "escalate")
+                                .map(|(_, v)| v.trim().to_lowercase())
+                                .unwrap_or_default();
+                            let partial: Option<String> = kvs
+                                .iter()
+                                .find(|(k, _)| k == "partial")
+                                .map(|(_, v)| v.chars().take(4000).collect::<String>());
+                            if (escal == "true" || escal == "1") && i + 1 < ladder.len() {
+                                eprintln!(
+                                    "    -> llm self-escalate: tier {} 自报能力不足，携带 partial 升 {} (PyroDash handoff)",
+                                    tier_name, ladder[i + 1]
+                                );
+                                carried_partial = Some(partial.unwrap_or_else(|| {
+                                    "(模型自报升级但未提供 partial——从头续做)".to_string()
+                                }));
+                                i += 1;
+                                continue;
+                            }
+                            if escal == "true" || escal == "1" {
+                                eprintln!(
+                                    "    -> llm self-escalate at top tier {}: 无更高档可升，接受结果（自报已记录）",
+                                    tier_name
+                                );
+                            }
                             let mut enriched = kvs;
                             enriched.push(("meta_tier".into(), tier_name.clone()));
                             enriched.push(("meta_model_id".into(), tier.model.clone()));
+                            // v0.18.6 P0-刀1：llm 成功 → 自动播种 canary。
+                            // 保真：快照含协议尾巴（重放字节级还原当时输入；
+                            // tier2+ 的 carried partial 变体不入档——那是单次情境）。
+                            seed_canary_after_llm_success(
+                                &format!("{}{}", resolved_prompt, partial_note),
+                                &resolved_schema,
+                            );
                             return Ok(Value::Text(encode_structured_result(
                                 &enriched,
                                 &stdout_text,
@@ -1171,6 +1292,8 @@ fn exec_llm(
         if let Some(kvs) = parse_dsl_result_block(&stdout_text) {
             if !kvs.is_empty() {
                 eprintln!("    -> llm result: {} fields", kvs.len());
+                // v0.18.6 P0-刀1：llm 成功 → 自动播种 canary
+                seed_canary_after_llm_success(&resolved_prompt, &resolved_schema);
                 return Ok(Value::Text(encode_structured_result(&kvs, &stdout_text)));
             }
         }
@@ -2052,6 +2175,38 @@ pub fn exec_script_call(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 刀4：τ_off 自报信号解析（PyroDash handoff 的引擎侧半边）。
+    /// parse_dsl_result_block 提取 escalate/partial → 引擎判定是否携带升档。
+    #[test]
+    fn tau_off_signal_parsing() {
+        let out = "##DSL_RESULT\nok=1\nescalate=true\npartial=已化简为 x^2=t 的换元，剩余求根未完成\nscore=0\n##DSL_END";
+        let kvs = parse_dsl_result_block(out).unwrap();
+        let escal: String = kvs
+            .iter()
+            .find(|(k, _)| k == "escalate")
+            .map(|(_, v)| v.trim().to_lowercase())
+            .unwrap_or_default();
+        let partial = kvs
+            .iter()
+            .find(|(k, _)| k == "partial")
+            .map(|(_, v)| v.clone());
+        assert_eq!(escal, "true");
+        assert_eq!(partial.as_deref(), Some("已化简为 x^2=t 的换元，剩余求根未完成"));
+        // 无自报：escalate 空 → 不升档
+        let calm = "##DSL_RESULT\nok=1\nscore=85\n##DSL_END";
+        let kvs2 = parse_dsl_result_block(calm).unwrap();
+        assert!(kvs2.iter().find(|(k, _)| k == "escalate").is_none());
+        // 数字形态 1 也认
+        let alt = "##DSL_RESULT\nescalate=1\npartial=p\n##DSL_END";
+        let kvs3 = parse_dsl_result_block(alt).unwrap();
+        let e3: String = kvs3
+            .iter()
+            .find(|(k, _)| k == "escalate")
+            .map(|(_, v)| v.trim().to_lowercase())
+            .unwrap_or_default();
+        assert!(e3 == "1");
+    }
 
     fn default_impl() -> Impl {
         Impl {

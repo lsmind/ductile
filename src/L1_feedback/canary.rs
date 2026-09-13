@@ -54,6 +54,53 @@ pub fn add_canary_conn(
     Ok(conn.last_insert_rowid())
 }
 
+/// 运行期自动播种（v0.18.6 P0-刀1）：llm 节点首次成功即归档 canary。
+/// 把“设计期自觉”改成“运行期制度”——canary=0 是归因闸硬门禁永远关死的根因。
+/// 旁路写入（open_try 失败静默）：播种不能搞死主管线。
+/// cap: 每 (pipeline, proc_name) 最多 CANARY_AUTO_CAP 条，防膨胀。
+pub const CANARY_AUTO_CAP: i64 = 3;
+
+pub fn seed_canary_conn(
+    conn: &Connection,
+    pipeline: &str,
+    proc_name: &str,
+    input: &str,
+    expect: &str,
+    note: &str,
+) -> Option<i64> {
+    let cap = CANARY_AUTO_CAP;
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM canaries WHERE pipeline=?1 AND proc_name=?2",
+            rusqlite::params![pipeline, proc_name],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if count >= cap {
+        return None;
+    }
+    // 去重：同输入已归档则不重复
+    let dup: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM canaries WHERE pipeline=?1 AND proc_name=?2 AND input=?3",
+            rusqlite::params![pipeline, proc_name, input],
+            |r| r.get(0),
+        )
+        .ok();
+    if dup.is_some() {
+        return None;
+    }
+    let expect = normalize_expect(expect);
+    let note = if note.is_empty() { "auto-seed" } else { note };
+    let now = now_str();
+    conn.execute(
+        "INSERT INTO canaries (pipeline, proc_name, input, expect, note, saved_at) VALUES (?1,?2,?3,?4,?5,?6)",
+        rusqlite::params![pipeline, proc_name, input, expect, note, now],
+    )
+    .ok()
+    .map(|_| conn.last_insert_rowid())
+}
+
 pub fn list_canaries_conn(conn: &Connection, proc_name: Option<&str>) -> Vec<CanaryRow> {
     let mut sql =
         "SELECT id, pipeline, proc_name, input, expect, note, saved_at FROM canaries".to_string();
@@ -185,5 +232,26 @@ mod tests {
         rm_canary_conn(&conn, id).unwrap();
         assert!(list_canaries_conn(&conn, Some("judge")).is_empty());
         assert!(rm_canary_conn(&conn, id).is_err());
+    }
+
+    #[test]
+    fn canary_auto_seed_first_win_dedup_cap() {
+        let conn = mem_conn();
+        // 首胜归档
+        let a = seed_canary_conn(&conn, "p", "arch", "prompt-A", "", "");
+        assert!(a.is_some());
+        // 同输入去重：不重复归档
+        assert!(seed_canary_conn(&conn, "p", "arch", "prompt-A", "", "").is_none());
+        // cap=3：同 (pipeline, proc) 最多 3 条
+        assert!(seed_canary_conn(&conn, "p", "arch", "prompt-B", "", "").is_some());
+        assert!(seed_canary_conn(&conn, "p", "arch", "prompt-C", "", "").is_some());
+        assert!(seed_canary_conn(&conn, "p", "arch", "prompt-D", "", "").is_none());
+        // 不同 proc 独立计数
+        assert!(seed_canary_conn(&conn, "p", "brk", "prompt-D", "", "").is_some());
+        // expect 默认归一化 + note 默认 auto-seed
+        let rows = list_canaries_conn(&conn, Some("arch"));
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].expect, "@self.ok == 1");
+        assert_eq!(rows[0].note, "auto-seed");
     }
 }

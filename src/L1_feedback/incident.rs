@@ -98,7 +98,7 @@ pub fn record_incident_conn(
 }
 
 pub fn list_incidents_conn(conn: &Connection, status: Option<&str>) -> Vec<IncidentRow> {
-    let mut sql = "SELECT id, pipeline, proc_name, signals, err_code, evidence, status, created_at, closed_at FROM incidents".to_string();
+    let mut sql = "SELECT id, pipeline, proc_name, signals, err_code, evidence, status, created_at, closed_at, triage, triage_at FROM incidents".to_string();
     if status.is_some() {
         sql.push_str(" WHERE status = ?1");
     }
@@ -118,6 +118,8 @@ pub fn list_incidents_conn(conn: &Connection, status: Option<&str>) -> Vec<Incid
             status: row.get(6)?,
             created_at: row.get(7)?,
             closed_at: row.get(8)?,
+            triage: row.get(9)?,
+            triage_at: row.get(10)?,
         })
     };
     match status {
@@ -145,6 +147,67 @@ pub fn close_incident_conn(conn: &Connection, id: i64, resolution: &str) -> Resu
     Ok(())
 }
 
+/// v0.18.6 P0-刀2：incident 自动 triage。
+/// 判别实验语义：pass_rate 来自「用 canary 已知好输入重跑本节点」的结果。
+/// 本函数是纯存储层——latest_result_text 为该次重跑的输出快照；
+/// 空 = 未重跑（incident 落库时的自动调用即此态）→ 诚实落 NoCanary，
+/// 绝不用空文本对谓词求值（会把「没证据」假判成 red/本地问题）。
+/// 真实重跑由 CLI `ductile incident triage <id>` 走 L2 bridge 执行后回写。
+/// 返回 triage 结果（green/red/ambiguous/nocanary）。
+pub fn triage_incident_conn(
+    conn: &Connection,
+    id: i64,
+    latest_result_text: &str,
+) -> Result<String, String> {
+    // 读 incident 行拿 (pipeline, proc_name)
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT pipeline, proc_name FROM incidents WHERE id = ?1",
+            rusqlite::params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    let Some((pipeline, proc_name)) = row else {
+        return Err(format!("incident {id} not found"));
+    };
+    // 未重跑（空快照）→ NoCanary。有 canary 也一样：判别实验没做就是没做。
+    let pass_rate = if latest_result_text.is_empty() {
+        None
+    } else {
+        // 该节点的 canary 全集 → pass_rate
+        let mut stmt = conn
+            .prepare("SELECT expect FROM canaries WHERE pipeline = ?1 AND proc_name = ?2")
+            .map_err(|e| e.to_string())?;
+        let expects: Vec<String> = stmt
+            .query_map(rusqlite::params![pipeline, proc_name], |r| r.get(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        if expects.is_empty() {
+            None
+        } else {
+            let passes = expects
+                .iter()
+                .filter(|e| crate::L1_feedback::canary::eval_expect(e, latest_result_text))
+                .count();
+            Some(passes as f64 / expects.len() as f64)
+        }
+    };
+    let disc = crate::L1_feedback::shelve::classify_discriminant(pass_rate)
+        .to_label()
+        .to_string();
+    let n = conn
+        .execute(
+            "UPDATE incidents SET triage = ?1, triage_at = ?2 WHERE id = ?3",
+            rusqlite::params![disc, now_str(), id],
+        )
+        .map_err(|e| format!("triage write failed: {e}"))?;
+    if n == 0 {
+        return Err(format!("incident {id} vanished"));
+    }
+    Ok(disc)
+}
+
 fn now_str() -> String {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -168,7 +231,9 @@ mod tests {
                 evidence TEXT DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'open',
                 created_at TEXT DEFAULT '',
-                closed_at TEXT DEFAULT ''
+                closed_at TEXT DEFAULT '',
+                triage TEXT DEFAULT '',
+                triage_at TEXT DEFAULT ''
             );",
         )
         .unwrap();
@@ -249,5 +314,41 @@ mod tests {
         let closed = list_incidents_conn(&conn, Some("closed"));
         assert_eq!(closed.len(), 1);
         assert!(closed[0].evidence.contains("resolved: class3"));
+    }
+
+    #[test]
+    fn triage_empty_snapshot_is_nocanary_honestly() {
+        let conn = mem_conn();
+        // 造一个有 canary 的节点 + 一个 open incident
+        conn.execute_batch(
+            "CREATE TABLE canaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pipeline TEXT NOT NULL, proc_name TEXT NOT NULL,
+                input TEXT NOT NULL, expect TEXT NOT NULL DEFAULT '@self.ok == 1',
+                note TEXT DEFAULT '', saved_at TEXT DEFAULT '');",
+        )
+        .unwrap();
+        crate::L1_feedback::canary::add_canary_conn(
+            &conn, "p", "arch", "好输入", "@self.ok == 1", "n",
+        )
+        .unwrap();
+        let id = record_incident_conn(&conn, "p", "arch", "crash", "err", "");
+        // 空快照（incident 落库即自动 triage 的形态）：即使有 canary，
+        // 判别实验没做就是没做——绝不把「没证据」假判成 red。
+        let disc = triage_incident_conn(&conn, id, "").unwrap();
+        assert_eq!(disc, "nocanary");
+        let rows = list_incidents_conn(&conn, None);
+        assert_eq!(rows[0].triage, "nocanary");
+        assert!(!rows[0].triage_at.is_empty());
+        // 真重跑后的快照（canary 全过）→ green（class2 上游投毒，本节点清白）
+        let good = "##DSL_RESULT\nok=1\nscore=85\n##DSL_END";
+        let disc2 = triage_incident_conn(&conn, id, good).unwrap();
+        assert_eq!(disc2, "green");
+        // 全挂 → red（class3/4 本地问题）
+        let bad = "##DSL_RESULT\nok=0\n##DSL_END";
+        let disc3 = triage_incident_conn(&conn, id, bad).unwrap();
+        assert_eq!(disc3, "red");
+        // 不存在的 incident
+        assert!(triage_incident_conn(&conn, 999, "").is_err());
     }
 }

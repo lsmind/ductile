@@ -137,6 +137,12 @@ pub fn exec_pipeline(
     // v0.11.1 Null Object：--policy 缺席不再走 Option 分支，统一为 Evaluator 多态调用。
     let mut pl = apply_patches(pl);
     crate::eval::evaluator(policy).apply(&mut pl, topic);
+    // v0.18.6 P0-刀3：L4 复核常开。fail verdict 确定性记录（免费真信号）
+    // 永远开；Success 侧真实 LLM 独立复核走 DUCTILE_L4_REVIEW=1 选入
+    //（防引擎自证：回显 deliver 摘要记 pass 会污染校准集）。
+    let l4_review_success = std::env::var("DUCTILE_L4_REVIEW")
+        .map(|v| v == "1")
+        .unwrap_or(false);
 
     // v0.10: e-graph 提取模式（.pick(egraph) 或 DUCTILE_EGRAPH=1）。
     // 两层分工：e-graph 决定"谁跑"（class 代表/序/别名），
@@ -425,7 +431,7 @@ pub fn exec_pipeline(
             })
             .unwrap_or_else(|| "unknown error".to_string());
         // v0.15 L4 复核（log-only；enforcing 时 fail verdict 升格为管线失败）
-        if let Some(l4_err) = l4_finalize(&pl, &results, Some(&root_msg)) {
+        if let Some(l4_err) = l4_finalize(&pl, &results, Some(&root_msg), l4_review_success) {
             return ExecResult::Failed {
                 error: format!(
                     "critical proc '{}' failed: {}; {}",
@@ -444,7 +450,7 @@ pub fn exec_pipeline(
             eprintln!("  [pipeline] bypass failures tolerated — critical chain intact");
         }
         // v0.15 L4 复核：Success 也记录（log-only 攒标签数据面）
-        if let Some(l4_err) = l4_finalize(&pl, &results, None) {
+        if let Some(l4_err) = l4_finalize(&pl, &results, None, l4_review_success) {
             return ExecResult::Failed {
                 error: l4_err,
                 partial: results,
@@ -521,29 +527,32 @@ fn exec_proc(
 fn record_incident(pl: &Pipeline, proc: &Proc, err: &str) {
     if let Ok(conn) = crate::db::open_try() {
         let code = errflow::classify(err).code().to_string();
-        crate::incident::record_incident_conn(&conn, &pl.name, &proc.name, &code, err, "");
+        let id = crate::incident::record_incident_conn(&conn, &pl.name, &proc.name, &code, err, "");
+        // v0.18.6 P0-刀2：incident 落库即自动 triage（判别自动化——归因闸
+        // 从"可调用"变"必经"）。旁路静默，失败不搞死主管线。
+        // latest_result_text 留空 = 无输出快照可比，判 nocanary/按 canary 谓词对空文本求值。
+        let _ = crate::incident::triage_incident_conn(&conn, id, "");
     }
 }
 
 /// v0.15 L4 端到端复核（cognition spec §7 缺口 #4）：管线收尾 log-only 记录。
-/// DUCTILE_L4=1 开启；Success→pass（deliver 摘要），Failed→fail（致命错误）。
+/// v0.18.6 P0-刀3：常开（拆 DUCTILE_L4 环境门——焊死的门等于没有门）。
+/// - fatal 有值 → fail verdict 确定性记录（免费真信号，不请 LLM）
+/// - fatal None + review_success → 独立会话 LLM 真复核（review_prompt，
+///   不带管线内部细节——产出者不自证清白，防橡皮图章）
+/// - fatal None + !review_success → pass verdict 落库（evidence 标注
+///   "no independent review"，校准者一眼可辨，不冒充真复核）
 /// 旁路写入（open_try 失败静默）——复核记录不能搞死主管线。
 /// enforcing 阶段（≥8 标签且一致率≥70%）升格：fail verdict 回写为 pipeline 错误。
 fn l4_finalize(
     pl: &Pipeline,
     results: &BTreeMap<String, Value>,
     fatal: Option<&str>,
+    review_success: bool,
 ) -> Option<String> {
     // cfg!(test) 守卫：cargo test 继承 shell 的 DUCTILE_L4=1 时曾把单测的
     // exec_pipeline 复核写进真库（环境泄漏脚枪）
     if cfg!(test) {
-        return None;
-    }
-    if std::env::var("DUCTILE_L4")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-        != true
-    {
         return None;
     }
     let Ok(conn) = crate::db::open_try() else {
@@ -573,12 +582,43 @@ fn l4_finalize(
             "fail",
             format!("critical: {}", msg.chars().take(2000).collect::<String>()),
         ),
+        None if review_success => {
+            // 独立会话真复核：意图 = topic（exec_pipeline 无独立 intent 字段，
+            // topic 即任务意图的最接近代理）+ deliver 摘要，不带管线内部细节。
+            let intent = pl.description.chars().take(2000).collect::<String>();
+            let prompt = crate::l4::review_prompt(&intent, &deliver_summary);
+            match crate::L2_orchestration::steps::replay_canary_llm(&prompt) {
+                Some(out) => {
+                    let first = out
+                        .lines()
+                        .map(str::trim)
+                        .find(|l| !l.is_empty())
+                        .unwrap_or("");
+                    let (v, e) = if first.to_lowercase().starts_with("fail") {
+                        ("fail", first.chars().take(2000).collect::<String>())
+                    } else {
+                        ("pass", first.chars().take(2000).collect::<String>())
+                    };
+                    (v, format!("[independent review] {e}"))
+                }
+                None => (
+                    "pass",
+                    format!(
+                        "[no independent review: bridge unavailable] {}",
+                        deliver_summary.chars().take(1800).collect::<String>()
+                    ),
+                ),
+            }
+        }
         None => (
             "pass",
             if deliver_summary.is_empty() {
                 "no deliver proc; all procs completed".to_string()
             } else {
-                deliver_summary.chars().take(2000).collect::<String>()
+                format!(
+                    "[no independent review] {}",
+                    deliver_summary.chars().take(1800).collect::<String>()
+                )
             },
         ),
     };

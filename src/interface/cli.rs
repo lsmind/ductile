@@ -146,6 +146,10 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         "incident" if args.len() >= 3 && args[2] == "close" && args.len() >= 5 => {
             cmd_incident_close(&args[3], &args[4..].join(" "))
         }
+        // v0.18.6 P0-刀2：判别实验真重跑（canary 快照 → bridge → pass_rate → triage 回写）
+        "incident" if args.len() >= 4 && args[2] == "triage" => {
+            cmd_incident_triage(&args[3])
+        }
         // v0.15 L4 端到端复核（缺口 #4，冷启动 log-only）
         "l4" if args.len() >= 3 && args[2] == "list" => cmd_l4_list(),
         "l4" if args.len() >= 3 && args[2] == "status" => cmd_l4_status(),
@@ -258,11 +262,86 @@ fn cmd_incident_list(status: Option<&str>) -> Result<i32, String> {
     }
     for r in rows {
         println!(
-            "#{} [{}] {}::{} code={} signals={} at={}",
-            r.id, r.status, r.pipeline, r.proc_name, r.err_code, r.signals, r.created_at
+            "#{} [{}]{} {}::{} code={} signals={} at={}",
+            r.id,
+            r.status,
+            if r.triage.is_empty() {
+                String::new()
+            } else {
+                format!(" (triage:{})", r.triage)
+            },
+            r.pipeline,
+            r.proc_name,
+            r.err_code,
+            r.signals,
+            r.created_at
         );
         println!("    {}", crate::trunc_chars(&r.evidence, 110));
     }
+    Ok(0)
+}
+
+/// v0.18.6 P0-刀2：判别实验真重跑。
+/// 读 incident → 取该节点全部 canary 快照 → 逐条经 L2 bridge 重跑 llm →
+/// eval_expect 求值 pass_rate → classify_discriminant → 回写 incidents.triage。
+/// 无 canary / 重跑全失败 → nocanary（判别证据未取得，禁止本地 patch）。
+fn cmd_incident_triage(id: &str) -> Result<i32, String> {
+    let id: i64 = id.parse().map_err(|_| format!("bad incident id: {id}"))?;
+    let conn = db::open_try()?;
+    let row: (String, String) = conn
+        .query_row(
+            "SELECT pipeline, proc_name FROM incidents WHERE id = ?1",
+            rusqlite::params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| format!("incident {id} not found: {e}"))?;
+    let (pipeline, proc_name) = row;
+    let canaries = canary::list_canaries_conn(&conn, Some(&proc_name));
+    let targets: Vec<_> = canaries.iter().filter(|c| c.pipeline == pipeline).collect();
+    if targets.is_empty() {
+        let disc = incident::triage_incident_conn(&conn, id, "")?;
+        println!("incident #{id}: no canary for {pipeline}::{proc_name} → {disc}");
+        return Ok(0);
+    }
+    let mut passes = 0usize;
+    let mut ran = 0usize;
+    for c in &targets {
+        if let Some(text) = crate::L2_orchestration::steps::replay_canary_llm(&c.input) {
+            ran += 1;
+            let ok = canary::eval_expect(&c.expect, &text);
+            // 判别实验留痕：canary_runs 是 class2 vs 3/4 硬门禁的依据表
+            let _ = canary::record_canary_run_conn(
+                &conn,
+                &c.pipeline,
+                &c.proc_name,
+                ok,
+                &format!("incident-{} replay", id),
+            );
+            if ok {
+                passes += 1;
+            }
+        }
+    }
+    if ran == 0 {
+        let disc = incident::triage_incident_conn(&conn, id, "")?;
+        println!("incident #{id}: replay failed → {disc} (no discriminant evidence)");
+        return Ok(0);
+    }
+    let rate_f = passes as f64 / ran as f64;
+    let disc = shelve::classify_discriminant(Some(rate_f)).to_label().to_string();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_default();
+    conn.execute(
+        "UPDATE incidents SET triage = ?1, triage_at = ?2 WHERE id = ?3",
+        rusqlite::params![disc, now, id],
+    )
+    .map_err(|e| format!("triage write failed: {e}"))?;
+    println!(
+        "incident #{id}: replay {}/{}, pass {}/{} (rate {:.2}) → {}",
+        ran, targets.len(), passes, ran, rate_f, disc
+    );
     Ok(0)
 }
 
