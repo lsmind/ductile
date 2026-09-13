@@ -36,13 +36,25 @@ fn apply_patches(pl: &Pipeline) -> Pipeline {
     if patches.is_empty() {
         return pl.clone();
     }
+    // v0.18.6 P1-1：只应用 confirmed。tentative 是待验证假设（doctor 处方），
+    // 没过验证门不算数；reverted 是审计残留。进化环的生效路径唯一：
+    // tentative →（canary/probe 验证）→ confirmed。
+    let active: Vec<_> = patches.iter().filter(|p| p.status == "confirmed").collect();
+    if active.is_empty() {
+        eprintln!(
+            "  [patch] {} patches skipped (tentative/reverted, not confirmed)",
+            patches.len()
+        );
+        return pl.clone();
+    }
     eprintln!(
-        "  [patch] {} patches applied to pipeline '{}'",
+        "  [patch] {}/{} patches applied to pipeline '{}' (confirmed only)",
+        active.len(),
         patches.len(),
         pl.name
     );
     let mut cloned = pl.clone();
-    for patch in &patches {
+    for patch in &active {
         for proc in &mut cloned.procs {
             if proc.name != patch.proc_name {
                 continue;

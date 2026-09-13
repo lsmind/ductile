@@ -96,11 +96,27 @@ pub fn record_review_conn(
 /// 操作者打标签（校准面）。label: ok/bad（ok=这次 deliver 确实好，bad=确实坏）。
 /// 复核通过后补标——log-only 阶段攒标签就是为升格准备。
 pub fn label_review_conn(conn: &Connection, id: i64, label: &str) -> Result<(), String> {
+    label_review_sourced_conn(conn, id, label, "human")
+}
+
+/// v0.18.6 P1-2：带出处打标。human（默认，兼容旧调用）/ blind:regcheck3
+/// （盲评 verdict 独立源——regcheck3 的 auto vs baseline 相对判断，与 L4
+/// reviewer 的 intent+deliver 判断不同源，可做校准标签）。
+pub fn label_review_sourced_conn(
+    conn: &Connection,
+    id: i64,
+    label: &str,
+    source: &str,
+) -> Result<(), String> {
     let l = normalize_label(label)?;
+    let src = match source {
+        "blind:regcheck3" => "blind:regcheck3",
+        _ => "human",
+    };
     let n = conn
         .execute(
-            "UPDATE l4_reviews SET label = ?1 WHERE id = ?2",
-            rusqlite::params![l, id],
+            "UPDATE l4_reviews SET label = ?1, label_source = ?3 WHERE id = ?2",
+            rusqlite::params![l, id, src],
         )
         .map_err(|e| format!("l4 label failed: {e}"))?;
     if n == 0 {
@@ -220,6 +236,34 @@ mod tests {
         let id = record_review_conn(&conn, "p", "pass", "all gates green", None).unwrap();
         label_review_conn(&conn, id, "ok").unwrap();
         assert_eq!(agreement_rate(&conn), Some(1.0));
+    }
+
+    /// v0.18.6 P1-2：盲评出处打标 + 幂等跳过语义（有 label 不覆盖）。
+    #[test]
+    fn sourced_label_writes_source_and_keeps_idempotent() {
+        let conn = mem();
+        let id = record_review_conn(&conn, "p", "pass", "e", None).unwrap();
+        label_review_sourced_conn(&conn, id, "ok", "blind:regcheck3").unwrap();
+        let (label, src): (String, String) = conn
+            .query_row(
+                "SELECT label, label_source FROM l4_reviews WHERE id = ?1",
+                rusqlite::params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(label, "ok");
+        assert_eq!(src, "blind:regcheck3");
+        // 未知 source 归一为 human（fail-safe，不炸）
+        let id2 = record_review_conn(&conn, "p", "fail", "e2", None).unwrap();
+        label_review_sourced_conn(&conn, id2, "bad", "weird-source").unwrap();
+        let src2: String = conn
+            .query_row(
+                "SELECT label_source FROM l4_reviews WHERE id = ?1",
+                rusqlite::params![id2],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(src2, "human");
     }
 
     #[test]

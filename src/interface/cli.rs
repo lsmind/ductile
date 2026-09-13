@@ -74,6 +74,10 @@ pub fn run(args: &[String]) -> Result<i32, String> {
 
         // v0.8.1 harvest line
         "doctor" => cmd_doctor(),
+        // v0.18.6 P1-3：cost_norm 测量面（PyroDash Eq.6 精神：actual/top-tier
+        // 归一化）。只测量不排序——动 effective 公式前必须先盲评（选路环
+        // 是唯一活着的自进化环，不能不测就改行为）。
+        "cost" if args.len() >= 3 && args[2] == "report" => cmd_cost_report(),
         "wrap" if args.len() >= 5 => {
             // ductile wrap <tag> -- <cmd...>
             cmd_wrap(&args[2], &args[4..].join(" "))
@@ -121,6 +125,13 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         // Hot patch: patch <pipeline> <proc> <impl> <field> <value>
         "patch" if args.len() >= 3 && args[2] == "list" => cmd_patch_list(),
         "patch" if args.len() >= 4 && args[2] == "clear" => cmd_patch_clear(&args[3]),
+        // v0.18.6 P1-1：生命周期迁移（进化环生效/证伪的唯一通道）
+        "patch" if args.len() >= 4 && args[2] == "confirm" => {
+            cmd_patch_transition(&args[3], "confirmed")
+        }
+        "patch" if args.len() >= 4 && args[2] == "revert" => {
+            cmd_patch_transition(&args[3], "reverted")
+        }
         "patch" if args.len() >= 7 => {
             cmd_patch_set(&args[2], &args[3], &args[4], &args[5], &args[6])
         }
@@ -152,6 +163,8 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         }
         // v0.15 L4 端到端复核（缺口 #4，冷启动 log-only）
         "l4" if args.len() >= 3 && args[2] == "list" => cmd_l4_list(),
+        // v0.18.6 P1-2：盲评自动打标（校准闭环的标签注入通道）
+        "l4" if args.len() >= 4 && args[2] == "calibrate" => cmd_l4_calibrate(&args[3]),
         "l4" if args.len() >= 3 && args[2] == "status" => cmd_l4_status(),
         "l4" if args.len() >= 3 && args[2] == "review" && args.len() >= 6 => {
             cmd_l4_review(&args[3], &args[4], &args[5..].join(" "))
@@ -365,6 +378,79 @@ fn cmd_shelve_resolve(id: &str, resolution: &str) -> Result<i32, String> {
 fn cmd_l4_list() -> Result<i32, String> {
     print!("{}", l4::render_reviews_conn(&db::open_try()?, 20));
     Ok(0)
+}
+
+/// v0.18.6 P1-2：盲评自动打标（校准闭环）。
+/// 读 regcheck3 的 tally 产物（/tmp/regchain_data/reg_tally.log），
+/// 用盲评 verdict（独立源：auto vs baseline 相对判断）给同一窗口的
+/// l4_reviews 打标：REGCHAIN-PASS → ok，REGCHAIN-FAIL → bad。
+/// 同一 review 只打一次（有 label 的跳过）；打完打印 phase 变化。
+/// 独立性：标签源（盲评相对判断）与 verdict 源（intent+deliver 绝对判断）
+/// 不同源——这正是校准的意义：两个不同源的判断器的一致率。
+fn cmd_l4_calibrate(path: &str) -> Result<i32, String> {
+    let tally = std::fs::read_to_string(path)
+        .map_err(|e| format!("read tally log: {e} (先跑 regcheck3)"))?;
+    let pass = tally.contains("REGCHAIN-PASS");
+    let fail = tally.contains("REGCHAIN-FAIL");
+    if !pass && !fail {
+        return Err(format!("{path} 无 REGCHAIN-PASS/FAIL 标记，不是 tally 产物"));
+    }
+    let label = if pass { "ok" } else { "bad" };
+    let conn = db::open_try()?;
+    // 找未标注的 reviews（按时间窗不需要——regcheck3 窗口内落库的 review
+    // 就是这次回归跑出来的；有 label 的跳过，幂等）
+    let unlabeled: Vec<i64> = {
+        let mut stmt = conn
+            .prepare("SELECT id FROM l4_reviews WHERE label = '' ORDER BY id")
+            .map_err(|e| format!("query: {e}"))?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, i64>(0))
+            .map_err(|e| format!("query: {e}"))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    if unlabeled.is_empty() {
+        println!("no unlabeled reviews — nothing to calibrate");
+        println!("phase: {}", l4::phase_for_conn(&conn).as_str());
+        return Ok(0);
+    }
+    let mut n = 0;
+    for id in &unlabeled {
+        l4::label_review_sourced_conn(&conn, *id, label, "blind:regcheck3")?;
+        n += 1;
+    }
+    let phase = l4::phase_for_conn(&conn);
+    let rate = l4::agreement_rate(&conn);
+    println!(
+        "✓ labeled {n} reviews '{label}' (source: blind:regcheck3) from {path}",
+        n = n,
+        label = label,
+        path = path
+    );
+    println!(
+        "  labeled now: {}/{} | agreement: {} | phase: {}",
+        count_labeled(&conn),
+        count_reviews(&conn),
+        match rate {
+            Some(a) => format!("{:.2}", a),
+            None => "n/a".to_string(),
+        },
+        phase.as_str()
+    );
+    Ok(0)
+}
+
+fn count_labeled(conn: &rusqlite::Connection) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM l4_reviews WHERE label IN ('ok','bad')",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap_or(0)
+}
+
+fn count_reviews(conn: &rusqlite::Connection) -> i64 {
+    conn.query_row("SELECT COUNT(*) FROM l4_reviews", [], |r| r.get(0))
+        .unwrap_or(0)
 }
 
 fn cmd_l4_status() -> Result<i32, String> {
@@ -1522,6 +1608,21 @@ fn cmd_version_diff(path: &str, v1: &str, v2: &str) -> Result<i32, String> {
 
 // ── patch ──
 
+/// v0.18.6 P1-1：patch 生命周期迁移。tentative → confirmed（验证通过，生效）
+/// 或 → reverted（证伪/回滚，保留审计痕迹）。id 可用 `patch list` 查。
+fn cmd_patch_transition(id: &str, to: &str) -> Result<i32, String> {
+    let id: i64 = id.parse().map_err(|_| format!("bad patch id: {id}"))?;
+    let conn = db::open_try()?;
+    db::transition_patch_conn(&conn, id, to)?;
+    println!("✓ patch #{} → {}", id, to);
+    if to == "confirmed" {
+        println!("  now active: next `ductile run` applies it");
+    } else {
+        println!("  reverted: kept for audit, no longer applied");
+    }
+    Ok(0)
+}
+
 fn cmd_patch_set(
     pipeline: &str,
     proc_name: &str,
@@ -1533,13 +1634,22 @@ fn cmd_patch_set(
     // 程序化写 patch 的路径须显式声明 origin（如 llm:qwen3.8:27b）。
     // DUCTILE_PATCH_ORIGIN 是给脚本/agent 的注入通道，人手敲命令不受影响。
     let origin = std::env::var("DUCTILE_PATCH_ORIGIN").unwrap_or_else(|_| "human".into());
-    db::set_patch(pipeline, proc_name, impl_name, field, value, &origin);
+    // v0.18.6 P1-1：生命周期。人手敲 = confirmed（历史语义不变）；
+    // 进化环（doctor 处方）经 DUCTILE_PATCH_STATUS=tentative 写入待验证假设，
+    // 验证通过才 transition 到 confirmed 生效。
+    let status = std::env::var("DUCTILE_PATCH_STATUS").unwrap_or_else(|_| "confirmed".into());
+    let st = match status.as_str() {
+        "tentative" => "tentative",
+        "reverted" => "reverted",
+        _ => "confirmed",
+    };
+    db::set_patch(pipeline, proc_name, impl_name, field, value, &origin, st);
     println!(
         "✓ Patched: {}.{}.{} = {}",
         pipeline, proc_name, impl_name, field
     );
     println!("  {} = {}", field, value);
-    println!("  origin: {}", origin);
+    println!("  origin: {} | status: {}", origin, st);
     println!("\nNext `ductile run` will use this override. Source file not modified.");
     Ok(0)
 }
@@ -1550,14 +1660,19 @@ fn cmd_patch_list() -> Result<i32, String> {
         println!("No patches set.");
         return Ok(0);
     }
-    println!("Active patches ({}):\n", patches.len());
+    let active = patches.iter().filter(|p| p.status == "confirmed").count();
+    println!(
+        "Patches ({} total, {} confirmed active):\n",
+        patches.len(),
+        active
+    );
     for p in &patches {
         println!(
-            "  {}.{}.{} = {}",
-            p.pipeline, p.proc_name, p.impl_name, p.field
+            "  #{} {}.{}.{} = {}",
+            p.id, p.pipeline, p.proc_name, p.impl_name, p.field
         );
         println!("    → {}", p.value);
-        println!("    origin: {}", p.origin);
+        println!("    origin: {} | status: {}", p.origin, p.status);
     }
     Ok(0)
 }
@@ -1680,6 +1795,73 @@ pub fn parse_topic_params(input: &str) -> (String, BTreeMap<String, String>) {
 }
 
 // ── v0.8.1: doctor / wrap / harvest ──
+
+/// v0.18.6 P1-3：cost_norm 测量面。聚合 runs（近窗口）按 proc × impl 统计
+/// 成功样本的 avg_latency_ms / avg_tokens，再按 proc 组内归一化：
+/// cost_norm = impl 均值 / 组内最优均值（1.0 = 该 proc 下最便宜）。
+/// PyroDash Eq.6 的精神：跨档位比较看相对成本而非绝对成本。
+/// 纯只读报告——是否进 effective 公式等盲评数据积累后再定。
+fn cmd_cost_report() -> Result<i32, String> {
+    let conn = db::open_try()?;
+    // 聚合：最近 500 条成功 run，按 (proc, impl) 聚合
+    let mut stmt = conn
+        .prepare(
+            "SELECT proc_name, impl_name,
+                    COUNT(*), AVG(latency_ms), AVG(rate_tokens)
+             FROM runs WHERE status = 'Ok'
+             GROUP BY proc_name, impl_name
+             ORDER BY proc_name, impl_name",
+        )
+        .map_err(|e| format!("query: {e}"))?;
+    let rows: Vec<(String, String, i64, f64, f64)> = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, f64>(3)?,
+                r.get::<_, f64>(4)?,
+            ))
+        })
+        .map_err(|e| format!("query: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+    if rows.is_empty() {
+        println!("no successful runs recorded — nothing to report");
+        return Ok(0);
+    }
+    // 组内最优（latency 与 tokens 各自归一；综合 = 两者的几何均值）
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<String, Vec<(String, i64, f64, f64)>> = BTreeMap::new();
+    for (p_, i_, n, lat, tok) in &rows {
+        groups
+            .entry(p_.clone())
+            .or_default()
+            .push((i_.clone(), *n, *lat, *tok));
+    }
+    println!("cost_norm report (successful runs only, lower = cheaper):\n");
+    let mut grand = 0.0;
+    let mut cnt = 0;
+    for (proc, impls) in &groups {
+        let best_lat = impls.iter().map(|x| x.2).fold(f64::INFINITY, f64::min);
+        let best_tok = impls.iter().map(|x| x.3).fold(f64::INFINITY, f64::min);
+        println!("proc '{}':", proc);
+        for (name, n, lat, tok) in impls {
+            let n_lat = if best_lat > 0.0 { lat / best_lat } else { 1.0 };
+            let n_tok = if best_tok > 0.0 { tok / best_tok } else { 1.0 };
+            let norm = (n_lat * n_tok).sqrt();
+            grand += norm;
+            cnt += 1;
+            println!(
+                "  {:<24} n={:<4} lat={:<8.0}ms tok={:<8.0} norm={:.2}x",
+                name, n, lat, tok, norm
+            );
+        }
+        println!();
+    }
+    println!("impls: {} | mean norm: {:.2}x", cnt, grand / cnt.max(1) as f64);
+    Ok(0)
+}
 
 fn cmd_doctor() -> Result<i32, String> {
     let report = harvest::doctor();

@@ -87,6 +87,36 @@ pub fn migrate(conn: &Connection) {
         conn.execute_batch("ALTER TABLE patches ADD COLUMN origin TEXT DEFAULT 'human';")
             .ok();
     }
+    // v0.18.6 P1-1：patches 补生命周期列。老数据默认 confirmed（历史语义：
+    // 进表即生效——不为存量补判）。tentative 只能由新写入产生。
+    let has_pstatus = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('patches') WHERE name='status'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    if has_pstatus == 0 {
+        conn.execute_batch(
+            "ALTER TABLE patches ADD COLUMN status TEXT DEFAULT 'confirmed';
+             ALTER TABLE patches ADD COLUMN confirmed_at TEXT DEFAULT '';
+             ALTER TABLE patches ADD COLUMN reverted_at TEXT DEFAULT '';",
+        )
+        .ok();
+    }
+    // v0.18.6 P1-2：l4_reviews 补 label_source（human / blind:regcheck3）。
+    // 老数据默认 human（历史语义：人打的标签）。
+    let has_lsrc = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('l4_reviews') WHERE name='label_source'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    if has_lsrc == 0 {
+        conn.execute_batch("ALTER TABLE l4_reviews ADD COLUMN label_source TEXT DEFAULT 'human';")
+            .ok();
+    }
     // v0.18.6 P0-刀2：incidents 补 triage/triage_at（判别自动化落点）。
     // 老库同款 pragma 幂等迁移。
     let has_triage = conn
@@ -173,6 +203,9 @@ pub const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS pipelines (
             value       TEXT NOT NULL,
             created_at  TEXT DEFAULT '',
             origin      TEXT DEFAULT 'human',
+            status      TEXT DEFAULT 'confirmed',
+            confirmed_at TEXT DEFAULT '',
+            reverted_at TEXT DEFAULT '',
             UNIQUE(pipeline, proc_name, impl_name, field)
         );
         CREATE TABLE IF NOT EXISTS cost_cache (
@@ -238,7 +271,8 @@ pub const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS pipelines (
             evidence    TEXT DEFAULT '',
             label       TEXT NOT NULL DEFAULT '',
             run_id      INTEGER,
-            reviewed_at TEXT DEFAULT ''
+            reviewed_at TEXT DEFAULT '',
+            label_source TEXT DEFAULT 'human'
         );
         CREATE INDEX IF NOT EXISTS idx_l4_reviews_pipeline ON l4_reviews(pipeline);
         CREATE TABLE IF NOT EXISTS shelved (
@@ -809,6 +843,7 @@ pub fn isomorphic_groups() -> Vec<IsoGroup> {
 
 #[derive(Debug, Clone)]
 pub struct PatchRow {
+    pub id: i64,
     pub pipeline: String,
     pub proc_name: String,
     pub impl_name: String,
@@ -816,9 +851,14 @@ pub struct PatchRow {
     pub value: String,
     /// v0.18.5 出处：human / llm:<model_id> / machine。默认 human（老数据）。
     pub origin: String,
+    /// v0.18.6 P1-1：生命周期 tentative → confirmed / reverted。
+    /// tentative 不生效（apply_patches 只认 confirmed）；confirmed 生效；
+    /// reverted 保留审计痕迹不再生效。
+    pub status: String,
 }
 
 /// Upsert a patch: if (pipeline, proc, impl, field) already exists, update value.
+/// v0.18.6 P1-1：status 参数化——tentative（待验证假设）/ confirmed（生效）/ reverted（审计残留）。
 pub fn set_patch_conn(
     conn: &Connection,
     pipeline: &str,
@@ -827,14 +867,22 @@ pub fn set_patch_conn(
     field: &str,
     value: &str,
     origin: &str,
+    status: &str,
 ) {
     let ts = now_ts();
+    let st = match status {
+        "tentative" => "tentative",
+        "reverted" => "reverted",
+        _ => "confirmed",
+    };
+    let confirmed_at = if st == "confirmed" { ts.clone() } else { String::new() };
     conn.execute(
-        "INSERT INTO patches (pipeline, proc_name, impl_name, field, value, created_at, origin)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO patches (pipeline, proc_name, impl_name, field, value, created_at, origin, status, confirmed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(pipeline, proc_name, impl_name, field)
-         DO UPDATE SET value=excluded.value, created_at=excluded.created_at, origin=excluded.origin",
-        params![pipeline, proc_name, impl_name, field, value, ts, origin],
+         DO UPDATE SET value=excluded.value, created_at=excluded.created_at, origin=excluded.origin,
+                       status=excluded.status, confirmed_at=excluded.confirmed_at, reverted_at=''",
+        params![pipeline, proc_name, impl_name, field, value, ts, origin, st, confirmed_at],
     )
     .ok();
 }
@@ -846,9 +894,50 @@ pub fn set_patch(
     field: &str,
     value: &str,
     origin: &str,
+    status: &str,
 ) {
     let conn = open();
-    set_patch_conn(&conn, pipeline, proc_name, impl_name, field, value, origin)
+    set_patch_conn(&conn, pipeline, proc_name, impl_name, field, value, origin, status)
+}
+
+/// v0.18.6 P1-1：生命周期迁移——tentative → confirmed（验证通过）或 reverted（证伪/回滚）。
+pub fn transition_patch_conn(
+    conn: &Connection,
+    id: i64,
+    to: &str,
+) -> Result<(), String> {
+    let to = match to {
+        "confirmed" => "confirmed",
+        "reverted" => "reverted",
+        _ => return Err(format!("bad transition target: {to} (confirmed|reverted)")),
+    };
+    let ts = now_ts();
+    let n = conn
+        .execute(
+            "UPDATE patches SET status=?1, confirmed_at=CASE WHEN ?1='confirmed' THEN ?2 ELSE confirmed_at END,
+             reverted_at=CASE WHEN ?1='reverted' THEN ?2 ELSE reverted_at END WHERE id=?3",
+            params![to, ts, id],
+        )
+        .map_err(|e| format!("patch transition failed: {e}"))?;
+    if n == 0 {
+        return Err(format!("patch #{id} not found"));
+    }
+    Ok(())
+}
+
+pub fn patch_id_conn(
+    conn: &Connection,
+    pipeline: &str,
+    proc_name: &str,
+    impl_name: &str,
+    field: &str,
+) -> Option<i64> {
+    conn.query_row(
+        "SELECT id FROM patches WHERE pipeline=?1 AND proc_name=?2 AND impl_name=?3 AND field=?4",
+        params![pipeline, proc_name, impl_name, field],
+        |r| r.get(0),
+    )
+    .ok()
 }
 
 /// Remove a specific patch.
@@ -875,19 +964,21 @@ pub fn remove_patch(pipeline: &str, proc_name: &str, impl_name: &str, field: &st
 pub fn load_patches_conn(conn: &Connection, pipeline: &str) -> Vec<PatchRow> {
     let mut stmt = conn
         .prepare(
-            "SELECT pipeline, proc_name, impl_name, field, value, origin
+            "SELECT id, pipeline, proc_name, impl_name, field, value, origin, status
              FROM patches WHERE pipeline = ?1
              ORDER BY proc_name, impl_name, field",
         )
         .unwrap();
     stmt.query_map(params![pipeline], |row| {
         Ok(PatchRow {
-            pipeline: row.get(0)?,
-            proc_name: row.get(1)?,
-            impl_name: row.get(2)?,
-            field: row.get(3)?,
-            value: row.get(4)?,
-            origin: row.get(5)?,
+            id: row.get(0)?,
+            pipeline: row.get(1)?,
+            proc_name: row.get(2)?,
+            impl_name: row.get(3)?,
+            field: row.get(4)?,
+            value: row.get(5)?,
+            origin: row.get(6)?,
+            status: row.get(7)?,
         })
     })
     .unwrap()
@@ -904,18 +995,20 @@ pub fn load_patches(pipeline: &str) -> Vec<PatchRow> {
 pub fn all_patches_conn(conn: &Connection) -> Vec<PatchRow> {
     let mut stmt = conn
         .prepare(
-            "SELECT pipeline, proc_name, impl_name, field, value, origin
+            "SELECT id, pipeline, proc_name, impl_name, field, value, origin, status
              FROM patches ORDER BY pipeline, proc_name, impl_name",
         )
         .unwrap();
     stmt.query_map([], |row| {
         Ok(PatchRow {
-            pipeline: row.get(0)?,
-            proc_name: row.get(1)?,
-            impl_name: row.get(2)?,
-            field: row.get(3)?,
-            value: row.get(4)?,
-            origin: row.get(5)?,
+            id: row.get(0)?,
+            pipeline: row.get(1)?,
+            proc_name: row.get(2)?,
+            impl_name: row.get(3)?,
+            field: row.get(4)?,
+            value: row.get(5)?,
+            origin: row.get(6)?,
+            status: row.get(7)?,
         })
     })
     .unwrap()
@@ -1246,8 +1339,9 @@ mod tests {
             "guide",
             "R1 白名单版",
             "llm:qwen3.8:27b",
+            "confirmed",
         );
-        set_patch_conn(&conn, "p1", "arch", "llm", "guide", "human 改", "human");
+        set_patch_conn(&conn, "p1", "arch", "llm", "guide", "human 改", "human", "confirmed");
         let rows = load_patches_conn(&conn, "p1");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].value, "human 改");
@@ -1264,6 +1358,7 @@ mod tests {
             "guide",
             "R2 版",
             "llm:qwen3.8:27b",
+            "confirmed",
         );
         let all = all_patches_conn(&conn);
         assert_eq!(all.len(), 2);
@@ -1465,12 +1560,12 @@ mod conn_tests {
     #[test]
     fn patch_set_load_remove() {
         let conn = memdb();
-        set_patch_conn(&conn, "pl", "proc", "impl", "enabled", "false", "human");
-        set_patch_conn(&conn, "pl", "proc", "impl", "cost.latency", "42", "human");
+        set_patch_conn(&conn, "pl", "proc", "impl", "enabled", "false", "human", "confirmed");
+        set_patch_conn(&conn, "pl", "proc", "impl", "cost.latency", "42", "human", "confirmed");
         let patches = load_patches_conn(&conn, "pl");
         assert_eq!(patches.len(), 2);
         // 同字段重设 = 覆盖非追加
-        set_patch_conn(&conn, "pl", "proc", "impl", "cost.latency", "99", "human");
+        set_patch_conn(&conn, "pl", "proc", "impl", "cost.latency", "99", "human", "confirmed");
         let patches = load_patches_conn(&conn, "pl");
         assert_eq!(patches.len(), 2);
         assert!(patches
@@ -1482,6 +1577,49 @@ mod conn_tests {
         assert_eq!(patches.len(), 1);
         // 别的 pipeline 不串
         assert!(load_patches_conn(&conn, "other").is_empty());
+    }
+
+    /// v0.18.6 P1-1：生命周期——tentative 不进 load 的生效集外、
+    /// transition 双向、reverted 留审计。
+    #[test]
+    fn patch_lifecycle_tentative_confirm_revert() {
+        let conn = memdb();
+        // tentative 写入（doctor 处方形态）
+        set_patch_conn(&conn, "pl", "proc", "impl", "guide", "R1", "llm:qwen3.8:27b", "tentative");
+        let rows = load_patches_conn(&conn, "pl");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "tentative");
+        let id = patch_id_conn(&conn, "pl", "proc", "impl", "guide").unwrap();
+        let t0: String = conn.query_row(
+            "SELECT confirmed_at FROM patches WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(t0, "", "tentative 无 confirmed_at");
+        // 确认 → 生效
+        transition_patch_conn(&conn, id, "confirmed").unwrap();
+        let rows = load_patches_conn(&conn, "pl");
+        assert_eq!(rows[0].status, "confirmed");
+        let t1: String = conn.query_row(
+            "SELECT confirmed_at FROM patches WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        ).unwrap();
+        assert!(!t1.is_empty());
+        // 证伪 → reverted，行还在（审计），状态翻转
+        transition_patch_conn(&conn, id, "reverted").unwrap();
+        let rows = load_patches_conn(&conn, "pl");
+        assert_eq!(rows.len(), 1, "reverted 保留审计痕迹不删除");
+        assert_eq!(rows[0].status, "reverted");
+        let t2: String = conn.query_row(
+            "SELECT reverted_at FROM patches WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        ).unwrap();
+        assert!(!t2.is_empty());
+        // 坏目标 fail-closed
+        assert!(transition_patch_conn(&conn, id, "explode").is_err());
+        assert!(transition_patch_conn(&conn, 999, "confirmed").is_err());
     }
 
     // ── runs 记录 + recent_runs 窗口 ──
