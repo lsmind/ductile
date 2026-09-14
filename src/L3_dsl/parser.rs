@@ -221,6 +221,35 @@ pub(crate) fn find_matching_paren(s: &str) -> Option<usize> {
     None
 }
 
+/// v0.18.14 跨行动词调用的配平判据：引号外的括号深度（引号内不计——
+/// prompt 文本常含括号）。in_string 状态遇转义跳两字符。
+pub(crate) fn paren_depth_outside_quotes(s: &str) -> i32 {
+    let chars: Vec<char> = s.chars().collect();
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_str {
+            if c == '\\' {
+                i += 2;
+                continue;
+            }
+            if c == '"' {
+                in_str = false;
+            }
+        } else if c == '"' {
+            in_str = true;
+        } else if c == '(' {
+            depth += 1;
+        } else if c == ')' {
+            depth -= 1;
+        }
+        i += 1;
+    }
+    depth
+}
+
 pub(crate) fn extract_quoted(s: &str) -> Option<String> {
     let bytes: Vec<char> = s.chars().collect();
     let mut i = 0;
@@ -245,7 +274,27 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
     let mut needs: Vec<String> = Vec::new(); // v0.17.3 .needs(@ref) 数据依赖
     let mut constraint_fields: Vec<String> = Vec::new(); // v0.18.1 .constraint(fields) 链级约束字段
     let mut idx = start_idx;
-    let line = lines[idx];
+    // v0.18.14 跨行动词调用：`.proc("x", llm(a,\n  prompt="..."))` 的后续行
+    // 此前落进 Unknown-line 分支被静默丢弃（evolve 管线实测：prompt 参数
+    // 整体蒸发，auto-prompt 兜底合成，@ref 依赖随之消失——probe5C-E 二分实锤）。
+    // 修法：.proc 行引号外括号深度 >0 时继续吞行直到配平（含 \n 还原）。
+    // 引号外深度为判据，prompt 文本内的括号/引号不影响。
+    let mut joined_line = lines[idx].to_string();
+    let mut consumed_extra = 0usize;
+    while paren_depth_outside_quotes(&joined_line) > 0 {
+        if idx + 1 + consumed_extra + 1 >= lines.len() {
+            return Err(ParseError {
+                line: start_idx + 1,
+                col: 1,
+                msg: "unbalanced parens in .proc(...) — reached EOF while joining continuation lines".into(),
+                line_text: lines[start_idx].to_string(),
+            });
+        }
+        consumed_extra += 1;
+        joined_line.push('\n');
+        joined_line.push_str(lines[start_idx + consumed_extra]);
+    }
+    let line: &str = &joined_line;
     let _line_num = idx + 1;
 
     // .proc("name") — just the name, no level/scope
@@ -277,7 +326,9 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
         }
     }
 
-    idx += 1;
+    // 跳过 .proc 行本身 + 已吞并的 continuation 行（v0.18.14：
+    // 不跳会导致 continuation 行被循环再处理一次，内容重复）。
+    idx += 1 + consumed_extra;
 
     let mut plan: Vec<Impl> = Vec::new();
     let mut checks: Vec<Check> = Vec::new();
