@@ -184,7 +184,8 @@ pub fn parse_contract(source: &str, path: &str) -> Result<ScriptCard, String> {
 
 /// v0.18.11 校验并规范化 MCSM/FOPT 坐标。
 /// 合法格式：`F(1)-O(2)-P(3)-T(4)`（字母 F/O/P/T 不区分大小写，数字 1-4）。
-/// 数字不是价值高低——是该维度当前执行的操作：1建表/2冲突/3抽象/4实践。
+/// 数字不是价值高低——是该维度当前执行的操作：1建表/2冲突/3抽象/4虚无
+/// （无序：结构塌缩，先验不可依赖，实践是唯一认知通道）。
 /// 返回规范化大写形式。见 docs/MCSM.md。
 pub fn normalize_mcsm(raw: &str, path: &str) -> Result<String, String> {
     let s = raw.trim().to_uppercase();
