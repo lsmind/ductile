@@ -426,9 +426,12 @@ pub fn resolve_tier_start(
     // tier= 实参路径在上面已 return（显式钉档不受经验影响）。
     if idx > 0 {
         let lower = &ladder[idx - 1];
+        // v0.18.12 信号易逝性（Eq.22）：经验查询按 ctx 过滤——agent 定义或
+        // 档位模型一变，旧经验自动失效（不同 ctx 不互认）。
+        let ctx = agent_ctx_hash(agent, tiers_cfg, lower);
         let conn = crate::L0_physical::db::open();
         if let Some((win, succ)) =
-            crate::L0_physical::db::tier_outcome_stats_conn(&conn, agent_key, lower, TIER_ADAPT_WINDOW)
+            crate::L0_physical::db::tier_outcome_stats_conn(&conn, agent_key, lower, TIER_ADAPT_WINDOW, &ctx)
         {
             if win >= TIER_ADAPT_WINDOW && succ == win {
                 return Ok((ladder, idx - 1));
@@ -440,6 +443,34 @@ pub fn resolve_tier_start(
 
 /// v0.18.10 经验下探的窗口/阈值（同因失败去重后窗口语义=去重结局数）。
 pub const TIER_ADAPT_WINDOW: usize = 5;
+
+/// v0.18.12 信号易逝性 ctx（MetaRSI Eq.22 的 ductile 落地）：
+/// agent 定义（system/schema/guide/tiers）+ 档位模型指纹 → FNV-1a 64bit 稳定哈希。
+/// 定义一变 ctx 变，tier_journal 旧经验自动与新定义隔离（读路径 WHERE ctx
+/// 过滤）——防止阶梯下探/失败反馈吃到「另一个 agent 定义」下的过期经验。
+/// 无外部依赖，输出 16 hex 字符。
+pub fn agent_ctx_hash(agent: &AgentConfig, tiers_cfg: &TiersConfig, tier: &str) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    let mut feed = |s: &str| {
+        for b in s.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        // 字段分隔防拼接歧义
+        h ^= 0x1f;
+        h = h.wrapping_mul(0x100000001b3);
+    };
+    feed(&agent.system);
+    feed(&agent.schema);
+    feed(&agent.guide);
+    feed(&agent.tiers.join(","));
+    if let Some(t) = tiers_cfg.tiers.get(tier) {
+        feed(&t.model);
+        feed(&t.max_tokens.to_string());
+        feed(&format!("{:?}", t.timeout_secs));
+    }
+    format!("{:016x}", h)
+}
 
 /// Fill missing OPENAI_* into a Command's environment from config (does not override existing env).
 pub fn apply_llm_env_from_config(cmd: &mut std::process::Command, cfg: &LlmConfig) {
@@ -657,14 +688,15 @@ base_url = "http://gpu-box:11434/v1"
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 agent TEXT NOT NULL, tier TEXT NOT NULL,
                 ok INTEGER NOT NULL, note TEXT DEFAULT '',
-                recorded_at TEXT DEFAULT '');",
+                recorded_at TEXT DEFAULT '',
+                ctx TEXT NOT NULL DEFAULT '');",
         )
         .unwrap();
         // agent_x 在 light 档 5 连成功（成功不去重——每次都是独立证据）
         for _ in 0..5 {
-            crate::L0_physical::db::record_tier_outcome_conn(&conn, "agent_x", "light", true, "");
+            crate::L0_physical::db::record_tier_outcome_conn(&conn, "agent_x", "light", true, "", "");
         }
-        let stats = crate::L0_physical::db::tier_outcome_stats_conn(&conn, "agent_x", "light", 5);
+        let stats = crate::L0_physical::db::tier_outcome_stats_conn(&conn, "agent_x", "light", 5, "");
         assert_eq!(stats, Some((5, 5)), "5 连成功应全 ok 且计满窗口");
         // 成功不去重：5 次成功 = 5 行独立证据
         let n: i64 = conn
@@ -673,24 +705,54 @@ base_url = "http://gpu-box:11434/v1"
         assert_eq!(n, 5, "成功每次落一行（窗口计数的独立证据）");
         // 失败反馈入库 + 查询
         crate::L0_physical::db::record_tier_outcome_conn(
-            &conn, "agent_x", "medium", false, "no JSON in output",
-        );
+            &conn, "agent_x", "medium", false, "no JSON in output", "");
         crate::L0_physical::db::record_tier_outcome_conn(
-            &conn, "agent_x", "medium", false, "timeout after 300s",
-        );
+            &conn, "agent_x", "medium", false, "timeout after 300s", "");
         let notes =
-            crate::L0_physical::db::tier_failure_notes_conn(&conn, "agent_x", "medium", 3);
+            crate::L0_physical::db::tier_failure_notes_conn(&conn, "agent_x", "medium", 3, "");
         assert_eq!(notes.len(), 2, "两条不同失败反馈");
         assert!(notes.iter().any(|x| x.contains("no JSON")));
         assert!(notes.iter().any(|x| x.contains("timeout")));
         // 同因失败去重
         crate::L0_physical::db::record_tier_outcome_conn(
-            &conn, "agent_x", "medium", false, "no JSON in output",
-        );
+            &conn, "agent_x", "medium", false, "no JSON in output", "");
         let n2: i64 = conn
             .query_row("SELECT COUNT(*) FROM tier_journal WHERE ok=0", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n2, 2, "同因失败不重复膨胀");
+
+        // v0.18.12 ctx 隔离（Eq.22 信号易逝性）：定义一变（ctx 变），
+        // 旧经验对新定义不可见。注意：上面写入用的 ctx=''（老行），
+        // 兼容分支 (ctx=? OR ctx='') 使其对任何新 ctx 仍可见——所以
+        // 隔离验证要用非空 ctx 写入新经验，再查另一个非空 ctx。
+        for _ in 0..3 {
+            crate::L0_physical::db::record_tier_outcome_conn(
+                &conn, "agent_x", "light", true, "", "ctx_v2",
+            );
+        }
+        let stats_v2 = crate::L0_physical::db::tier_outcome_stats_conn(
+            &conn, "agent_x", "light", 5, "ctx_v3",
+        );
+        // ctx_v3 视角：ctx_v2 的 3 行不可见；但 ctx='' 的 5 行老经验兼容可见
+        // → 窗口 5 全来自老行（ok=1×5）
+        assert_eq!(stats_v2, Some((5, 5)), "非空 ctx 间互不可见，老行兼容可见");
+        let notes_old = crate::L0_physical::db::tier_failure_notes_conn(
+            &conn, "agent_x", "medium", 3, "ctx_new_definition",
+        );
+        assert_eq!(notes_old.len(), 2, "ctx='' 老失败反馈对新 ctx 兼容可见");
+        // 真隔离：非空 ctx 之间的失败反馈互不可见
+        crate::L0_physical::db::record_tier_outcome_conn(
+            &conn, "agent_x", "high", false, "v2 特有失败", "ctx_v2",
+        );
+        let notes_v3 = crate::L0_physical::db::tier_failure_notes_conn(
+            &conn, "agent_x", "high", 3, "ctx_v3",
+        );
+        assert_eq!(notes_v3.len(), 0, "非空 ctx 间失败反馈互不可见（隔离生效）");
+        // ctx='' 老行兼容：无 ctx 时代的老经验仍可见
+        let stats_legacy = crate::L0_physical::db::tier_outcome_stats_conn(
+            &conn, "agent_x", "light", 5, "anything",
+        );
+        assert_eq!(stats_legacy, Some((5, 5)), "ctx='' 老行兼容不过滤");
     }
 
     #[test]

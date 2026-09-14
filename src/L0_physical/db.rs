@@ -104,6 +104,23 @@ pub fn migrate(conn: &Connection) {
         )
         .ok();
     }
+    // v0.18.12 信号易逝性（MetaRSI Eq.22）：tier_journal 补 ctx 列。
+    // ctx = agent 定义(system/schema/guide/tiers) + 档位模型指纹的哈希——
+    // 定义一变 ctx 变，旧经验自动与新定义隔离（读路径 WHERE ctx 过滤），
+    // 防止阶梯下探吃到过期经验。老行 ctx=''（读路径回退兼容：空 ctx 不过滤）。
+    let has_ctx = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('tier_journal') WHERE name='ctx'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    if has_ctx == 0 {
+        conn.execute_batch(
+            "ALTER TABLE tier_journal ADD COLUMN ctx TEXT NOT NULL DEFAULT '';",
+        )
+        .ok();
+    }
     // v0.18.11 MCSM/FOPT：scripts 补 mcsm 列（F-O-P-T 认知坐标，空=未标注）。
     let has_mcsm = conn
         .query_row(
@@ -193,7 +210,8 @@ pub const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS pipelines (
             tier        TEXT NOT NULL,
             ok          INTEGER NOT NULL,
             note        TEXT DEFAULT '',
-            recorded_at TEXT DEFAULT ''
+            recorded_at TEXT DEFAULT '',
+            ctx         TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_tier_journal_agent ON tier_journal(agent);
         CREATE TABLE IF NOT EXISTS runs (
@@ -772,45 +790,55 @@ pub fn upsert_impl_pref(proc_name: &str, impl_name: &str, weight: f64) {
 // ── v0.18.10 双向自适应阶梯：tier_journal ──
 
 /// 记一次档位结局。note=失败反馈（升档时随梯上传）或空（成功）。
-/// UNIQUE(agent,tier,note) 去重：同因失败不重复膨胀日志。
-pub fn record_tier_outcome(agent: &str, tier: &str, ok: bool, note: &str) {
+/// v0.18.12 ctx：agent 定义指纹——定义一变旧经验自动隔离（Eq.22 信号易逝性）。
+pub fn record_tier_outcome(agent: &str, tier: &str, ok: bool, note: &str, ctx: &str) {
     let conn = open();
-    record_tier_outcome_conn(&conn, agent, tier, ok, note)
+    record_tier_outcome_conn(&conn, agent, tier, ok, note, ctx)
 }
 
-pub fn record_tier_outcome_conn(conn: &Connection, agent: &str, tier: &str, ok: bool, note: &str) {
+pub fn record_tier_outcome_conn(
+    conn: &Connection,
+    agent: &str,
+    tier: &str,
+    ok: bool,
+    note: &str,
+    ctx: &str,
+) {
     let note = note.chars().take(400).collect::<String>();
     // 成功：每次落行（窗口计数的独立证据）。
-    // 失败：同 (agent,tier,note) 先删后插——同因失败不膨胀，时间戳刷新。
+    // 失败：同 (agent,tier,note,ctx) 先删后插——同因失败不膨胀，时间戳刷新。
     if !ok {
         let _ = conn.execute(
-            "DELETE FROM tier_journal WHERE agent=?1 AND tier=?2 AND ok=0 AND note=?3",
-            params![agent, tier, note],
+            "DELETE FROM tier_journal WHERE agent=?1 AND tier=?2 AND ok=0 AND note=?3 AND ctx=?4",
+            params![agent, tier, note, ctx],
         );
     }
     conn.execute(
-        "INSERT INTO tier_journal (agent, tier, ok, note, recorded_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![agent, tier, ok as i64, note, now_ts()],
+        "INSERT INTO tier_journal (agent, tier, ok, note, recorded_at, ctx)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![agent, tier, ok as i64, note, now_ts(), ctx],
     )
     .ok();
 }
 
 /// 该 agent 在 tier 的近况：Some((窗口, 成功数))，窗口>0 才有意义。
+/// ctx 过滤：只算同定义（同 ctx）经验；ctx='' 老行兼容不过滤。
 pub fn tier_outcome_stats_conn(
     conn: &Connection,
     agent: &str,
     tier: &str,
     window: usize,
+    ctx: &str,
 ) -> Option<(usize, usize)> {
     let mut stmt = conn
         .prepare(
             "SELECT ok FROM tier_journal WHERE agent = ?1 AND tier = ?2
+             AND (ctx = ?4 OR ctx = '')
              ORDER BY id DESC LIMIT ?3",
         )
         .ok()?;
     let oks: Vec<i64> = stmt
-        .query_map(params![agent, tier, window as i64], |r| r.get(0))
+        .query_map(params![agent, tier, window as i64, ctx], |r| r.get(0))
         .ok()?
         .filter_map(|r| r.ok())
         .collect();
@@ -822,15 +850,23 @@ pub fn tier_outcome_stats_conn(
 }
 
 /// 该 agent 在 tier 的失败反馈清单（最近优先，去重后截 top-k）——升档注入用。
-pub fn tier_failure_notes_conn(conn: &Connection, agent: &str, tier: &str, top: usize) -> Vec<String> {
+/// ctx 过滤：只取同定义（同 ctx 哈希）的经验；ctx='' 老行兼容不过滤。
+pub fn tier_failure_notes_conn(
+    conn: &Connection,
+    agent: &str,
+    tier: &str,
+    top: usize,
+    ctx: &str,
+) -> Vec<String> {
     let mut stmt = match conn.prepare(
         "SELECT note FROM tier_journal WHERE agent = ?1 AND tier = ?2 AND ok = 0 AND note != ''
+         AND (ctx = ?4 OR ctx = '')
          ORDER BY id DESC LIMIT ?3",
     ) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
-    let rows = stmt.query_map(params![agent, tier, top as i64], |r| {
+    let rows = stmt.query_map(params![agent, tier, top as i64, ctx], |r| {
         r.get::<_, String>(0)
     });
     match rows {

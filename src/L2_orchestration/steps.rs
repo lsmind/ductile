@@ -1076,6 +1076,9 @@ fn exec_llm(
         && extract_string_arg("model", body).is_empty();
     let mut ladder: Vec<String> = Vec::new();
     let mut tier_idx = 0usize;
+    // v0.18.12 信号易逝性 ctx：本 agent 定义的指纹——记账与经验查询都用它
+    // 隔离（定义一变旧经验自动失效）。非阶梯路径不用。
+    let mut tier_ctx = String::new();
     // v0.18.6 P0-刀4：τ_off 协议注入文本（阶梯节点专用，非阶梯不注入）
     let mut partial_note = String::new();
     if use_ladder {
@@ -1092,6 +1095,7 @@ fn exec_llm(
         )?;
         ladder = l;
         tier_idx = idx;
+        tier_ctx = crate::config::agent_ctx_hash(agent, &tiers_cfg, &ladder[tier_idx]);
         // v0.18.6 P0-刀4（PyroDash 2607.20327 借鉴）：τ_off 自报协议注入。
         // 阶梯节点在输出契约外多报两个字段——模型中途自认能力不足时
         // escalate=true + partial=已完成的推理/已确定的字段。引擎据此单次
@@ -1186,9 +1190,10 @@ fn exec_llm(
             if i > tier_idx && tier_arg.is_none() {
                 if let Some(name) = &first_bare {
                     let conn = crate::db::open();
-                    let mut notes = crate::db::tier_failure_notes_conn(&conn, name, &ladder[tier_idx], 3);
+                    let mut notes =
+                        crate::db::tier_failure_notes_conn(&conn, name, &ladder[tier_idx], 3, &tier_ctx);
                     for lower in ladder[tier_idx + 1..i].iter() {
-                        notes.extend(crate::db::tier_failure_notes_conn(&conn, name, lower, 2));
+                        notes.extend(crate::db::tier_failure_notes_conn(&conn, name, lower, 2, &tier_ctx));
                     }
                     if !notes.is_empty() {
                         let digest: String =
@@ -1258,7 +1263,7 @@ fn exec_llm(
                             // 跨档成功（i > 起步档）说明低档确实不行，也记 success
                             // 于实际服务档，经验键为 agent 名。
                             if let Some(name) = &first_bare {
-                                crate::db::record_tier_outcome(name, tier_name, true, "");
+                                crate::db::record_tier_outcome(name, tier_name, true, "", &tier_ctx);
                             }
                             // v0.18.6 P0-刀1：llm 成功 → 自动播种 canary。
                             // 保真：快照含协议尾巴（重放字节级还原当时输入；
@@ -1290,7 +1295,7 @@ fn exec_llm(
                     // v0.18.10 双向自适应（升半边）：失败反馈记账——失败原因
                     // 落 tier_journal，升档时随梯上传注入高档 prompt（免重蹈）。
                     if let Some(name) = &first_bare {
-                        crate::db::record_tier_outcome(name, tier_name, false, &last_err);
+                        crate::db::record_tier_outcome(name, tier_name, false, &last_err, &tier_ctx);
                     }
                 }
                 Err(e) => {
