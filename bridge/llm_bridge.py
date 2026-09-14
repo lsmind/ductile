@@ -136,6 +136,15 @@ def chat_completions(base: str, key: str, model: str, messages: list, timeout: i
     max_tokens = env("OPENAI_MAX_TOKENS")
     if max_tokens.isdigit():
         payload["max_tokens"] = int(max_tokens)
+    # 思考型模型压制：ollama OpenAI 端点支持 reasoning_effort（实测 ornith-1.5:35b
+    # 在长材料上思考吞掉全部 max_tokens 预算 → content 空 → "no JSON" 确定性失败，
+    # 三连重试全败；reasoning_effort=none 后 0s 出活）。OPENAI_REASONING_EFFORT
+    # 可设 "keep" 显式保留思考（思考增益场景）。
+    effort = env("OPENAI_REASONING_EFFORT")
+    if effort and effort != "keep":
+        payload["reasoning_effort"] = effort
+    elif not effort:
+        payload["reasoning_effort"] = "none"
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url,
