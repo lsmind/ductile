@@ -842,10 +842,12 @@ fn exec_foreach_proc(
                 continue;
             }
 
+            // v0.18.9 foreach var 运行时化：不再把 item 字符串替换进 body_text
+            // （item 含引号时会炸 llm/run 的参数语法——probe 实锤 input.len=4 vs 18）。
+            // {var} 现在作为字面量安全通过参数解析，由 resolve_vars 从
+            // item_results 运行时解析（与 @var 引用同通道）。
             let expanded = Impl {
-                body_text: impl_
-                    .body_text
-                    .replace(&format!("{{{}}}", var_name), &clean_item),
+                body_text: impl_.body_text.clone(),
                 ..(*impl_).clone()
             };
 
