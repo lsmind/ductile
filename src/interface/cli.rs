@@ -164,7 +164,12 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         // v0.15 L4 端到端复核（缺口 #4，冷启动 log-only）
         "l4" if args.len() >= 3 && args[2] == "list" => cmd_l4_list(),
         // v0.18.6 P1-2：盲评自动打标（校准闭环的标签注入通道）
-        "l4" if args.len() >= 4 && args[2] == "calibrate" => cmd_l4_calibrate(&args[3]),
+        "l4" if args.len() >= 4 && args[2] == "calibrate" => {
+            // v0.18.8：prefix/source 参数化（缺省 REGCHAIN/blind:regcheck3 旧语义兼容）
+            let prefix = args.get(4).map(|s| s.as_str()).unwrap_or("REGCHAIN");
+            let source = args.get(5).map(|s| s.as_str()).unwrap_or("blind:regcheck3");
+            cmd_l4_calibrate(&args[3], prefix, source)
+        }
         "l4" if args.len() >= 3 && args[2] == "status" => cmd_l4_status(),
         "l4" if args.len() >= 3 && args[2] == "review" && args.len() >= 6 => {
             cmd_l4_review(&args[3], &args[4], &args[5..].join(" "))
@@ -381,19 +386,27 @@ fn cmd_l4_list() -> Result<i32, String> {
 }
 
 /// v0.18.6 P1-2：盲评自动打标（校准闭环）。
-/// 读 regcheck3 的 tally 产物（/tmp/regchain_data/reg_tally.log），
+/// v0.18.8 泛化：标记前缀与校准源参数化——任何场景的 tally 产物都能回灌。
+/// 读 tally 产物（如 /tmp/regchain_data/reg_tally.log 或任意 <PREFIX>-PASS/FAIL），
 /// 用盲评 verdict（独立源：auto vs baseline 相对判断）给同一窗口的
-/// l4_reviews 打标：REGCHAIN-PASS → ok，REGCHAIN-FAIL → bad。
+/// l4_reviews 打标：<PREFIX>-PASS → ok，<PREFIX>-FAIL → bad。
+/// 用法：ductile l4 calibrate <path> [prefix] [source]
+///   prefix 默认 REGCHAIN（旧语义兼容），source 默认 blind:regcheck3。
+///   场景侧（如命理）：ductile l4 calibrate tally_r9.log MINGLI blind:mingli
 /// 同一 review 只打一次（有 label 的跳过）；打完打印 phase 变化。
 /// 独立性：标签源（盲评相对判断）与 verdict 源（intent+deliver 绝对判断）
 /// 不同源——这正是校准的意义：两个不同源的判断器的一致率。
-fn cmd_l4_calibrate(path: &str) -> Result<i32, String> {
+fn cmd_l4_calibrate(path: &str, prefix: &str, source: &str) -> Result<i32, String> {
     let tally = std::fs::read_to_string(path)
-        .map_err(|e| format!("read tally log: {e} (先跑 regcheck3)"))?;
-    let pass = tally.contains("REGCHAIN-PASS");
-    let fail = tally.contains("REGCHAIN-FAIL");
+        .map_err(|e| format!("read tally log: {e} (先跑 tally)"))?;
+    let pass_marker = format!("{prefix}-PASS");
+    let fail_marker = format!("{prefix}-FAIL");
+    let pass = tally.contains(&pass_marker);
+    let fail = tally.contains(&fail_marker);
     if !pass && !fail {
-        return Err(format!("{path} 无 REGCHAIN-PASS/FAIL 标记，不是 tally 产物"));
+        return Err(format!(
+            "{path} 无 {pass_marker}/{fail_marker} 标记，不是 tally 产物（prefix={prefix}）"
+        ));
     }
     let label = if pass { "ok" } else { "bad" };
     let conn = db::open_try()?;
@@ -415,13 +428,13 @@ fn cmd_l4_calibrate(path: &str) -> Result<i32, String> {
     }
     let mut n = 0;
     for id in &unlabeled {
-        l4::label_review_sourced_conn(&conn, *id, label, "blind:regcheck3")?;
+        l4::label_review_sourced_conn(&conn, *id, label, source)?;
         n += 1;
     }
     let phase = l4::phase_for_conn(&conn);
     let rate = l4::agreement_rate(&conn);
     println!(
-        "✓ labeled {n} reviews '{label}' (source: blind:regcheck3) from {path}",
+        "✓ labeled {n} reviews '{label}' (source: {source}) from {path}",
         n = n,
         label = label,
         path = path

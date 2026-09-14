@@ -324,6 +324,17 @@ pub fn build_egraph(pl: &Pipeline) -> EGraph {
                     }
                 }
             }
+            // v0.18.7 foreach source 依赖边：source 未就绪时 foreach 节点不该被调度。
+            // 此前不建边，同层按节点名序执行——军团 v1 恰好 corps_prep < soldier
+            // 字典序正确而侥幸通过；probe2 实测 ask < gen 反序即炸
+            // （foreach source not found）。foreach 是数据依赖，必须进排序图。
+            if let Some(ref src) = proc.foreach {
+                if pl.procs.iter().any(|p| &p.name == src) && src != &proc.name {
+                    if edges_seen.insert((src.clone(), proc.name.clone())) {
+                        eg.edges.push((src.clone(), proc.name.clone()));
+                    }
+                }
+            }
             let children: Vec<usize> = refs
                 .iter()
                 .filter_map(|r| eg.proc_class.get(r).copied())

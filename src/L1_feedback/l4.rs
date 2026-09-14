@@ -99,9 +99,10 @@ pub fn label_review_conn(conn: &Connection, id: i64, label: &str) -> Result<(), 
     label_review_sourced_conn(conn, id, label, "human")
 }
 
-/// v0.18.6 P1-2：带出处打标。human（默认，兼容旧调用）/ blind:regcheck3
-/// （盲评 verdict 独立源——regcheck3 的 auto vs baseline 相对判断，与 L4
-/// reviewer 的 intent+deliver 判断不同源，可做校准标签）。
+/// v0.18.6 P1-2：带出处打标。human（默认，兼容旧调用）/ blind:<project>
+/// （盲评 verdict 独立源——与 L4 reviewer 的 intent+deliver 判断不同源，可做校准标签。
+/// v0.18.7：blind:* 模式化——任何 blind: 前缀项目源（regcheck3/mingli/…）均认可，
+/// 不再硬编码单项目特例；源字符串落库保留项目名可审计。）
 pub fn label_review_sourced_conn(
     conn: &Connection,
     id: i64,
@@ -109,9 +110,10 @@ pub fn label_review_sourced_conn(
     source: &str,
 ) -> Result<(), String> {
     let l = normalize_label(label)?;
-    let src = match source {
-        "blind:regcheck3" => "blind:regcheck3",
-        _ => "human",
+    let src = if source == "blind:regcheck3" || source.starts_with("blind:") {
+        source
+    } else {
+        "human"
     };
     let n = conn
         .execute(
@@ -256,6 +258,17 @@ mod tests {
         // 未知 source 归一为 human（fail-safe，不炸）
         let id2 = record_review_conn(&conn, "p", "fail", "e2", None).unwrap();
         label_review_sourced_conn(&conn, id2, "bad", "weird-source").unwrap();
+        // v0.18.7：blind:* 模式化——任意 blind: 前缀项目源均原样保留
+        let id3 = record_review_conn(&conn, "p", "pass", "e3", None).unwrap();
+        label_review_sourced_conn(&conn, id3, "ok", "blind:mingli").unwrap();
+        let src3: String = conn
+            .query_row(
+                "SELECT label_source FROM l4_reviews WHERE id = ?1",
+                rusqlite::params![id3],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(src3, "blind:mingli");
         let src2: String = conn
             .query_row(
                 "SELECT label_source FROM l4_reviews WHERE id = ?1",
