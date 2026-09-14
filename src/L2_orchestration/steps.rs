@@ -1088,6 +1088,7 @@ fn exec_llm(
             resolved_system.len(),
             schema_fields,
             tier_arg.as_deref(),
+            first_bare.as_deref().unwrap_or(""),
         )?;
         ladder = l;
         tier_idx = idx;
@@ -1178,6 +1179,31 @@ fn exec_llm(
             }
             t_args.push("--model".into());
             t_args.push(tier.model.clone());
+            // v0.18.10 双向自适应（升半边）：反馈随梯上传——升到 i>起步档时，
+            // 把该 agent 在低档的失败反馈（tier_journal 去重 top-3）注入 prompt。
+            // 高档因此知道低档栽在哪（如"思考吞预算/输出无 JSON"），针对性避坑。
+            // tier_arg 显式钉档不注入（单档探测语义）；i==tier_idx 起步档无上游反馈。
+            if i > tier_idx && tier_arg.is_none() {
+                if let Some(name) = &first_bare {
+                    let conn = crate::db::open();
+                    let mut notes = crate::db::tier_failure_notes_conn(&conn, name, &ladder[tier_idx], 3);
+                    for lower in ladder[tier_idx + 1..i].iter() {
+                        notes.extend(crate::db::tier_failure_notes_conn(&conn, name, lower, 2));
+                    }
+                    if !notes.is_empty() {
+                        let digest: String =
+                            notes.iter().take(4).map(|n| format!("- {}\n", n)).collect();
+                        t_args[1] = format!(
+                            "{}\n\n# 低档位模型的失败记录（避免重蹈）\n{}\n请避免上述失败模式，直接给出正确结果。",
+                            t_args[1], digest
+                        );
+                        eprintln!(
+                            "    -> llm tier feedback: {} 条失败反馈随梯上传",
+                            notes.len().min(4)
+                        );
+                    }
+                }
+            }
             eprintln!(
                 "    -> llm tier [{}/{}] {} -> model={}",
                 i + 1,
@@ -1227,6 +1253,13 @@ fn exec_llm(
                             let mut enriched = kvs;
                             enriched.push(("meta_tier".into(), tier_name.clone()));
                             enriched.push(("meta_model_id".into(), tier.model.clone()));
+                            // v0.18.10 双向自适应（降半边）：成功记账——同 agent
+                            // 低档连续全成功会推动起步档下探（resolve_tier_start 读）。
+                            // 跨档成功（i > 起步档）说明低档确实不行，也记 success
+                            // 于实际服务档，经验键为 agent 名。
+                            if let Some(name) = &first_bare {
+                                crate::db::record_tier_outcome(name, tier_name, true, "");
+                            }
                             // v0.18.6 P0-刀1：llm 成功 → 自动播种 canary。
                             // 保真：快照含协议尾巴（重放字节级还原当时输入；
                             // tier2+ 的 carried partial 变体不入档——那是单次情境）。
@@ -1254,6 +1287,11 @@ fn exec_llm(
                             .take(200)
                             .collect::<String>()
                     );
+                    // v0.18.10 双向自适应（升半边）：失败反馈记账——失败原因
+                    // 落 tier_journal，升档时随梯上传注入高档 prompt（免重蹈）。
+                    if let Some(name) = &first_bare {
+                        crate::db::record_tier_outcome(name, tier_name, false, &last_err);
+                    }
                 }
                 Err(e) => {
                     last_err = format!("tier '{}' bridge launch failed: {}", tier_name, e);

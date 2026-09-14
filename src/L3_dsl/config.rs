@@ -385,6 +385,7 @@ pub fn resolve_tier_start(
     system_len: usize,
     schema_fields: usize,
     tier_arg: Option<&str>,
+    agent_key: &str,
 ) -> Result<(Vec<String>, usize), String> {
     // 阶梯完整性校验（fail-closed：引用未定义档位 = 配置漂移，硬错）
     for t in &agent.tiers {
@@ -419,8 +420,26 @@ pub fn resolve_tier_start(
     // （思考型模型精炼偏好与详尽要求方向相反）
     let score = (score as i32 + guide_detail_signal(&agent.guide)).max(0) as u32;
     let idx = score_to_tier_index(score, ladder.len());
+    // v0.18.10 双向自适应（降半边）：agent 名即经验键——该 agent 若在
+    // idx-1 档近 TIER_ADAPT_WINDOW 次全成功（0 失败），起步档下探一档。
+    // 慢降：下探只降 1 档且必须全成功——成本要省，但探索要保守。
+    // tier= 实参路径在上面已 return（显式钉档不受经验影响）。
+    if idx > 0 {
+        let lower = &ladder[idx - 1];
+        let conn = crate::L0_physical::db::open();
+        if let Some((win, succ)) =
+            crate::L0_physical::db::tier_outcome_stats_conn(&conn, agent_key, lower, TIER_ADAPT_WINDOW)
+        {
+            if win >= TIER_ADAPT_WINDOW && succ == win {
+                return Ok((ladder, idx - 1));
+            }
+        }
+    }
     Ok((ladder, idx))
 }
+
+/// v0.18.10 经验下探的窗口/阈值（同因失败去重后窗口语义=去重结局数）。
+pub const TIER_ADAPT_WINDOW: usize = 5;
 
 /// Fill missing OPENAI_* into a Command's environment from config (does not override existing env).
 pub fn apply_llm_env_from_config(cmd: &mut std::process::Command, cfg: &LlmConfig) {
@@ -629,6 +648,52 @@ base_url = "http://gpu-box:11434/v1"
     }
 
     #[test]
+    fn tier_journal_success_downshift_and_failure_notes() {
+        // v0.18.10 双向自适应：成功经验下探起步档 + 失败反馈查询。
+        // 用内存库隔离（E2E 铁律：不手敲碰真库）。
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tier_journal (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent TEXT NOT NULL, tier TEXT NOT NULL,
+                ok INTEGER NOT NULL, note TEXT DEFAULT '',
+                recorded_at TEXT DEFAULT '');",
+        )
+        .unwrap();
+        // agent_x 在 light 档 5 连成功（成功不去重——每次都是独立证据）
+        for _ in 0..5 {
+            crate::L0_physical::db::record_tier_outcome_conn(&conn, "agent_x", "light", true, "");
+        }
+        let stats = crate::L0_physical::db::tier_outcome_stats_conn(&conn, "agent_x", "light", 5);
+        assert_eq!(stats, Some((5, 5)), "5 连成功应全 ok 且计满窗口");
+        // 成功不去重：5 次成功 = 5 行独立证据
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tier_journal WHERE ok=1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 5, "成功每次落一行（窗口计数的独立证据）");
+        // 失败反馈入库 + 查询
+        crate::L0_physical::db::record_tier_outcome_conn(
+            &conn, "agent_x", "medium", false, "no JSON in output",
+        );
+        crate::L0_physical::db::record_tier_outcome_conn(
+            &conn, "agent_x", "medium", false, "timeout after 300s",
+        );
+        let notes =
+            crate::L0_physical::db::tier_failure_notes_conn(&conn, "agent_x", "medium", 3);
+        assert_eq!(notes.len(), 2, "两条不同失败反馈");
+        assert!(notes.iter().any(|x| x.contains("no JSON")));
+        assert!(notes.iter().any(|x| x.contains("timeout")));
+        // 同因失败去重
+        crate::L0_physical::db::record_tier_outcome_conn(
+            &conn, "agent_x", "medium", false, "no JSON in output",
+        );
+        let n2: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tier_journal WHERE ok=0", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n2, 2, "同因失败不重复膨胀");
+    }
+
+    #[test]
     fn resolve_tier_undefined_hard_error() {
         let agent = AgentConfig {
             tiers: vec!["light".into(), "ghost".into()],
@@ -645,7 +710,7 @@ base_url = "http://gpu-box:11434/v1"
             .into_iter()
             .collect(),
         };
-        let err = resolve_tier_start(&agent, &tiers, 10, 10, 0, None).unwrap_err();
+        let err = resolve_tier_start(&agent, &tiers, 10, 10, 0, None, "").unwrap_err();
         assert!(err.contains("undefined tier 'ghost'"), "{err}");
     }
 
@@ -669,15 +734,15 @@ base_url = "http://gpu-box:11434/v1"
             .collect(),
         };
         // tier= 手动指定
-        let (_, i) = resolve_tier_start(&agent, &tiers, 0, 0, 0, Some("high")).unwrap();
+        let (_, i) = resolve_tier_start(&agent, &tiers, 0, 0, 0, Some("high"), "").unwrap();
         assert_eq!(i, 2);
         // tier= 不在阶梯内 → 硬错误
-        assert!(resolve_tier_start(&agent, &tiers, 0, 0, 0, Some("ultra")).is_err());
+        assert!(resolve_tier_start(&agent, &tiers, 0, 0, 0, Some("ultra"), "").is_err());
         // 复杂度选择：轻 → 0
-        let (_, i) = resolve_tier_start(&agent, &tiers, 50, 0, 0, None).unwrap();
+        let (_, i) = resolve_tier_start(&agent, &tiers, 50, 0, 0, None, "").unwrap();
         assert_eq!(i, 0);
         // 重 → 2
-        let (_, i) = resolve_tier_start(&agent, &tiers, 5000, 500, 7, None).unwrap();
+        let (_, i) = resolve_tier_start(&agent, &tiers, 5000, 500, 7, None, "").unwrap();
         assert_eq!(i, 2);
     }
 }

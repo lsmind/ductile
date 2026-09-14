@@ -173,6 +173,18 @@ pub const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS pipelines (
             updated_at  TEXT DEFAULT '',
             UNIQUE(proc_name, impl_name)
         );
+        -- v0.18.10 双向自适应阶梯：agent 档位经验。成功于 tier k → 起步档
+        -- 可下探（省成本）；失败 → 反馈随梯上传（高档免重蹈）。
+        -- 成功每次落行（独立证据）；失败同 note 先删后插（去重不膨胀）。
+        CREATE TABLE IF NOT EXISTS tier_journal (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent       TEXT NOT NULL,
+            tier        TEXT NOT NULL,
+            ok          INTEGER NOT NULL,
+            note        TEXT DEFAULT '',
+            recorded_at TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_tier_journal_agent ON tier_journal(agent);
         CREATE TABLE IF NOT EXISTS runs (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             proc_name   TEXT NOT NULL,
@@ -743,6 +755,76 @@ pub fn upsert_impl_pref_conn(conn: &Connection, proc_name: &str, impl_name: &str
 pub fn upsert_impl_pref(proc_name: &str, impl_name: &str, weight: f64) {
     let conn = open();
     upsert_impl_pref_conn(&conn, proc_name, impl_name, weight)
+}
+
+// ── v0.18.10 双向自适应阶梯：tier_journal ──
+
+/// 记一次档位结局。note=失败反馈（升档时随梯上传）或空（成功）。
+/// UNIQUE(agent,tier,note) 去重：同因失败不重复膨胀日志。
+pub fn record_tier_outcome(agent: &str, tier: &str, ok: bool, note: &str) {
+    let conn = open();
+    record_tier_outcome_conn(&conn, agent, tier, ok, note)
+}
+
+pub fn record_tier_outcome_conn(conn: &Connection, agent: &str, tier: &str, ok: bool, note: &str) {
+    let note = note.chars().take(400).collect::<String>();
+    // 成功：每次落行（窗口计数的独立证据）。
+    // 失败：同 (agent,tier,note) 先删后插——同因失败不膨胀，时间戳刷新。
+    if !ok {
+        let _ = conn.execute(
+            "DELETE FROM tier_journal WHERE agent=?1 AND tier=?2 AND ok=0 AND note=?3",
+            params![agent, tier, note],
+        );
+    }
+    conn.execute(
+        "INSERT INTO tier_journal (agent, tier, ok, note, recorded_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![agent, tier, ok as i64, note, now_ts()],
+    )
+    .ok();
+}
+
+/// 该 agent 在 tier 的近况：Some((窗口, 成功数))，窗口>0 才有意义。
+pub fn tier_outcome_stats_conn(
+    conn: &Connection,
+    agent: &str,
+    tier: &str,
+    window: usize,
+) -> Option<(usize, usize)> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT ok FROM tier_journal WHERE agent = ?1 AND tier = ?2
+             ORDER BY id DESC LIMIT ?3",
+        )
+        .ok()?;
+    let oks: Vec<i64> = stmt
+        .query_map(params![agent, tier, window as i64], |r| r.get(0))
+        .ok()?
+        .filter_map(|r| r.ok())
+        .collect();
+    if oks.is_empty() {
+        return None;
+    }
+    let succ = oks.iter().filter(|&&o| o == 1).count();
+    Some((oks.len(), succ))
+}
+
+/// 该 agent 在 tier 的失败反馈清单（最近优先，去重后截 top-k）——升档注入用。
+pub fn tier_failure_notes_conn(conn: &Connection, agent: &str, tier: &str, top: usize) -> Vec<String> {
+    let mut stmt = match conn.prepare(
+        "SELECT note FROM tier_journal WHERE agent = ?1 AND tier = ?2 AND ok = 0 AND note != ''
+         ORDER BY id DESC LIMIT ?3",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let rows = stmt.query_map(params![agent, tier, top as i64], |r| {
+        r.get::<_, String>(0)
+    });
+    match rows {
+        Ok(it) => it.filter_map(|r| r.ok()).collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// v0.8 preference bump — 单语句原子乘性更新（免读改写）。
