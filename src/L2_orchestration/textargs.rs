@@ -50,6 +50,8 @@ pub fn resolve_vars(text: &str, topic: &str, results: &BTreeMap<String, Value>) 
     //（foreach var 的运行时通道——body_text 不再做字符串替换，{item} 作为
     // 字面量安全通过参数解析，在此处统一解析。未命中 results 的 {xxx} 原样
     // 保留——JSON 示例等字面花括号不受影响）。
+    // v0.18.14：{name.field} 支持——与 @name.field 通道对齐（script kv 参数
+    // 里 "{propose.value}" 此前因点号被白名单拒绝而字面落库，实测坑）。
     let t3 = {
         let mut out = String::with_capacity(t2.len());
         let chars: Vec<char> = t2.chars().collect();
@@ -58,14 +60,48 @@ pub fn resolve_vars(text: &str, topic: &str, results: &BTreeMap<String, Value>) 
             if chars[i] == '{' {
                 if let Some(close) = chars[i + 1..].iter().position(|&c| c == '}') {
                     let name: String = chars[i + 1..i + 1 + close].iter().collect();
-                    if !name.is_empty()
-                        && name.chars().all(|c| c.is_alphanumeric() || c == '_')
-                        && results.contains_key(&name)
-                    {
-                        match results.get(&name) {
-                            Some(Value::Text(v)) => out.push_str(v),
-                            Some(v) => out.push_str(&v.as_text()),
-                            None => {}
+                    let mut valid_ref = !name.is_empty()
+                        && name
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || c == '_' || c == '.');
+                    if valid_ref {
+                        let (base, field) = match name.split_once('.') {
+                            Some((b, f)) => (b, Some(f)),
+                            None => (name.as_str(), None),
+                        };
+                        if !results.contains_key(base) {
+                            valid_ref = false;
+                        } else if let Some(fld) = field {
+                            // 字段引用：字段不存在则原样保留（字面量保护）
+                            let has_field = match results.get(base) {
+                                Some(Value::Text(v)) => extract_field(fld, v).is_some(),
+                                _ => false,
+                            };
+                            if !has_field {
+                                valid_ref = false;
+                            }
+                        }
+                    }
+                    if valid_ref {
+                        let (base, field) = match name.split_once('.') {
+                            Some((b, f)) => (b, Some(f)),
+                            None => (name.as_str(), None),
+                        };
+                        match (results.get(base), field) {
+                            (Some(Value::Text(v)), Some(fld)) => {
+                                if let Some(fv) = extract_field(&fld, v) {
+                                    out.push_str(&fv);
+                                }
+                            }
+                            (Some(Value::Text(v)), None) => out.push_str(v),
+                            (Some(v), None) => out.push_str(&v.as_text()),
+                            (Some(v), Some(fld)) => {
+                                let t = v.as_text();
+                                if let Some(fv) = extract_field(&fld, &t) {
+                                    out.push_str(&fv);
+                                }
+                            }
+                            (None, _) => {}
                         }
                         i += close + 2;
                         continue;

@@ -105,6 +105,10 @@ pub struct ENode {
     /// 任何熔合（同构/merge 扁平化/write-read 对消）——熔合会抹掉裁判依赖序，
     /// 导致 deliver 抢在 gen 前执行、判决落空。
     pub when_guard: bool,
+    /// v0.18.13 FOPT 承重：矛盾态标记。script impl 且契约卡 mcsm 含 2，
+    /// 或脚本卡 cse_safe=false（pure/idempotent/safe 未全声明）即 true——
+    /// 矛盾态隔离 + 修复既有缺口（cse_safe 从未被熔合决策消费）。
+    pub mcsm_conflict: bool,
 }
 
 /// E-class：等价 proc 的集合 + 其全部等价实现（e-nodes）+ 节点来源。
@@ -150,6 +154,7 @@ impl EGraph {
             op: node.op.clone(),
             children: node.children.iter().map(|c| self.uf.find_imm(*c)).collect(),
             when_guard: node.when_guard,
+            mcsm_conflict: node.mcsm_conflict,
         }
     }
 
@@ -339,10 +344,20 @@ pub fn build_egraph(pl: &Pipeline) -> EGraph {
                 .iter()
                 .filter_map(|r| eg.proc_class.get(r).copied())
                 .collect();
+            // v0.18.13 FOPT：script impl 查契约卡——mcsm 矛盾态(含2)或
+            // cse_safe=false → mcsm_conflict=true，禁一切熔合。
+            // （同时修复：cse_safe 此前只在 api/cli 展示，从未进熔合决策。）
+            let mcsm_conflict = (|| {
+                let (name, _) = crate::script::parse_script_body(&impl_.body_text).ok()?;
+                let card = crate::db::script_get(&name)?;
+                Some(!crate::script::cse_safe(&card))
+            })()
+            .unwrap_or(false);
             let node = ENode {
                 op: body_op(&impl_.body_text),
                 children,
                 when_guard: impl_.when.is_some(),
+                mcsm_conflict,
             };
             eg.add_node_raw(class_id, node.clone(), (proc.name.clone(), idx));
         }
@@ -375,6 +390,12 @@ fn class_has_when_guard(eg: &EGraph, cid: usize) -> bool {
     eg.classes[canon].nodes.iter().any(|n| n.when_guard)
 }
 
+/// v0.18.13 FOPT：class 是否含矛盾态节点（mcsm 含 2 或 cse_safe=false）。
+fn class_has_mcsm_conflict(eg: &EGraph, cid: usize) -> bool {
+    let canon = eg.uf.find_imm(cid);
+    eg.classes[canon].nodes.iter().any(|n| n.mcsm_conflict)
+}
+
 /// 两 canonical class 的节点集（canon 化、排序去重后）完全一致 → union。
 fn union_isomorphic_classes(eg: &mut EGraph) -> bool {
     let mut changed = false;
@@ -400,6 +421,10 @@ fn union_isomorphic_classes(eg: &mut EGraph) -> bool {
                 if eg.uf.find_imm(id) != eg.uf.find_imm(other) {
                     // v0.11.1：任一侧含 when-载体 → 不熔合（裁判路由 impl 语义不等价）。
                     if class_has_when_guard(eg, id) || class_has_when_guard(eg, other) {
+                        continue;
+                    }
+                    // v0.18.13 FOPT：任一侧 mcsm 矛盾态 → 不熔合（隔离防传染）。
+                    if class_has_mcsm_conflict(eg, id) || class_has_mcsm_conflict(eg, other) {
                         continue;
                     }
                     eg.merge_classes(other, id);

@@ -47,8 +47,30 @@ pub fn lang_interpreter(lang: &str) -> Result<&'static str, String> {
 
 /// CSE 熔合安全性：只有显式声明 纯 + 幂等 + 可并发 的脚本才允许
 /// e-graph 同构熔合（两个同构调用合并为一次执行）。其余一律 no_cse。
+/// v0.18.13 FOPT 承重：mcsm 坐标含 2（矛盾态）→ 强制 no_cse——
+/// 措施表"2=隔离防传染"的物理强制：有未解矛盾的脚本不许与任何东西熔合
+/// （熔合会传播失败模式）。1/3/4 不拦：1 稳态可熔，3 构造态 tentative
+/// 观察（靠 canary），4 实践扩展允许（经验账本在积累证据）。
 pub fn cse_safe(card: &ScriptCard) -> bool {
-    card.pure && card.idempotent && card.concurrency == Concurrency::Safe
+    let base = card.pure && card.idempotent && card.concurrency == Concurrency::Safe;
+    if !base {
+        return false;
+    }
+    if mcsm_has_conflict(&card.mcsm) {
+        return false;
+    }
+    true
+}
+
+/// v0.18.13：mcsm 坐标任一维度 = 2（矛盾态）？
+/// F(2)-O(1)-P(3)-T(2) → true（场域和目的都有矛盾）。
+/// 空 mcsm（未标注）不拦——FOPT 是可选接口不是强制税。
+pub fn mcsm_has_conflict(mcsm: &str) -> bool {
+    if mcsm.is_empty() {
+        return false;
+    }
+    // 已在 parse 时规范化为 F(n)-O(n)-P(n)-T(n)；防御性解析
+    mcsm.contains("(2)")
 }
 
 /// 从脚本源码解析契约头。fail-closed：缺 `# ductile:` 起始行或任一必填键

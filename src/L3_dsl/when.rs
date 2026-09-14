@@ -76,6 +76,11 @@ pub enum Cond {
     Exists(Operand),
     /// 二元比较
     Cmp(Box<Operand>, Op, Box<Operand>),
+    /// v0.18.14：合取 `cond && cond`（顶层 `&&` 在引号外切分，递归解析）。
+    /// 背景：复合条件此前不存在——全 `!=` 的 `A != "x" && B != ""` 会被
+    /// parse_operand 的字面量剥壳吞掉整个右半（首尾引号）→ 静默永真放行；
+    /// 含 `==` 的复合则右操作数解析失败响亮报错。焊进文法消灭这类半静默。
+    And(Box<Cond>, Box<Cond>),
 }
 
 /// 求值上下文：CLI params + 上游 proc 结果。
@@ -177,6 +182,8 @@ impl Cond {
                     },
                 }
             }
+            // v0.18.14：合取——短路求值，fail-closed 语义不变
+            Cond::And(l, r) => l.eval(ctx) && r.eval(ctx),
         }
     }
 }
@@ -200,6 +207,35 @@ pub fn parse_when(cond: &str) -> Result<Option<Cond>, String> {
     if cond.is_empty() {
         return Ok(None);
     }
+    // v0.18.14：顶层 `&&` 合取——引号外切分，每段递归 parse_when。
+    // `||` 显式拒绝（fail-closed，不静默当存在性放行）。
+    if let Some(parts) = split_top_and(cond) {
+        let mut conds = Vec::new();
+        for p in parts {
+            // 空段（`A && ` / `&& B` / `A && && B`）= 畸形条件，fail-closed。
+            if p.is_empty() {
+                return Err(format!(
+                    ".when: empty segment in conjunction {:?} — fail-closed",
+                    cond
+                ));
+            }
+            if let Some(c) = parse_when(&p)? {
+                conds.push(c);
+            }
+        }
+        if conds.len() == 1 {
+            return Ok(Some(conds.pop().unwrap()));
+        }
+        if conds.len() >= 2 {
+            let mut it = conds.into_iter();
+            let first = it.next().unwrap();
+            return Ok(Some(it.fold(first, |acc, c| Cond::And(Box::new(acc), Box::new(c)))));
+        }
+        return Ok(None); // 全空段
+    }
+    if cond.contains("||") {
+        return Err(".when: `||` disjunction not supported — fail-closed".into());
+    }
     // 按算子长度降序找（>= 优先于 >）
     for (pat, op) in [
         ("==", Op::Eq),
@@ -217,6 +253,47 @@ pub fn parse_when(cond: &str) -> Result<Option<Cond>, String> {
     }
     // 无算子：裸存在性（param 或 @proc.field）
     Ok(Some(Cond::Exists(parse_operand(cond)?)))
+}
+
+/// v0.18.14：顶层（引号外）`&&` 切分。返回 None = 无顶层 && 。
+/// 引号内的 && 不切（"a && b" 是字面量）。
+fn split_top_and(cond: &str) -> Option<Vec<String>> {
+    let chars: Vec<char> = cond.chars().collect();
+    let mut parts = Vec::new();
+    let mut cur = Vec::new();
+    let mut in_quote: Option<char> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match in_quote {
+            Some(q) => {
+                cur.push(c);
+                if c == q {
+                    in_quote = None;
+                }
+                i += 1;
+            }
+            None => {
+                if c == '"' || c == '\'' {
+                    in_quote = Some(c);
+                    cur.push(c);
+                    i += 1;
+                } else if c == '&' && i + 1 < chars.len() && chars[i + 1] == '&' {
+                    parts.push(cur.iter().collect::<String>().trim().to_string());
+                    cur.clear();
+                    i += 2; // 跳过 "&&"
+                } else {
+                    cur.push(c);
+                    i += 1;
+                }
+            }
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    parts.push(cur.iter().collect::<String>().trim().to_string());
+    Some(parts)
 }
 
 fn parse_operand(s: &str) -> Result<Operand, String> {
@@ -277,6 +354,39 @@ pub fn eval_cond_str(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v0_18_14_and_conjunction_semantics() {
+        // 复合合取四象限 + 静默永真 bug 回归（旧版全 != 复合被字面量剥壳吞右半）
+        let c = ctx(&[("mode", "deep")], &[("src", "value=NO-OP")]);
+        let t = |cond: &str| eval_cond_str(cond, c.params, c.results);
+        // 注意：param 用裸名（mode），@ 是裁判 @proc.field 专用
+        assert!(t("@src.value == \"NO-OP\" && mode == \"deep\""), "双双真");
+        assert!(!t("@src.value != \"NO-OP\" && @src.value != \"\""), "全!=复合=假（旧版静默永真 bug）");
+        assert!(!t("@src.value == \"XX\" && mode == \"deep\""), "左假右真=假");
+        assert!(!t("@src.value == \"NO-OP\" && mode == \"XX\""), "左真右假=假");
+        // 三段合取
+        assert!(t("@src.value == \"NO-OP\" && mode == \"deep\" && @src.value != \"\""), "三段链");
+        // || 显式拒绝（fail-closed false）
+        assert!(!t("@src.value == \"A\" || @src.value == \"B\""), "|| 拒收");
+        // 引号内 && 是字面量，不切分（解析成功；值不等 → false 而非解析错）
+        let lit = parse_when("@src.value == \"A && B\"");
+        assert!(lit.is_ok(), "引号内&&不应报错: {:?}", lit.err());
+        assert!(!t("@src.value == \"A && B\""), "字面量&&：NO-OP != 'A && B' → false");
+    }
+
+    #[test]
+    fn v0_18_14_and_parse_deep() {
+        // && 深层解析：含 == 的复合此前响亮失败，现在合法
+        let c = ctx(&[], &[("g", "score=85")]);
+        assert!(eval_cond_str(
+            "@g.score >= 80 && @g.score < 90",
+            c.params,
+            c.results
+        ));
+        // 空段 fail-closed：`A && ` 右段空 → parse operand Err → 整条 Err
+        assert!(parse_when("@g.score >= 80 && ").is_err());
+    }
 
     fn ctx(params: &[(&str, &str)], results: &[(&str, &str)]) -> CondCtx<'static> {
         // 泄漏以获得 'static —— 测试专用，量小无碍

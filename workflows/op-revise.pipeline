@@ -1,0 +1,17 @@
+// op-revise.pipeline — v0.18.14 垂直优化（MetaRSI §4.4 的 ductile 落法）
+// 证据（tier_journal 失败反馈）→ LLM 提议 agent guide 修改 → tentative patch。
+// 裁决分离：patch 只 stage（tentative），confirm/revert 由下轮实测或人决定——
+// 改进程序产生候选，不 promote 候选（论文 §3 原则）。
+// 用法：ductile run workflows/op-revise.pipeline <agent名>
+Pipeline("op_revise", "垂直优化：失败证据驱动的算子策略改写", cwd="${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)}")
+  .proc("ev", script(op_evidence, agent="{topic}", limit=20))
+    .desc("收集该 agent 的失败证据")
+  .proc("propose", llm(op_reviser,
+      prompt="以下是算子（agent）「{topic}」的失败证据清单：\n@ev.notes\n\nruns 失败统计：\n@ev.runs_failed\n\n若证据为空（failures=0 或两个清单都是 []），说明该算子无失败记录——输出 value=NO-OP, rationale=无失败证据，不提议修改。否则：只针对失败模式提议一处可执行的 guide 增补（输出格式约束/领域规则提醒/避免已证实的失败模式）。输出 JSON：value=修改后完整 guide 文本（原基础增补不推翻；无改动则 NO-OP）， rationale=一句话理由（引用具体失败证据）。",
+      schema="value,rationale", timeout=120))
+    .desc("LLM 读证据提议 guide 修改（垂直轴：改算子怎么提议）；无证据→NO-OP")
+  .proc("stage", script(op_stage, agent="{topic}", field="guide", value="{propose.value}", rationale="{propose.rationale}"))
+    .when(@propose.value != "NO-OP" && @propose.value != "")
+    .desc("提议落 patches 表（tentative，origin=llm）；NO-OP 时跳过")
+  .proc("deliver")
+    .deliver(@propose)
