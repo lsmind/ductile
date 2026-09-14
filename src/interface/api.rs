@@ -641,6 +641,7 @@ mod tests {
             effects: "none".into(),
             timeout_secs: 10,
             retries: 0,
+            mcsm: String::new(),
         }
     }
 

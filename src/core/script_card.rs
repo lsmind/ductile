@@ -20,6 +20,9 @@ pub struct ScriptCard {
     pub effects: String,
     pub timeout_secs: u64,
     pub retries: usize,
+    /// v0.18.11 MCSM/FOPT 认知坐标：F(f)-O(o)-P(p)-T(t)，各维 1-4
+    /// （建表/冲突/抽象/实践）。空串 = 未标注。解析见 script::parse_mcsm。
+    pub mcsm: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

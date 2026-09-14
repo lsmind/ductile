@@ -600,6 +600,10 @@ fn cmd_script_show(name: &str) -> Result<i32, String> {
     println!("  effects:      {}", c.effects);
     println!("  timeout:      {}s", c.timeout_secs);
     println!("  retries:      {}", c.retries);
+    if !c.mcsm.is_empty() {
+        println!("  mcsm:         {}", c.mcsm);
+        println!("                (F场域 O本体 P现象 T目的；1建表 2冲突 3抽象 4实践 — docs/MCSM.md)");
+    }
     println!("  cse_safe:     {}", crate::script::cse_safe(&c));
     Ok(0)
 }

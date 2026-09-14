@@ -894,6 +894,7 @@ key2=value2
 # concurrency: safe                ← safe | exclusive（能否并发）
 # effects: none                    ← none | fs | net | system
 # timeout: 10                      ← 秒；# retries: N 可选
+# mcsm: F(2)-O(1)-P(3)-T(2)        ← 可选：FOPT 认知坐标（fail-closed 校验，见 docs/MCSM.md）
 ```
 
 **语义标注的编排意义**（喂给引擎做自动并行/CSE 决策）：
@@ -939,6 +940,14 @@ ductile script detach <name>            注销
 
 示例：`examples/scripts/word_stats.py`（纯函数）、`examples/scripts/make_report.sh`（fs 副作用）；
 验收链路：`pipelines/script_demo.pipeline`。
+
+### 9.5 MCSM/FOPT 认知坐标（v0.18.11）
+
+脚本契约头可选键 `mcsm`：`F(f)-O(o)-P(p)-T(t)`，各维 1-4
+（1建表/2冲突/3抽象/4实践——操作循环，不是价值阶梯）。
+四维 = 场域/本体论/现象/目的论（存在论的空间性/内容/显现/方向性）。
+声明了就 fail-closed 校验（格式垃圾拒绝注册），`script show` 展示。
+管线/拓扑/层用注释约定标注。完整语义与实例打标见 `docs/MCSM.md`。
 
 ---
 

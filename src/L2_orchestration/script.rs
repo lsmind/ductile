@@ -158,6 +158,12 @@ pub fn parse_contract(source: &str, path: &str) -> Result<ScriptCard, String> {
         .get("retries")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0);
+    // v0.18.11 MCSM/FOPT：可选键 mcsm —— F(n)-O(n)-P(n)-T(n) 认知坐标。
+    // 声明了就校验（fail-closed：坐标垃圾拒绝入库），没声明默认空。
+    let mcsm = match kv.get("mcsm") {
+        Some(raw) => normalize_mcsm(raw, path)?,
+        None => String::new(),
+    };
 
     Ok(ScriptCard {
         name,
@@ -172,7 +178,45 @@ pub fn parse_contract(source: &str, path: &str) -> Result<ScriptCard, String> {
         effects: kv["effects"].clone(),
         timeout_secs,
         retries,
+        mcsm,
     })
+}
+
+/// v0.18.11 校验并规范化 MCSM/FOPT 坐标。
+/// 合法格式：`F(1)-O(2)-P(3)-T(4)`（字母 F/O/P/T 不区分大小写，数字 1-4）。
+/// 数字不是价值高低——是该维度当前执行的操作：1建表/2冲突/3抽象/4实践。
+/// 返回规范化大写形式。见 docs/MCSM.md。
+pub fn normalize_mcsm(raw: &str, path: &str) -> Result<String, String> {
+    let s = raw.trim().to_uppercase();
+    let parts: Vec<&str> = s.split('-').collect();
+    let bad = || {
+        format!(
+            "{}: bad mcsm '{}' — expect F(1-4)-O(1-4)-P(1-4)-T(1-4), e.g. F(2)-O(1)-P(3)-T(2) (see docs/MCSM.md)",
+            path, raw
+        )
+    };
+    if parts.len() != 4 {
+        return Err(bad());
+    }
+    let dims = [('F', 'O'), ('O', 'P'), ('P', 'T'), ('T', 'T')];
+    let mut out = String::with_capacity(16);
+    for (i, part) in parts.iter().enumerate() {
+        let p = part.trim();
+        let bytes = p.as_bytes();
+        if bytes.len() != 4
+            || bytes[0] != dims[i].0 as u8
+            || bytes[1] != b'('
+            || bytes[3] != b')'
+            || !(b'1'..=b'4').contains(&bytes[2])
+        {
+            return Err(bad());
+        }
+        if i > 0 {
+            out.push('-');
+        }
+        out.push_str(p);
+    }
+    Ok(out)
 }
 
 /// 从 `script(name, k=v, ...)` body 提取 (name, [(k, v), ...])。
@@ -272,6 +316,20 @@ print("hi")
         assert_eq!(card.timeout_secs, 60);
         assert_eq!(card.retries, 0);
         assert!(!cse_safe(&card)); // pure=false → 不许 CSE
+        assert_eq!(card.mcsm, ""); // 未声明 mcsm → 空（可选键）
+    }
+
+    #[test]
+    fn mcsm_field_parsed_and_normalized() {
+        // v0.18.11：mcsm 契约键 — F-O-P-T 认知坐标进卡
+        let src = GOOD.replace("# timeout: 60", "# timeout: 60\n# mcsm: F(2)-o(1)-P(3)-t(4)");
+        let card = parse_contract(&src, "/tmp/x.py").unwrap();
+        assert_eq!(card.mcsm, "F(2)-O(1)-P(3)-T(4)", "小写规范化大写");
+        // 非法坐标 fail-closed
+        for bad in ["F(9)-O(1)-P(3)-T(4)", "f(2)-x(1)-P(3)-T(4)", "F(2)-O(1)-P(3)", "F(2)O(1)P(3)T(4)"] {
+            let src = GOOD.replace("# timeout: 60", format!("# timeout: 60\n# mcsm: {bad}").as_str());
+            assert!(parse_contract(&src, "/tmp/x.py").is_err(), "应拒绝: {bad}");
+        }
     }
 
     #[test]
