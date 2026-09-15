@@ -176,14 +176,20 @@ impl EGraph {
         if ra == rb {
             return ra;
         }
-        let moved: Vec<ENode> = self.classes[rb].nodes.drain(..).collect();
-        let moved_origins: Vec<(String, usize)> = self.classes[rb].origins.drain(..).collect();
-        let moved_procs = std::mem::take(&mut self.classes[rb].procs);
-        self.classes[ra].procs.extend(moved_procs);
+        // 自审修复(2026-09-15): 先 union 定根, 再向"根"搬迁——旧序先搬进 ra 再
+        // union, 而 union 按秩可能选 rb 为根(rank[rb]>rank[ra]), 节点全部困在
+        // 非规范类 ra 里, 规范视图蒸发(红测试 merge_classes_nodes_survive 实锤:
+        // 规范类 nodes=0)。A5 消融没踩到纯因两 rank 恒等(平局选 ra)。
+        let root = self.uf.union(ra, rb);
+        let (src_cls, dst) = if root == ra { (rb, ra) } else { (ra, rb) };
+        let moved: Vec<ENode> = self.classes[src_cls].nodes.drain(..).collect();
+        let moved_origins: Vec<(String, usize)> = self.classes[src_cls].origins.drain(..).collect();
+        let moved_procs = std::mem::take(&mut self.classes[src_cls].procs);
+        self.classes[dst].procs.extend(moved_procs);
         for (node, origin) in moved.into_iter().zip(moved_origins) {
-            self.add_node_raw(ra, node, origin);
+            self.add_node_raw(dst, node, origin);
         }
-        self.uf.union(ra, rb)
+        root
     }
 
     /// canonical class 数（诊断用）。
@@ -1382,5 +1388,49 @@ mod prim_tests {
         assert_eq!(extract_quoted_arg(r#"to=out"#, "to"), None); // 无引号
         assert_eq!(extract_quoted_arg(r#"other="x""#, "to"), None); // 无此键
         assert_eq!(extract_quoted_arg(r#"to="#, "to"), None); // 等号后无值
+    }
+
+    // ── 自审 r2-a2 裁定: union 按秩选根与节点搬迁目标不一致 ──
+    // merge_classes 先把 rb 节点搬进 ra 再 union(ra,rb); union 在
+    // rank[rb]>rank[ra] 时选 rb 为根——节点困在非规范 ra, 规范视图蒸发。
+    #[test]
+    fn merge_classes_nodes_survive_when_rb_wins_rank() {
+        let mut eg = EGraph::default();
+        let mut mk = |eg: &mut EGraph| {
+            let id = eg.uf.make_set();
+            eg.classes.push(EClass::default());
+            id
+        };
+        let a = mk(&mut eg);
+        let b = mk(&mut eg);
+        // 拉高 b 的 rank: 先合并两个空类 c→b 使 rank[b]=1
+        let c = mk(&mut eg);
+        let _ = eg.merge_classes(c, b); // rank 平局 → 根=b, rank[b]=1
+        // 再给 a/b 各塞一个节点
+        let n1 = crate::L2_orchestration::egraph::ENode {
+            op: "run".into(),
+            children: vec![],
+            when_guard: false,
+            mcsm_conflict: false,
+        };
+        let n2 = crate::L2_orchestration::egraph::ENode {
+            op: "write".into(),
+            children: vec![],
+            when_guard: false,
+            mcsm_conflict: false,
+        };
+        eg.add_node_raw(a, n1, ("pa".into(), 0));
+        eg.add_node_raw(b, n2, ("pb".into(), 0));
+        // 现在合并 a+b: rank[b]=1 > rank[a]=0 → union 根是 b
+        let root = eg.merge_classes(a, b);
+        let canon_a = eg.uf.find_imm(a);
+        let canon_b = eg.uf.find_imm(b);
+        assert_eq!(canon_a, canon_b, "同根");
+        let root_class = &eg.classes[root];
+        let total: usize = root_class.nodes.len();
+        assert_eq!(total, 2, "两个节点都必须在规范类里, 实际 {}", total);
+        // 且规范类(通过 find 到达的)必须能看见全部节点
+        let canon_class = &eg.classes[eg.uf.find_imm(a)];
+        assert_eq!(canon_class.nodes.len(), 2, "规范视图节点蒸发! find(a)={}, nodes={}", eg.uf.find_imm(a), canon_class.nodes.len());
     }
 }

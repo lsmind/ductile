@@ -75,8 +75,28 @@ fn parse_missing_json(raw: &str) -> Option<Vec<MissingReq>> {
     // 逐对象提取：找 {"ref": "...", "why": "..."} 形态
     let mut rest = slice;
     while let Some(obj_start) = rest.find('{') {
-        let obj_end = match rest[obj_start..].find('}') {
-            Some(e) => obj_start + e,
+        // 自审修复(2026-09-15): 花括号深度感知——why 值含 {..} 时首个 '}' 不是
+        // 对象边界(旧版在此截断,红测试 missing_json_with_braces_in_why 实锤)。
+        // 字符串内花括号不算深度(与外层解析一致的字面量纪律)。
+        let mut depth = 0i32;
+        let mut in_str = false;
+        let mut obj_end = None;
+        for (i, c) in rest[obj_start..].char_indices() {
+            match c {
+                '"' => in_str = !in_str,
+                '{' if !in_str => depth += 1,
+                '}' if !in_str => {
+                    depth -= 1;
+                    if depth == 0 {
+                        obj_end = Some(obj_start + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let obj_end = match obj_end {
+            Some(e) => e,
             None => break,
         };
         let obj = &rest[obj_start..=obj_end];
@@ -334,5 +354,23 @@ mod tests {
         assert!(j.contains("\"round\":1"), "{}", j);
         assert!(j.contains("\"ref\":\"@req.constraints\""));
         assert!(j.contains("\"final_prompt_len\":1200"));
+    }
+
+    // ── 自审 a2 裁定: why 含花括号时对象切片截断 —— 红测试 ──
+    #[test]
+    fn missing_json_with_braces_in_why() {
+        let raw = r#"[{"ref":"@req.constraints","why":"需要 {预算} 和 {部署} 两个字段"}]"#;
+        let m = parse_missing_json(raw).expect("应解析出对象");
+        assert_eq!(m.len(), 1, "只应有一个对象: {:?}", m);
+        assert_eq!(m[0].ref_str, "@req.constraints");
+        assert!(m[0].why.contains("部署"), "why 被花括号截断: {:?}", m[0].why);
+    }
+
+    #[test]
+    fn missing_json_multiple_objects_with_braces() {
+        let raw = r#"[{"ref":"@a.x","why":"w1 {b}"},{"ref":"@b.y","why":"w2"}]"#;
+        let m = parse_missing_json(raw).expect("应解析");
+        assert_eq!(m.len(), 2, "两对象都要拿到: {:?}", m);
+        assert_eq!(m[1].ref_str, "@b.y");
     }
 }

@@ -931,7 +931,11 @@ fn run_impl_with_retry(
                     return Err(err);
                 }
                 if attempt < impl_.retry {
-                    let delay = 1u64 << (attempt + 1); // 2s, 4s, 8s...
+                    // 自审修复: 移位钳制——attempt>=62 时 1u64<<(attempt+1) 溢出
+                    // (debug panic/release 环绕), 指数退避封顶 2^30s 已远超任何
+                    // 合理等待, 钳到 30 防御性兜底。
+                    let shift = (attempt + 1).min(30);
+                    let delay = 1u64 << shift; // 2s, 4s, 8s... (capped)
                     eprintln!(
                         "    -> retry {}/{} after {}s ({})",
                         attempt + 1,
