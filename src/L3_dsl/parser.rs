@@ -282,7 +282,10 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
     let mut joined_line = lines[idx].to_string();
     let mut consumed_extra = 0usize;
     while paren_depth_outside_quotes(&joined_line) > 0 {
-        if idx + 1 + consumed_extra + 1 >= lines.len() {
+        // 下一条待吞并行号 = idx + consumed_extra + 1；越界（> 末行号）才拒。
+        // 消融 ab4 实锤的 off-by-one：旧条件多算一位，收尾行恰为文件末行时
+        // 合法输入被误报 unbalanced parens（probe5E 后面还有下游行所以从未踩到）。
+        if idx + consumed_extra + 1 >= lines.len() {
             return Err(ParseError {
                 line: start_idx + 1,
                 col: 1,
@@ -2260,5 +2263,34 @@ mod prim_tests {
         assert_eq!(pl.description, "b");
         assert!(pl.cwd.is_none());
         assert!(pl.env.is_empty());
+    }
+
+    // ── v0.18.14 跨行 llm() continuation：EOF 边界回归 ──
+    // 消融实验（ab4.pipeline 原始形态）挖出的 off-by-one：多行 .proc 的
+    // 收尾行恰为文件末行时，边界检查 idx+1+consumed_extra+1 >= lines.len()
+    // 多拒一位——合法输入误报 unbalanced parens。加尾 proc/空行即绕开，
+    // 所以 probe5E 从未踩到。修法：改成 > lines.len() - 1（严格越界才拒）。
+    #[test]
+    fn parse_multiline_proc_ending_at_last_line() {
+        let input = r#"Pipeline("t")
+.proc("src", run("/usr/bin/true"))
+.proc("ask",
+  llm(planner,
+    prompt="材料: @src 主题: {topic}"))
+"#;
+        let pl = parse_pipeline(input).unwrap();
+        assert_eq!(pl.procs.len(), 2);
+        let ask = &pl.procs[1];
+        assert_eq!(ask.name, "ask");
+        // prompt 必须完整保留（含上游 @src 引用 → 依赖边）
+        assert!(ask.plan[0].body_text.contains("材料: @src"), "prompt 蒸发: {}", ask.plan[0].body_text);
+        assert_eq!(ask.plan[0].refs, vec!["src".to_string()]);
+    }
+
+    #[test]
+    fn parse_multiline_proc_genuinely_unbalanced_still_fails() {
+        // 真不平衡（EOF 处深度仍 >0）必须仍然报错——修 off-by-one 不能放开真畸形
+        let input = "Pipeline(\"t\")\n.proc(\"ask\",\n  llm(planner,\n    prompt=\"未闭合";
+        assert!(parse_pipeline(input).is_err());
     }
 }

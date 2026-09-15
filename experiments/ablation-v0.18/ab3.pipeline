@@ -1,0 +1,4 @@
+Pipeline("ab3", "A3消融: when合取——全!=复合条件旧版静默永真")
+.proc("src", run("/usr/bin/printf '##DSL_RESULT\nvalue=NO-OP\n##DSL_END\n'"))
+.proc("gated", run("/usr/bin/printf 'VERDICT:A3-RAN\n'"))
+  .when(@src.value != "NO-OP" && @src.value != "")

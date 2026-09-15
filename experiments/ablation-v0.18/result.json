@@ -1,0 +1,115 @@
+{
+  "A1": {
+    "old": {
+      "verdict": "FAIL",
+      "metric": "",
+      "unit": "a1_out.txt内容(期望beta=两项都迭代)",
+      "detail": [
+        "[degraded] flag set — fix then: ductile degraded clear ab1"
+      ],
+      "exit": 1
+    },
+    "new": {
+      "verdict": "PASS",
+      "metric": "beta",
+      "unit": "a1_out.txt内容(期望beta=两项都迭代)",
+      "detail": [
+        "  [l4] review recorded: pass (log-only)"
+      ],
+      "exit": 0
+    },
+    "ablation": "DIFF-CONFIRMED",
+    "title": "v0.18.8 foreach依赖边"
+  },
+  "A2": {
+    "old": {
+      "verdict": "FAIL",
+      "metric": "has",
+      "unit": "a2_out.txt内容(期望has\"quote)",
+      "detail": [
+        "  [l4] review recorded: pass (log-only)"
+      ],
+      "exit": 0
+    },
+    "new": {
+      "verdict": "PASS",
+      "metric": "has\"quote",
+      "unit": "a2_out.txt内容(期望has\"quote)",
+      "detail": [
+        "  [l4] review recorded: pass (log-only)"
+      ],
+      "exit": 0
+    },
+    "ablation": "DIFF-CONFIRMED",
+    "title": "v0.18.9 foreach var运行时化"
+  },
+  "A3": {
+    "old": {
+      "verdict": "FAIL",
+      "metric": 0,
+      "unit": "0=缺陷放行 1=正确拦截",
+      "detail": [
+        "  [l4] review recorded: pass (log-only)"
+      ],
+      "exit": 0
+    },
+    "new": {
+      "verdict": "PASS",
+      "metric": 1,
+      "unit": "0=缺陷放行 1=正确拦截",
+      "detail": [
+        "[degraded] flag set — fix then: ductile degraded clear ab3"
+      ],
+      "exit": 1
+    },
+    "ablation": "DIFF-CONFIRMED",
+    "title": "v0.18.13 when合取"
+  },
+  "A4": {
+    "old": {
+      "verdict": "FAIL",
+      "metric": 0,
+      "unit": "graph边数(期望>=1且src/ask分层不同组)",
+      "detail": [
+        "[\"ask\", \"src\", \"tail\"]"
+      ],
+      "exit": 0
+    },
+    "new": {
+      "verdict": "PASS",
+      "metric": 1,
+      "unit": "graph边数(期望>=1且src/ask分层不同组)",
+      "detail": [
+        "[\"ask\"]",
+        "Critical path: [\"src\", \"ask\"]"
+      ],
+      "exit": 0
+    },
+    "ablation": "DIFF-CONFIRMED",
+    "title": "v0.18.14 跨行llm"
+  },
+  "A5": {
+    "old": {
+      "verdict": "FAIL",
+      "metric": 1,
+      "unit": "0=无熔合 1=副作用impl被熔合",
+      "detail": [
+        "E-classes: 2",
+        "Fusion rules fired: isomorphic_union×1",
+        "[class] {first, second}"
+      ],
+      "exit": 0
+    },
+    "new": {
+      "verdict": "PASS",
+      "metric": 0,
+      "unit": "0=无熔合 1=副作用impl被熔合",
+      "detail": [
+        "E-classes: 3"
+      ],
+      "exit": 0
+    },
+    "ablation": "DIFF-CONFIRMED",
+    "title": "v0.18.13 mcsm/cse_safe禁熔合"
+  }
+}

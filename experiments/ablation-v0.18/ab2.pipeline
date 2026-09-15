@@ -1,0 +1,5 @@
+Pipeline("ab2", "A2消融: foreach var运行时解析——item含双引号不炸参数语法")
+.proc("src", run("/usr/bin/printf 'plain\nhas\"quote\n'"))
+.proc("fan")
+  .foreach(source=@src, var=item)
+  .plan(w -> write(to="/tmp/abl/a2_out.txt", content="{item}"))

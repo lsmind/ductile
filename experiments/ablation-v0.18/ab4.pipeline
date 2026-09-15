@@ -1,0 +1,6 @@
+Pipeline("ab4", "A4消融: 跨行llm()——continuation行prompt不蒸发(判据=@src依赖边)")
+.proc("src", run("/usr/bin/printf 'UPSTREAM-MATERIAL-XYZ\n'"))
+.proc("ask",
+  llm(planner,
+    prompt="上游材料: @src\n任务主题: {topic}\n要求: 制定计划, 必须引用上游材料中的内容。"))
+.proc("tail", run("/usr/bin/true"))

@@ -1,0 +1,7 @@
+Pipeline("ab5", "A5消融: cse_safe=false的script impl禁熔合——副作用计数器")
+.proc("first")
+  .plan(a -> script(abl_echo5, text="A"))
+.proc("second")
+  .plan(a -> script(abl_echo5, text="B"))
+.proc("chk", run("/usr/bin/printf 'count='; /usr/bin/cat /tmp/abl/a5_count_$$ 2>/dev/null || /usr/bin/printf 'missing'"))
+  .when(@second.value != "")

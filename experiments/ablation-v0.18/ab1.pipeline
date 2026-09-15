@@ -1,0 +1,5 @@
+Pipeline("ab1", "A1消融: foreach source依赖边——消费proc名(acon)字典序先于源(zsrc)")
+.proc("zsrc", run("/usr/bin/printf 'alpha\nbeta\n'"))
+.proc("acon")
+  .foreach(source=@zsrc, var=item)
+  .plan(w -> write(to="/tmp/abl/a1_out.txt", content="{item}"))
