@@ -1,0 +1,2 @@
+fa:   Nodes: 2   E-classes: 1   CSE aliases: b→a 
+fb:   Nodes: 2   E-classes: 2 

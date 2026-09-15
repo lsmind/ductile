@@ -1,0 +1,14 @@
+Pipeline: foptcmp | Topic: t
+
+  [a] trying: script
+    -> script: pc (lang=bash, timeout=10s, retries=0)
+  [b] trying: script
+    -> script: pc (lang=bash, timeout=10s, retries=0)
+  [l4] review recorded: pass (log-only)
+
+Pipeline executed successfully
+  Procs completed: 2
+    a => px:hello
+
+    b => px:world
+

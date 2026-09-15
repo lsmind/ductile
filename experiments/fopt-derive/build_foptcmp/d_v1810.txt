@@ -1,0 +1,2 @@
+attached: pd (lang=bash, pure=true, idempotent=true, concurrency=safe, effects=none)
+ACCEPTED(bad!)

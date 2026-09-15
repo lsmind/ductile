@@ -1,0 +1,3 @@
+Pipeline("foptcmp", "t")
+.proc("a", script(pa, text="hello"))
+.proc("b", script(pa, text="world"))

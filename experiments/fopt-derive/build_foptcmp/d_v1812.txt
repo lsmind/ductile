@@ -1,0 +1,2 @@
+build_foptcmp/pd.sh: bad mcsm 'F(9)-O(1)-P(1)-T(1)' — expect F(1-4)-O(1-4)-P(1-4)-T(1-4), e.g. F(2)-O(1)-P(3)-T(2) (see docs/MCSM.md)
+REJECT
