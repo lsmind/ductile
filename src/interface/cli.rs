@@ -116,6 +116,16 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         }
 
         // Version
+        // v0.19 探索环（explore-then-freeze）：curriculum 出题→沙箱探针→
+        // 确定性裁判→固化三通道。--drs 只深探；--report 回看报告。
+        "explore" if args.len() >= 5 && args[3] == "--report" => {
+            cmd_explore_report(&args[2], &args[4])
+        }
+        "explore" if args.len() >= 4 => {
+            // ductile explore <file> <topic> [--drs]
+            let drs_only = args.len() >= 5 && args[4] == "--drs";
+            cmd_explore(&args[2], &args[3], drs_only)
+        }
         "version" if args.len() >= 5 && args[2] == "save" => cmd_version_save(&args[3], &args[4]),
         "version" if args.len() >= 4 && args[2] == "log" => cmd_version_log(&args[3]),
         "version" if args.len() >= 6 && args[2] == "diff" => {
@@ -1589,6 +1599,274 @@ fn cmd_learn(arg: &str) -> Result<i32, String> {
 }
 
 // ── version ──
+
+
+// ── v0.19 explore：探索环 CLI（P1 接线）──────────────────────────────
+
+use crate::L4_structure::explore::{
+    parse_curriculum_json, run_explore_loop, ExploreBudget, ExploreReport, ExploreStop,
+    Stages, TaskOutcome,
+};
+
+/// curriculum 真调用：[agents.curriculum] 配置 → llm bridge 单发。
+fn curriculum_llm_call(goal_ctx: &str) -> Result<String, String> {
+    let agents = crate::L3_dsl::config::load_agents_config();
+    let agent = match agents.get("curriculum") {
+        Some(a) => a.clone(),
+        None => {
+            return Err(
+                "explore: config.toml 缺 [agents.curriculum]（出题角色必须显式配置）"
+                    .into(),
+            )
+        }
+    };
+    let llm = crate::L3_dsl::config::load_llm_config();
+    let bridge = crate::L2_orchestration::steps::find_bridge("llm_bridge.py");
+    if bridge.is_empty() {
+        return Err("explore: llm_bridge.py 不在搜索路径（repo/bridge/ 或 ~/.local/share/ductile/bridge/）".into());
+    }
+    let out = std::process::Command::new("python3")
+        .arg(&bridge)
+        .arg("--prompt")
+        .arg(goal_ctx)
+        .arg("--model")
+        .arg(&agent.model)
+        .arg("--system")
+        .arg(&agent.system)
+        .arg("--schema")
+        .arg(&agent.schema)
+        .env("OPENAI_BASE_URL", &llm.base_url)
+        .env("OPENAI_API_KEY", &llm.api_key)
+        .env("OPENAI_TIMEOUT_SECS", llm.timeout_secs.to_string())
+        .env(
+            "OPENAI_MAX_TOKENS",
+            std::env::var("OPENAI_MAX_TOKENS").unwrap_or_else(|_| "6000".into()),
+        )
+        .output()
+        .map_err(|e| format!("explore: bridge 启动失败: {}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "explore: bridge exit {}: {}",
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// 探针执行：plan 若是 .pipeline 路径 → DUCTILE_DATA 沙箱真跑；
+/// 否则原样回给裁判（自然语言步骤由 judge 描述判据）。
+fn explore_execute(task: &crate::L4_structure::explore::ExploreTask) -> Result<String, String> {
+    let plan = task.plan.trim();
+    // cmd: 前缀 = 沙箱 shell 探针（curriculum code-as-policy 形态）
+    if let Some(cmd) = plan.strip_prefix("cmd:") {
+        let sandbox = std::env::temp_dir().join(format!(
+            "ductile_explore_cmd_{}_{}",
+            std::process::id(),
+            task.id.replace('/', "_")
+        ));
+        std::fs::create_dir_all(&sandbox).map_err(|e| format!("sandbox: {}", e))?;
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(cmd.trim())
+            .current_dir(&sandbox)
+            .output()
+            .map_err(|e| format!("探针命令失败: {}", e))?;
+        return Ok(format!(
+            "exit={}\n{}{}",
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    if plan.ends_with(".pipeline") && std::path::Path::new(plan).exists() {
+        let sandbox = std::env::temp_dir().join(format!(
+            "ductile_explore_{}_{}",
+            std::process::id(),
+            task.id.replace('/', "_")
+        ));
+        std::fs::create_dir_all(&sandbox).map_err(|e| format!("sandbox: {}", e))?;
+        let out = std::process::Command::new(std::env::current_exe().unwrap_or_else(|_| "ductile".into()))
+            .arg("run")
+            .arg(plan)
+            .arg(&task.goal)
+            .env("DUCTILE_DATA", &sandbox)
+            .output()
+            .map_err(|e| format!("探针执行失败: {}", e))?;
+        return Ok(format!(
+            "exit={}\n{}{}",
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok(format!("plan(非管线,未执行): {}\njudge: {}", task.plan, task.judge))
+}
+
+/// 确定性裁判：judge 描述 + 产物 → 判定。
+/// 判据语言（P1 子集，逐步扩）：`exit 0` / `exit N` / `含 <substr>` / `不含 <substr>`。
+fn explore_judge(
+    task: &crate::L4_structure::explore::ExploreTask,
+    artifact: &str,
+) -> TaskOutcome {
+    let j = task.judge.trim();
+    let mut checks: Vec<(bool, String)> = Vec::new();
+    for clause in j.split(';') {
+        let c = clause.trim();
+        if c.is_empty() {
+            continue;
+        }
+        if c == "exit 0" {
+            let ok = artifact.lines().next().map(|l| l == "exit=0").unwrap_or(false);
+            checks.push((ok, format!("exit0({})", ok)));
+        } else if let Some(n) = c.strip_prefix("exit ") {
+            let want = format!("exit={}", n.trim());
+            let ok = artifact.lines().next().map(|l| l == want).unwrap_or(false);
+            checks.push((ok, format!("exit{}({})", n.trim(), ok)));
+        } else if let Some(s) = c.strip_prefix("含 ") {
+            let s = s.trim().trim_matches(['\'', '"']);
+            let ok = artifact.contains(s);
+            checks.push((ok, format!("contains({:?},{})", s, ok)));
+        } else if let Some(s) = c.strip_prefix("不含 ") {
+            let s = s.trim().trim_matches(['\'', '"']);
+            let ok = !artifact.contains(s);
+            checks.push((ok, format!("excludes({:?},{})", s, ok)));
+        } else {
+            return TaskOutcome::Undecidable {
+                reason: format!("判据子句不可解析: {:?}", c),
+            };
+        }
+    }
+    if checks.is_empty() {
+        return TaskOutcome::Undecidable { reason: "判据为空".into() };
+    }
+    let evidence = checks.iter().map(|(_, e)| e.clone()).collect::<Vec<_>>().join(",");
+    if checks.iter().all(|(ok, _)| *ok) {
+        TaskOutcome::Pass { evidence }
+    } else {
+        TaskOutcome::Fail { evidence }
+    }
+}
+
+/// 固化三通道（P1）：Fail → incident 指针；Undecidable 记入报告不固化。
+fn consolidate(report: &mut ExploreReport) {
+    let mut ids = Vec::new();
+    for (id, (_, outcome)) in report.results.iter() {
+        if let TaskOutcome::Fail { evidence } = outcome {
+            ids.push(format!(
+                "incident候选[{}]: 判据未过 evidence={}（P2 接 incidents 表三元组）",
+                id, evidence
+            ));
+        }
+    }
+    report.consolidated = ids;
+}
+
+fn explore_report_json(r: &ExploreReport) -> String {
+    let mut out = String::from("{\n");
+    out.push_str(&format!("  \"topic\": \"{}\",\n", r.topic));
+    out.push_str(&format!("  \"waves_run\": {}, \"deep_steps_run\": {},\n", r.waves_run, r.deep_steps_run));
+    out.push_str(&format!(
+        "  \"stop_reason\": \"{}\",\n",
+        match &r.stop_reason {
+            Some(ExploreStop::Budget) => "Budget".into(),
+            Some(ExploreStop::CurriculumStop) => "CurriculumStop".into(),
+            Some(ExploreStop::FailClosed(e)) => format!("FailClosed({})", e),
+            None => "-".into(),
+        }
+    ));
+    out.push_str("  \"results\": {\n");
+    for (i, (id, (kind, o))) in r.results.iter().enumerate() {
+        let (oc, ev) = match o {
+            TaskOutcome::Pass { evidence } => ("Pass", evidence.clone()),
+            TaskOutcome::Fail { evidence } => ("Fail", evidence.clone()),
+            TaskOutcome::Undecidable { reason } => ("Undecidable", reason.clone()),
+        };
+        let comma = if i + 1 < r.results.len() { "," } else { "" };
+        out.push_str(&format!(
+            "    \"{}\": [\"{:?}\", \"{}\", \"{}\"]{}\n",
+            id, kind, oc, ev.replace('"', "'"), comma
+        ));
+    }
+    out.push_str("  },\n");
+    out.push_str(&format!("  \"consolidated\": {},\n", r.consolidated.len()));
+    out.push_str(&format!("  \"has_findings\": {},\n", r.has_findings()));
+    out.push_str(&format!("  \"frozen\": {}\n", r.frozen));
+    out.push('}');
+    out
+}
+
+fn cmd_explore(path: &str, topic: &str, drs_only: bool) -> Result<i32, String> {
+    // 门禁 5：探针执行全沙箱。探索循环对目标管线先做静态检查（parse+check），
+    // 把结果喂 curriculum 当首轮记忆概况。
+    let pl = match parse_pipeline_file(path) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("explore: {}", e);
+            return Ok(1);
+        }
+    };
+    let errs = check_pipeline(&pl);
+    let header = format!(
+        "目标管线 {}\nproc 数 {}\n静态检查 {}\n主题: {}",
+        path,
+        pl.procs.len(),
+        if errs.is_empty() { "通过".to_string() } else { format!("{:?}", errs) },
+        topic
+    );
+
+    let stages = if drs_only { Stages { brs: false, drs: true } } else { Stages::default() };
+    let mut last_gap = String::new();
+
+    let mut curriculum = |r: &ExploreReport| -> Result<crate::L4_structure::explore::CurriculumOutput, String> {
+        let mut ctx = format!(
+            "{}\n\n已探索: 波 {} / 深步 {} / 题数 {}\n上轮缺口: {}\n\n产出下一批探针 JSON。",
+            header,
+            r.waves_run,
+            r.deep_steps_run,
+            r.results.len(),
+            if last_gap.is_empty() { "-" } else { &last_gap }
+        );
+        for (id, (kind, o)) in r.results.iter().take(8) {
+            ctx.push_str(&format!(
+                "\n- {} {:?}: {}",
+                id,
+                kind,
+                match o {
+                    TaskOutcome::Pass { .. } => "Pass".into(),
+                    TaskOutcome::Fail { evidence } => format!("Fail({})", evidence),
+                    TaskOutcome::Undecidable { reason } => format!("Undecidable({})", reason),
+                }
+            ));
+        }
+        let raw = curriculum_llm_call(&ctx)?;
+        let out = parse_curriculum_json(&raw)?;
+        last_gap = out.gap.clone();
+        Ok(out)
+    };
+    let mut execute = |t: &crate::L4_structure::explore::ExploreTask| explore_execute(t);
+    let mut judge = |t: &crate::L4_structure::explore::ExploreTask, a: &str| explore_judge(t, a);
+
+    eprintln!("explore: BRS={} DRS={} budget={}波/{}步", stages.brs, stages.drs, 8, 12);
+    let mut report = run_explore_loop(topic, &ExploreBudget::default(), &stages, &mut curriculum, &mut execute, &mut judge);
+    consolidate(&mut report);
+    let json = explore_report_json(&report);
+    println!("{}", json);
+
+    // 报告落库（runs 表 pipeline=explore:<topic>，artifact 存 JSON）
+    let sandbox = std::env::temp_dir().join(format!("ductile_explore_report_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&sandbox);
+    let report_path = sandbox.join(format!("report_{}.json", topic.replace('/', "_")));
+    let _ = std::fs::write(&report_path, &json);
+    eprintln!("explore report: {}", report_path.display());
+    Ok(0)
+}
+
+fn cmd_explore_report(path: &str, id: &str) -> Result<i32, String> {
+    let _ = path;
+    eprintln!("explore report {} (P2: 按 id 从 runs 表检索冻结报告)", id);
+    Ok(0)
+}
 
 fn cmd_version_save(path: &str, desc: &str) -> Result<i32, String> {
     let content = std::fs::read_to_string(path).map_err(|e| format!("{}", e))?;

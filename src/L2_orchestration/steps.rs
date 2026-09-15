@@ -2160,7 +2160,7 @@ fn exec_run(
     Ok(Value::Text(trimmed))
 }
 
-fn find_bridge(script: &str) -> String {
+pub fn find_bridge(script: &str) -> String {
     // Search order: current dir, ~/.local/share/ductile/bridge/, project-local
     let home = home_dir();
     let candidates = [
