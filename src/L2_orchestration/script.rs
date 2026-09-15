@@ -56,7 +56,8 @@ pub fn cse_safe(card: &ScriptCard) -> bool {
     if !base {
         return false;
     }
-    if mcsm_has_conflict(&card.mcsm) {
+    // v0.19.x：手标 + 派生合一（open incident → 矛盾态 → 禁 CSE）
+    if mcsm_has_conflict(&mcsm_effective(card)) {
         return false;
     }
     true
@@ -71,6 +72,53 @@ pub fn mcsm_has_conflict(mcsm: &str) -> bool {
     }
     // 已在 parse 时规范化为 F(n)-O(n)-P(n)-T(n)；防御性解析
     mcsm.contains("(2)")
+}
+
+/// v0.19.x FOPT 派生（制度>自觉的落法）：脚本的矛盾态不再依赖手标——
+/// 该脚本作为探针被记录过 open incident（err_code=explore_finding 或
+/// 任意 open 状态且 proc_name 能对应上）→ 强制 (2)。
+/// 单向棘轮：手标含 (2) 保留（收紧）；手标无 (2) 但有 open incident
+/// → 派生 (2)（不许放宽）。incident 关闭后派生解除（状态机可回 1）。
+///
+/// 接线点：cse_safe（熔断）与 egraph build（隔离）都经 script_get 的
+/// 契约卡取 mcsm——派生逻辑放 mcsm_effective，两处自动生效。
+pub fn mcsm_effective(card: &ScriptCard) -> String {
+    let manual = &card.mcsm;
+    if mcsm_has_conflict(manual) {
+        return manual.clone(); // 手标收紧：保留
+    }
+    // 派生检查：该脚本的 open incident（pipeline 维度 script:<name> 或
+    // explore:* 且 proc_name=name；宽匹配留给调用侧造 incident 的约定）
+    if let Some(conn) = crate::db::try_open() {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM incidents WHERE status='open' AND proc_name=?1",
+                [card.name.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if n > 0 {
+            // 无手标 → 直接 F(2)-O(2)-P(2)-T(2)；有手标（无2）→ 注入2
+            if manual.is_empty() {
+                return "F(2)-O(2)-P(2)-T(2)".to_string();
+            }
+            return inject_conflict(manual);
+        }
+    }
+    manual.clone()
+}
+
+/// 无 (2) 的坐标注入 (2)：F(1)-O(3)-P(3)-T(4) → F(2)-O(3)-P(3)-T(4)
+/// （首维即改；维度语义学上 incident 先打在场域维——依赖边界失灵）。
+/// 红测试实锤修复：旧实现 trim_start_matches(digit) 剥完 "1" 停在 "("，
+/// 产出 "F(2)(1)-O(3)..." 畸形坐标——必须剥掉整个 "(n)" 括号组。
+fn inject_conflict(mcsm: &str) -> String {
+    if let Some(stripped) = mcsm.strip_prefix('F') {
+        if let Some(close) = stripped.find(')') {
+            return format!("F(2){}", &stripped[close + 1..]);
+        }
+    }
+    mcsm.to_string()
 }
 
 /// 从脚本源码解析契约头。fail-closed：缺 `# ductile:` 起始行或任一必填键
@@ -312,6 +360,53 @@ pub fn parse_script_body(body: &str) -> Result<(String, Vec<(String, String)>), 
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    // ── v0.19.x FOPT 派生（消融矩阵钉死: experiments/fopt-derive/ablate.sh）──
+
+    fn card_of(name: &str, mcsm: &str) -> ScriptCard {
+        ScriptCard {
+            name: name.into(),
+            path: String::new(),
+            lang: "bash".into(),
+            desc: String::new(),
+            params: String::new(),
+            output: String::new(),
+            pure: true,
+            idempotent: true,
+            concurrency: Concurrency::Safe,
+            effects: "none".into(),
+            timeout_secs: 10,
+            retries: 0,
+            mcsm: mcsm.into(),
+        }
+    }
+
+
+    #[test]
+    fn inject_conflict_rewrites_first_dim() {
+        assert_eq!(inject_conflict("F(1)-O(3)-P(3)-T(4)"), "F(2)-O(3)-P(3)-T(4)");
+        assert_eq!(inject_conflict("F(4)-O(1)-P(1)-T(1)"), "F(2)-O(1)-P(1)-T(1)");
+        // 非法形态原样返回（防御）
+        assert_eq!(inject_conflict("garbage"), "garbage");
+    }
+
+    #[test]
+    fn mcsm_effective_manual_conflict_short_circuits() {
+        // 手标含(2) → 提前返回手标，不触库（收紧方向）
+        let card = card_of("zz_nomatch", "F(2)-O(1)-P(1)-T(1)");
+        assert_eq!(mcsm_effective(&card), "F(2)-O(1)-P(1)-T(1)");
+        assert!(!cse_safe(&card));
+    }
+
+    #[test]
+    fn mcsm_effective_no_incident_passthrough() {
+        // 库里不会有 proc_name=zz_... 的 open incident → 透传手标
+        let card = card_of("zz_fopt_abl_no_such_proc_9x7", "F(1)-O(1)-P(1)-T(1)");
+        assert_eq!(mcsm_effective(&card), "F(1)-O(1)-P(1)-T(1)");
+        assert!(cse_safe(&card));
+    }
+
     use super::*;
 
     const GOOD: &str = r#"#!/usr/bin/env python3

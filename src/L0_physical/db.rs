@@ -44,6 +44,16 @@ pub fn db_path_with(data: Option<std::ffi::OsString>) -> PathBuf {
     dir.join("ductile.db")
 }
 
+/// 非 panic 版 open（派生 mcsm 等只读路径用：库不可达时静默回落手标，
+/// 不炸编排主流程——FOPT 派生是增强不是依赖）。
+pub fn try_open() -> Option<Connection> {
+    let path = db_path();
+    let conn = Connection::open(&path).ok()?;
+    conn.execute_batch("PRAGMA journal_mode=WAL;").ok();
+    conn.execute_batch(SCHEMA_DDL).ok();
+    Some(conn)
+}
+
 pub fn open() -> Connection {
     let path = db_path();
     let conn = Connection::open(&path).unwrap_or_else(|e| panic!("Cannot open ductile.db: {}", e));

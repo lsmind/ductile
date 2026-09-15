@@ -1,0 +1,45 @@
+script: px
+  desc:         pure probe
+  path:         build_abl/px.sh
+  lang:         bash
+  params:       text(str, required)
+  output:       echo(str)
+  pure:         true
+  idempotent:   true
+  concurrency:  safe
+  effects:      none
+  timeout:      10s
+  retries:      0
+  mcsm:         F(1)-O(1)-P(1)-T(1)
+                (F场域 O本体 P现象 T目的；1稳定 2矛盾 3构造新机制 4实践扩展 — docs/MCSM.md)
+  cse_safe:     false
+script: px
+  desc:         pure probe
+  path:         build_abl/px.sh
+  lang:         bash
+  params:       text(str, required)
+  output:       echo(str)
+  pure:         true
+  idempotent:   true
+  concurrency:  safe
+  effects:      none
+  timeout:      10s
+  retries:      0
+  mcsm:         F(2)-O(1)-P(1)-T(1)
+                (F场域 O本体 P现象 T目的；1稳定 2矛盾 3构造新机制 4实践扩展 — docs/MCSM.md)
+  cse_safe:     false
+script: px
+  desc:         pure probe
+  path:         build_abl/px.sh
+  lang:         bash
+  params:       text(str, required)
+  output:       echo(str)
+  pure:         true
+  idempotent:   true
+  concurrency:  safe
+  effects:      none
+  timeout:      10s
+  retries:      0
+  mcsm:         F(1)-O(1)-P(1)-T(1)
+                (F场域 O本体 P现象 T目的；1稳定 2矛盾 3构造新机制 4实践扩展 — docs/MCSM.md)
+  cse_safe:     true
