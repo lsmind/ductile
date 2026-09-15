@@ -118,8 +118,8 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         // Version
         // v0.19 探索环（explore-then-freeze）：curriculum 出题→沙箱探针→
         // 确定性裁判→固化三通道。--drs 只深探；--report 回看报告。
-        "explore" if args.len() >= 5 && args[3] == "--report" => {
-            cmd_explore_report(&args[2], &args[4])
+        "explore" if args.len() >= 4 && args[2] == "--report" => {
+            cmd_explore_report("", &args[3])
         }
         "explore" if args.len() >= 4 => {
             // ductile explore <file> <topic> [--drs]
@@ -1748,15 +1748,60 @@ fn explore_judge(
     }
 }
 
-/// 固化三通道（P1）：Fail → incident 指针；Undecidable 记入报告不固化。
-fn consolidate(report: &mut ExploreReport) {
+/// 固化（P2）：Fail → incidents 真表行，三元组 schema：
+/// action=探针命令 / condition=判据 / consequence=实际产物信号（evidence 字段）。
+/// pipeline 维度记 explore:<topic>，proc_name 记题 id——与运行时故障同一张表，
+/// 同 (pipeline, proc, err_code) 聚合去重（record_incident_conn 语义不变）。
+fn consolidate(
+    report: &mut ExploreReport,
+    tasks: &std::collections::BTreeMap<String, crate::L4_structure::explore::ExploreTask>,
+) {
+    let conn = crate::L0_physical::db::open();
     let mut ids = Vec::new();
     for (id, (_, outcome)) in report.results.iter() {
         if let TaskOutcome::Fail { evidence } = outcome {
-            ids.push(format!(
-                "incident候选[{}]: 判据未过 evidence={}（P2 接 incidents 表三元组）",
-                id, evidence
-            ));
+            let task = tasks.get(id);
+            let action = task.map(|t| t.plan.clone()).unwrap_or_default();
+            let condition = task.map(|t| t.judge.clone()).unwrap_or_default();
+            let triple = format!(
+                "action: {}\ncondition: {}\nconsequence: {}",
+                action, condition, evidence
+            );
+            // 直插不走 record_incident_conn：它会用 evidence_snapshot 重写
+            // evidence（只留 err/fields 头），explore 的三元组必须完整保留。
+            // 聚合去重语义与原函数一致：同 (pipeline, proc, err_code) open → 更新。
+            let pipeline_dim = format!("explore:{}", report.topic);
+            let existing: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM incidents WHERE pipeline=?1 AND proc_name=?2 AND err_code=?3 AND status='open'",
+                    rusqlite::params![pipeline_dim, id, "explore_finding"],
+                    |r| r.get(0),
+                )
+                .ok();
+            let row_id = match existing {
+                Some(rid) => {
+                    let _ = conn.execute(
+                        "UPDATE incidents SET evidence=?1, created_at=?2 WHERE id=?3",
+                        rusqlite::params![triple, crate::L0_physical::time::now_ts(), rid],
+                    );
+                    rid
+                }
+                None => {
+                    let _ = conn.execute(
+                        "INSERT INTO incidents (pipeline, proc_name, signals, err_code, evidence, status, created_at) VALUES (?1,?2,?3,?4,?5,'open',?6)",
+                        rusqlite::params![
+                            pipeline_dim,
+                            id,
+                            "explore,judge-fail",
+                            "explore_finding",
+                            triple,
+                            crate::L0_physical::time::now_ts()
+                        ],
+                    );
+                    conn.last_insert_rowid()
+                }
+            };
+            ids.push(format!("incident#{}[{}]", row_id, id));
         }
     }
     report.consolidated = ids;
@@ -1844,27 +1889,61 @@ fn cmd_explore(path: &str, topic: &str, drs_only: bool) -> Result<i32, String> {
         last_gap = out.gap.clone();
         Ok(out)
     };
-    let mut execute = |t: &crate::L4_structure::explore::ExploreTask| explore_execute(t);
+    let mut task_store: std::collections::BTreeMap<String, crate::L4_structure::explore::ExploreTask> =
+        std::collections::BTreeMap::new();
+    let mut execute = |t: &crate::L4_structure::explore::ExploreTask| {
+        task_store.insert(t.id.clone(), t.clone());
+        explore_execute(t)
+    };
     let mut judge = |t: &crate::L4_structure::explore::ExploreTask, a: &str| explore_judge(t, a);
 
     eprintln!("explore: BRS={} DRS={} budget={}波/{}步", stages.brs, stages.drs, 8, 12);
     let mut report = run_explore_loop(topic, &ExploreBudget::default(), &stages, &mut curriculum, &mut execute, &mut judge);
-    consolidate(&mut report);
+    consolidate(&mut report, &task_store);
     let json = explore_report_json(&report);
     println!("{}", json);
 
-    // 报告落库（runs 表 pipeline=explore:<topic>，artifact 存 JSON）
-    let sandbox = std::env::temp_dir().join(format!("ductile_explore_report_{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&sandbox);
-    let report_path = sandbox.join(format!("report_{}.json", topic.replace('/', "_")));
-    let _ = std::fs::write(&report_path, &json);
-    eprintln!("explore report: {}", report_path.display());
+    // freeze（门禁 6）：报告写入持久位置后置 frozen，二次检索走只读路径。
+    // 目录 ~/.local/share/ductile/explore/（跟随主库 DUCTILE_DATA 数据根）。
+    let data_root = std::env::var("DUCTILE_DATA")
+        .unwrap_or_else(|_| format!("{}/.local/share/ductile", std::env::var("HOME").unwrap_or_default()));
+    let explore_dir = std::path::Path::new(&data_root).join("explore");
+    let _ = std::fs::create_dir_all(&explore_dir);
+    let stamp = crate::L0_physical::time::now_ts().replace(['-', ':', ' '], "");
+    let report_name = format!("{}_{}.json", topic.replace('/', "_"), stamp);
+    let report_path = explore_dir.join(&report_name);
+    std::fs::write(&report_path, &json).map_err(|e| format!("freeze: {}", e))?;
+    eprintln!("explore report (frozen): {}", report_path.display());
+    eprintln!("explore report id: {}", report_name.trim_end_matches(".json"));
     Ok(0)
 }
 
 fn cmd_explore_report(path: &str, id: &str) -> Result<i32, String> {
     let _ = path;
-    eprintln!("explore report {} (P2: 按 id 从 runs 表检索冻结报告)", id);
+    // 只读检索冻结报告（门禁 6：本路径零写——无 UPDATE/INSERT，只 println）。
+    let data_root = std::env::var("DUCTILE_DATA")
+        .unwrap_or_else(|_| format!("{}/.local/share/ductile", std::env::var("HOME").unwrap_or_default()));
+    let explore_dir = std::path::Path::new(&data_root).join("explore");
+    let mut hits: Vec<std::path::PathBuf> = std::fs::read_dir(&explore_dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.file_name()
+                        .map(|n| n.to_string_lossy().starts_with(id))
+                        .unwrap_or(false)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    hits.sort();
+    if hits.is_empty() {
+        eprintln!("explore report: 无匹配 {} 的冻结报告（目录 {}）", id, explore_dir.display());
+        return Ok(1);
+    }
+    for h in &hits {
+        let body = std::fs::read_to_string(h).unwrap_or_default();
+        println!("== {} ==\n{}", h.display(), body);
+    }
     Ok(0)
 }
 
