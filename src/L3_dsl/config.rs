@@ -34,6 +34,9 @@ pub struct AgentConfig {
     /// v0.17 auto-prompt：操作指南（开放动作/检索方式/示例说明），
     /// prompt 缺省合成时注入"# 可用动作与检索方式"段。
     pub guide: String,
+    /// v0.18.16 上下文协商（declare-then-run）：模型声明缺什么、引擎补什么。
+    /// 默认 false（现有管线零变化）；NEGOTIATE=0/1 env 全局覆盖。
+    pub negotiate: bool,
 }
 
 /// v0.16.1 命名模型档：[models.<tier>] —— 档位是语义能力级（light/high），
@@ -263,6 +266,7 @@ pub fn agents_from_sections(sections: &BTreeMap<String, BTreeMap<String, String>
                 .filter(|s| !s.is_empty())
                 .collect(),
             guide: get("guide").replace("\\n", "\n"),
+            negotiate: get("negotiate").trim() == "true",
         };
         out.agents.insert(name.to_string(), agent);
     }

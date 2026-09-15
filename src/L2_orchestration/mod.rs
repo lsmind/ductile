@@ -3,6 +3,7 @@
 pub mod egraph;
 pub mod eval;
 pub mod executor;
+pub mod negotiate;
 pub mod ranking;
 pub mod registry;
 pub mod script;
@@ -12,6 +13,7 @@ pub mod textargs;
 pub use egraph::*;
 pub use eval::*;
 pub use executor::*;
+pub use negotiate::*;
 pub use ranking::*;
 pub use registry::*;
 pub use script::*;

@@ -1040,6 +1040,9 @@ fn append_run_rd(
     // v0.11: est_loss 死路移除（原 est_loss_v0 恒返 None，从未接线）。
     // latency_ms 从 exec_proc/exec_foreach_proc 的 Instant 实测传入——这是
     // 「cost 从测量来」的地基：后续可按 runs 表实测 EMA 排序。
+    // v0.18.16：协商日志在此时点落库（exec_llm 壳 stash → 本节点 runs 行插入时
+    // take——时序对齐，见 negotiate.rs 注释）。无协商 = None，零开销。
+    let negotiation_log = crate::negotiate::take_log();
     db::record_run_rd(
         proc_name,
         impl_name,
@@ -1050,6 +1053,7 @@ fn append_run_rd(
         _err_at,
         rate_tokens,
         0.0,
+        negotiation_log.as_deref(),
     );
     // Keep pid logging for backwards compat in stderr
     let _ = pid;

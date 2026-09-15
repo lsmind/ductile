@@ -121,6 +121,18 @@ pub fn migrate(conn: &Connection) {
         )
         .ok();
     }
+    // v0.18.16 上下文协商：runs 补 negotiation JSON 列（逐轮摘要+最终prompt长度）。
+    let has_neg = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name='negotiation'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    if has_neg == 0 {
+        conn.execute_batch("ALTER TABLE runs ADD COLUMN negotiation TEXT DEFAULT '';")
+            .ok();
+    }
     // v0.18.11 MCSM/FOPT：scripts 补 mcsm 列（F-O-P-T 认知坐标，空=未标注）。
     let has_mcsm = conn
         .query_row(
@@ -225,7 +237,8 @@ pub const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS pipelines (
             err_at      TEXT DEFAULT '',
             recorded_at TEXT DEFAULT '',
             rate_tokens INTEGER DEFAULT 0,
-            est_loss    REAL DEFAULT 0.0
+            est_loss    REAL DEFAULT 0.0,
+            negotiation TEXT DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_runs_proc ON runs(proc_name);
         CREATE TABLE IF NOT EXISTS compositions (
@@ -592,7 +605,7 @@ pub fn record_run(
     err_at: Option<&str>,
 ) {
     record_run_rd(
-        proc_name, impl_name, pipeline, status, latency_ms, err_hash, err_at, 0, 0.0,
+        proc_name, impl_name, pipeline, status, latency_ms, err_hash, err_at, 0, 0.0, None,
     );
 }
 
@@ -609,11 +622,12 @@ pub fn record_run_rd_conn(
     err_at: Option<&str>,
     rate_tokens: i64,
     est_loss: f64,
+    negotiation: Option<&str>,
 ) {
     let ts = now_ts();
     conn.execute(
-        "INSERT INTO runs (proc_name, impl_name, pipeline, status, latency_ms, err_hash, err_at, recorded_at, rate_tokens, est_loss)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO runs (proc_name, impl_name, pipeline, status, latency_ms, err_hash, err_at, recorded_at, rate_tokens, est_loss, negotiation)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             proc_name,
             impl_name,
@@ -625,6 +639,7 @@ pub fn record_run_rd_conn(
             ts,
             rate_tokens,
             est_loss,
+            negotiation.unwrap_or(""),
         ],
     )
     .ok();
@@ -640,6 +655,7 @@ pub fn record_run_rd(
     err_at: Option<&str>,
     rate_tokens: i64,
     est_loss: f64,
+    negotiation: Option<&str>,
 ) {
     let conn = open();
     record_run_rd_conn(
@@ -653,6 +669,7 @@ pub fn record_run_rd(
         err_at,
         rate_tokens,
         est_loss,
+        negotiation,
     )
 }
 
@@ -1802,6 +1819,7 @@ mod conn_tests {
                 None,
                 10,
                 0.0,
+                None,
             );
         }
         let rows = recent_runs_conn(&conn, "p");
@@ -1813,7 +1831,7 @@ mod conn_tests {
     #[test]
     fn runs_status_mixing() {
         let conn = memdb();
-        record_run_rd_conn(&conn, "p", "ok", "", "Ok", 5, None, None, 8, 0.0);
+        record_run_rd_conn(&conn, "p", "ok", "", "Ok", 5, None, None, 8, 0.0, None);
         record_run_rd_conn(
             &conn,
             "p",
@@ -1825,6 +1843,7 @@ mod conn_tests {
             Some("p.bad.step"),
             0,
             0.0,
+            None,
         );
         let rows = recent_runs_conn(&conn, "p");
         assert_eq!(rows.len(), 2);
@@ -1837,7 +1856,7 @@ mod conn_tests {
     #[test]
     fn stats_counts_after_writes() {
         let conn = memdb();
-        record_run_rd_conn(&conn, "p", "i", "", "Ok", 1, None, None, 0, 0.0);
+        record_run_rd_conn(&conn, "p", "i", "", "Ok", 1, None, None, 0, 0.0, None);
         save_composition_conn(&conn, "comp", "desc", &["p".to_string()]);
         let (pipelines, procs, runs, compositions) = db_stats_conn(&conn);
         assert_eq!(runs, 1);

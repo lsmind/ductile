@@ -6,6 +6,7 @@
 //! 读写与 shell 执行（read/write/run/sh）。
 
 use crate::core::ast::*;
+use crate::negotiate;
 use crate::core::dslresult::{encode_structured_result, parse_dsl_result_block};
 use crate::textargs::{
     expand_fs_path, extract_all_string_args, extract_first_bare_arg, extract_first_string,
@@ -912,10 +913,168 @@ pub fn replay_canary_llm(input: &str) -> Option<String> {
 }
 
 fn exec_llm(
+    impl_: &Impl,
+    topic: &str,
+    body: &str,
+    results: &BTreeMap<String, Value>,
+) -> Result<Value, String> {
+    // v0.18.16 上下文协商薄壳（declare-then-run）：agent 配置 negotiate=true
+    // （或 NEGOTIATE=1 全局开启）时，模型可声明缺口，引擎补料后追加式重跑。
+    // 循环在引擎不在模型；每轮 LLM 调用完全无状态（规格 §1）。
+    // 预算默认 3 轮（[agents.x] negotiate_rounds 调，0=关）。协商失败 fail-closed。
+    let negotiate_on = {
+        let env_on = std::env::var("NEGOTIATE").map(|v| v == "1").unwrap_or(false);
+        let env_off = std::env::var("NEGOTIATE").map(|v| v == "0").unwrap_or(false);
+        if env_off {
+            false
+        } else if env_on {
+            true
+        } else {
+            extract_first_bare_arg(body)
+                .and_then(|n| {
+                    crate::config::load_agents_config()
+                        .agents
+                        .get(&n)
+                        .map(|a| a.negotiate)
+                })
+                .unwrap_or(false)
+        }
+    };
+    if !negotiate_on {
+        return exec_llm_core(impl_, topic, body, results, None, None);
+    }
+    // 预算默认 3 轮；NEGOTIATE_ROUNDS env 覆盖（逐 agent 的 negotiate_rounds
+    // 留待有真实需求再建模——不为不存在的配置写假读取）。
+    let max_rounds: u32 = std::env::var("NEGOTIATE_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3);
+    // 协商主循环
+    let proto = negotiate::protocol_note();
+    let mut prompt = negotiate_prompt_base(impl_, topic, body, results)?;
+    prompt.push_str(&proto);
+    let mut summaries: Vec<negotiate::RoundSummary> = Vec::new();
+    let mut round = 0u32;
+    loop {
+        let out = exec_llm_core(impl_, topic, body, results, Some(prompt.clone()), None)?;
+        let encoded = match &out {
+            Value::Text(t) => t.clone(),
+            _ => String::new(),
+        };
+        let Some(missing) = negotiate::parse_missing(&encoded) else {
+            // 正常产出（enough=true/缺省）→ 协商日志落库后返回
+            let log = negotiate::negotiation_log(&summaries, prompt.chars().count());
+            negotiate::stash_log(log);
+            return Ok(out);
+        };
+        round += 1;
+        if round > max_rounds {
+            // 预算耗尽仍 enough=false → fail-closed（规格 2.4）
+            let log = negotiate::negotiation_log(&summaries, prompt.chars().count());
+            negotiate::stash_log(log);
+            return Err(format!(
+                "llm negotiate: 预算耗尽（{}轮）模型仍声明信息不足 — fail-closed。最后缺口: {}",
+                max_rounds,
+                missing.iter().map(|m| m.ref_str.clone()).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        // resolve 每条缺口 → 补充块（成功+unavailable 都告知模型）
+        let mut items: Vec<(String, String)> = Vec::new();
+        let mut resolved = Vec::new();
+        let mut unavailable = Vec::new();
+        for m in &missing {
+            if negotiate::already_provided(&prompt, &m.ref_str) {
+                unavailable.push(format!("{}（already-provided：已在上下文中，请直接使用）", m.ref_str));
+                continue;
+            }
+            match negotiate::resolve_ref(&m.ref_str, topic, results) {
+                Ok(content) => {
+                    items.push((m.ref_str.clone(), content));
+                    resolved.push(m.ref_str.clone());
+                }
+                Err(e) => unavailable.push(format!("{}（{}）", m.ref_str, e)),
+            }
+        }
+        if items.is_empty() && unavailable.is_empty() {
+            return Err("llm negotiate: enough=false 但 missing 全部不可解析 — 违约 fail-closed".into());
+        }
+        let mut block = negotiate::supplement_block(round, &items);
+        if !unavailable.is_empty() {
+            block.push_str("# 以下引用不可得（不要重复讨要）\n");
+            for u in &unavailable {
+                block.push_str(&format!("- {}\n", u));
+            }
+        }
+        let n_rejected = unavailable.len();
+        prompt.push_str(&block);
+        summaries.push(negotiate::RoundSummary {
+            round,
+            prompt_len: prompt.chars().count(),
+            missing,
+            resolved,
+            unavailable,
+        });
+        eprintln!(
+            "    -> llm negotiate round {}: 补 {} 条 / 拒 {} 条",
+            round,
+            items.len(),
+            n_rejected
+        );
+    }
+}
+
+/// 协商的基础 prompt：显式 prompt= 优先，否则 auto-prompt 合成
+fn negotiate_prompt_base(
     _impl_: &Impl,
     topic: &str,
     body: &str,
     results: &BTreeMap<String, Value>,
+) -> Result<String, String> {
+    let raw = {
+        let p = extract_string_arg("prompt", body);
+        if p.is_empty() {
+            extract_string_arg("input", body)
+        } else {
+            p
+        }
+    };
+    let resolved = resolve_vars(&raw, topic, results);
+    if !resolved.is_empty() {
+        return Ok(resolved);
+    }
+    // auto-prompt 合成（与 exec_llm_core 同源）
+    let first_bare = extract_first_bare_arg(body);
+    let agents = crate::config::load_agents_config();
+    if let Some(name) = &first_bare {
+        if let Some(a) = agents.agents.get(name) {
+            let schema = extract_string_arg("schema", body);
+            let system = extract_string_arg("system", body);
+            let schema_ref = if schema.is_empty() { a.schema.clone() } else { schema };
+            let system_ref = if system.is_empty() { a.system.clone() } else { system };
+            if let Some(p) = NodeCtx::synthesize_auto_prompt(
+                topic,
+                results,
+                &resolve_vars(&schema_ref, topic, results),
+                &a.guide,
+                &resolve_vars(&system_ref, topic, results),
+            ) {
+                return Ok(p);
+            }
+        }
+    }
+    Err("llm negotiate: 无 prompt 也无法合成 auto-prompt".into())
+}
+
+/// 协商日志 stash——append_run 落库时 take 并写入本节点 runs 行。
+/// （不能在此直接 UPDATE：壳返回时本节点 runs 行还没写，MAX(id) 是别的节点。）
+
+fn exec_llm_core(
+    _impl_: &Impl,
+    topic: &str,
+    body: &str,
+    results: &BTreeMap<String, Value>,
+    prompt_override: Option<String>,
+    _negotiate_ctx: Option<()>,
 ) -> Result<Value, String> {
     // v0.16 agent 引用：llm(<name>, ...) 裸首参（与 script(name, k=v) 同工效学）。
     // 首参是裸标识符（非 k=v）且 [agents.<name>] 存在 → 视为 agent 名，从
@@ -999,7 +1158,11 @@ fn exec_llm(
             Some(t)
         }
     };
-    let resolved_prompt = {
+    let resolved_prompt = if let Some(p) = &prompt_override {
+        // v0.18.16 协商薄壳注入的累积 prompt（追加式——只增不减）——完全旁路
+        // 原始合成路径，协议注入/补充块都已在其中。canary 播种在 core 内正常发生。
+        p.clone()
+    } else {
         let p = resolve_vars(&prompt_raw, topic, results);
         if p.is_empty() {
             // v0.17 auto-prompt：prompt 缺省 + agent 存在 → 从图上下文合成。
@@ -1268,10 +1431,15 @@ fn exec_llm(
                             // v0.18.6 P0-刀1：llm 成功 → 自动播种 canary。
                             // 保真：快照含协议尾巴（重放字节级还原当时输入；
                             // tier2+ 的 carried partial 变体不入档——那是单次情境）。
-                            seed_canary_after_llm_success(
-                                &format!("{}{}", resolved_prompt, partial_note),
-                                &resolved_schema,
-                            );
+                            // v0.18.16：协商轮(prompt_override)不播 canary——
+                            // enough=false 中间轮不是成功快照；最终轮 prompt 含
+                            // 动态补充块，快照回放不稳定。非协商路径照旧。
+                            if prompt_override.is_none() {
+                                seed_canary_after_llm_success(
+                                    &format!("{}{}", resolved_prompt, partial_note),
+                                    &resolved_schema,
+                                );
+                            }
                             return Ok(Value::Text(encode_structured_result(
                                 &enriched,
                                 &stdout_text,
@@ -1335,8 +1503,10 @@ fn exec_llm(
         if let Some(kvs) = parse_dsl_result_block(&stdout_text) {
             if !kvs.is_empty() {
                 eprintln!("    -> llm result: {} fields", kvs.len());
-                // v0.18.6 P0-刀1：llm 成功 → 自动播种 canary
-                seed_canary_after_llm_success(&resolved_prompt, &resolved_schema);
+                // v0.18.6 P0-刀1：llm 成功 → 自动播种 canary（协商轮除外）
+                if prompt_override.is_none() {
+                    seed_canary_after_llm_success(&resolved_prompt, &resolved_schema);
+                }
                 return Ok(Value::Text(encode_structured_result(&kvs, &stdout_text)));
             }
         }
