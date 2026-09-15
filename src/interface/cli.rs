@@ -1660,6 +1660,10 @@ fn explore_execute(task: &crate::L4_structure::explore::ExploreTask) -> Result<S
     let plan = task.plan.trim();
     // cmd: 前缀 = 沙箱 shell 探针（curriculum code-as-policy 形态）
     if let Some(cmd) = plan.strip_prefix("cmd:") {
+        // 沙箱数据目录仍建（DUCTILE_DATA 隔离锚点），但 cwd 不再指沙箱——
+        // P3 自举实锤：cwd=空沙箱使 cargo test 无 target/锁可依，输出被
+        // 编译错误淹没，判据"含 test result: ok"必然假 Fail。cwd 回到调用
+        // 现场，探针命令自己负责绝对路径。
         let sandbox = std::env::temp_dir().join(format!(
             "ductile_explore_cmd_{}_{}",
             std::process::id(),
@@ -1669,7 +1673,8 @@ fn explore_execute(task: &crate::L4_structure::explore::ExploreTask) -> Result<S
         let out = std::process::Command::new("bash")
             .arg("-c")
             .arg(cmd.trim())
-            .current_dir(&sandbox)
+            .current_dir(std::env::current_dir().unwrap_or_else(|_| "/tmp".into()))
+            .env("DUCTILE_DATA", &sandbox)
             .output()
             .map_err(|e| format!("探针命令失败: {}", e))?;
         return Ok(format!(
@@ -1910,7 +1915,15 @@ fn cmd_explore(path: &str, topic: &str, drs_only: bool) -> Result<i32, String> {
     let explore_dir = std::path::Path::new(&data_root).join("explore");
     let _ = std::fs::create_dir_all(&explore_dir);
     let stamp = crate::L0_physical::time::now_ts().replace(['-', ':', ' '], "");
-    let report_name = format!("{}_{}.json", topic.replace('/', "_"), stamp);
+    // 文件名卫生（P3 自举实锤：中文长 topic 超 255 字节文件名上限 → os error 36）。
+    // 只保留 [A-Za-z0-9_-]，截 40；清洗后为空回退 "topic"。
+    let safe: String = topic
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .take(40)
+        .collect();
+    let safe = if safe.is_empty() { "topic".to_string() } else { safe };
+    let report_name = format!("{}_{}.json", safe, stamp);
     let report_path = explore_dir.join(&report_name);
     std::fs::write(&report_path, &json).map_err(|e| format!("freeze: {}", e))?;
     eprintln!("explore report (frozen): {}", report_path.display());
