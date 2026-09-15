@@ -329,7 +329,12 @@ mod tests {
         )
         .unwrap();
         crate::L1_feedback::canary::add_canary_conn(
-            &conn, "p", "arch", "好输入", "@self.ok == 1", "n",
+            &conn,
+            "p",
+            "arch",
+            "好输入",
+            "@self.ok == 1",
+            "n",
         )
         .unwrap();
         let id = record_incident_conn(&conn, "p", "arch", "crash", "err", "");

@@ -204,7 +204,9 @@ pub fn supplement_block(round: u32, items: &[(String, String)]) -> String {
 /// 协商日志 JSON（落 runs.negotiation；手写序列化）
 pub fn negotiation_log(summaries: &[RoundSummary], final_prompt_len: usize) -> String {
     fn esc(s: &str) -> String {
-        s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
     }
     let rounds: Vec<String> = summaries
         .iter()
@@ -229,7 +231,6 @@ pub fn negotiation_log(summaries: &[RoundSummary], final_prompt_len: usize) -> S
         final_prompt_len
     )
 }
-
 
 // ── 协商日志的跨层传递（steps → executor → db insert）──
 // exec_llm 协商壳在返回前 stash，append_run 落库时 take——时序对齐
@@ -265,7 +266,10 @@ mod tests {
     fn enough_false_with_missing_is_negotiation() {
         let e = enc(&[
             ("enough", "false"),
-            ("missing", r#"[{"ref":"@req.constraints","why":"选型需要预算"}]"#),
+            (
+                "missing",
+                r#"[{"ref":"@req.constraints","why":"选型需要预算"}]"#,
+            ),
         ]);
         let m = parse_missing(&e).expect("应识别为协商回合");
         assert_eq!(m.len(), 1);
@@ -291,10 +295,16 @@ mod tests {
         let mut results = BTreeMap::new();
         results.insert(
             "req".into(),
-            Value::Text(enc(&[("constraints", "预算500元内，别太复杂"), ("title", "x")])),
+            Value::Text(enc(&[
+                ("constraints", "预算500元内，别太复杂"),
+                ("title", "x"),
+            ])),
         );
         // topic 全文
-        assert_eq!(resolve_ref("topic", "主题ABC", &results).unwrap(), "主题ABC");
+        assert_eq!(
+            resolve_ref("topic", "主题ABC", &results).unwrap(),
+            "主题ABC"
+        );
         // @proc.field 窗口 2000
         let v = resolve_ref("@req.constraints", "t", &results).unwrap();
         assert!(v.contains("预算500元"));
@@ -312,10 +322,7 @@ mod tests {
     fn resolve_field_window_truncated_at_2000_chars() {
         let mut results = BTreeMap::new();
         let long = "字".repeat(5000);
-        results.insert(
-            "big".into(),
-            Value::Text(enc(&[("data", &long)])),
-        );
+        results.insert("big".into(), Value::Text(enc(&[("data", &long)])));
         let v = resolve_ref("@big.data", "t", &results).unwrap();
         assert_eq!(v.chars().count(), 2000);
     }
@@ -332,7 +339,11 @@ mod tests {
         assert!(already_provided(&p1, "@req.constraints"));
         assert!(!already_provided(&p1, "@req.title"));
         // 第二轮追加后两块都在场
-        let p2 = format!("{}{}", p1, supplement_block(2, &[("@req.title".into(), "标题X".into())]));
+        let p2 = format!(
+            "{}{}",
+            p1,
+            supplement_block(2, &[("@req.title".into(), "标题X".into())])
+        );
         assert!(already_provided(&p2, "@req.constraints"));
         assert!(already_provided(&p2, "@req.title"));
     }
@@ -363,7 +374,11 @@ mod tests {
         let m = parse_missing_json(raw).expect("应解析出对象");
         assert_eq!(m.len(), 1, "只应有一个对象: {:?}", m);
         assert_eq!(m[0].ref_str, "@req.constraints");
-        assert!(m[0].why.contains("部署"), "why 被花括号截断: {:?}", m[0].why);
+        assert!(
+            m[0].why.contains("部署"),
+            "why 被花括号截断: {:?}",
+            m[0].why
+        );
     }
 
     #[test]

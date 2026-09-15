@@ -219,7 +219,9 @@ pub fn parse_when(cond: &str) -> Result<Option<Cond>, String> {
         if conds.len() >= 2 {
             let mut it = conds.into_iter();
             let first = it.next().unwrap();
-            return Ok(Some(it.fold(first, |acc, c| Cond::And(Box::new(acc), Box::new(c)))));
+            return Ok(Some(
+                it.fold(first, |acc, c| Cond::And(Box::new(acc), Box::new(c))),
+            ));
         }
         return Ok(None); // 全空段
     }
@@ -352,17 +354,32 @@ mod tests {
         let t = |cond: &str| eval_cond_str(cond, c.params, c.results);
         // 注意：param 用裸名（mode），@ 是裁判 @proc.field 专用
         assert!(t("@src.value == \"NO-OP\" && mode == \"deep\""), "双双真");
-        assert!(!t("@src.value != \"NO-OP\" && @src.value != \"\""), "全!=复合=假（旧版静默永真 bug）");
-        assert!(!t("@src.value == \"XX\" && mode == \"deep\""), "左假右真=假");
-        assert!(!t("@src.value == \"NO-OP\" && mode == \"XX\""), "左真右假=假");
+        assert!(
+            !t("@src.value != \"NO-OP\" && @src.value != \"\""),
+            "全!=复合=假（旧版静默永真 bug）"
+        );
+        assert!(
+            !t("@src.value == \"XX\" && mode == \"deep\""),
+            "左假右真=假"
+        );
+        assert!(
+            !t("@src.value == \"NO-OP\" && mode == \"XX\""),
+            "左真右假=假"
+        );
         // 三段合取
-        assert!(t("@src.value == \"NO-OP\" && mode == \"deep\" && @src.value != \"\""), "三段链");
+        assert!(
+            t("@src.value == \"NO-OP\" && mode == \"deep\" && @src.value != \"\""),
+            "三段链"
+        );
         // || 显式拒绝（fail-closed false）
         assert!(!t("@src.value == \"A\" || @src.value == \"B\""), "|| 拒收");
         // 引号内 && 是字面量，不切分（解析成功；值不等 → false 而非解析错）
         let lit = parse_when("@src.value == \"A && B\"");
         assert!(lit.is_ok(), "引号内&&不应报错: {:?}", lit.err());
-        assert!(!t("@src.value == \"A && B\""), "字面量&&：NO-OP != 'A && B' → false");
+        assert!(
+            !t("@src.value == \"A && B\""),
+            "字面量&&：NO-OP != 'A && B' → false"
+        );
     }
 
     #[test]

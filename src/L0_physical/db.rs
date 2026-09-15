@@ -116,10 +116,8 @@ pub fn migrate(conn: &Connection) {
         )
         .unwrap_or(0);
     if has_ctx == 0 {
-        conn.execute_batch(
-            "ALTER TABLE tier_journal ADD COLUMN ctx TEXT NOT NULL DEFAULT '';",
-        )
-        .ok();
+        conn.execute_batch("ALTER TABLE tier_journal ADD COLUMN ctx TEXT NOT NULL DEFAULT '';")
+            .ok();
     }
     // v0.18.16 上下文协商：runs 补 negotiation JSON 列（逐轮摘要+最终prompt长度）。
     let has_neg = conn
@@ -142,7 +140,8 @@ pub fn migrate(conn: &Connection) {
         )
         .unwrap_or(0);
     if has_mcsm == 0 {
-        conn.execute_batch("ALTER TABLE scripts ADD COLUMN mcsm TEXT NOT NULL DEFAULT '';").ok();
+        conn.execute_batch("ALTER TABLE scripts ADD COLUMN mcsm TEXT NOT NULL DEFAULT '';")
+            .ok();
     }
     // v0.18.6 P1-2：l4_reviews 补 label_source（human / blind:regcheck3）。
     // 老数据默认 human（历史语义：人打的标签）。
@@ -1049,7 +1048,11 @@ pub fn set_patch_conn(
         "reverted" => "reverted",
         _ => "confirmed",
     };
-    let confirmed_at = if st == "confirmed" { ts.clone() } else { String::new() };
+    let confirmed_at = if st == "confirmed" {
+        ts.clone()
+    } else {
+        String::new()
+    };
     conn.execute(
         "INSERT INTO patches (pipeline, proc_name, impl_name, field, value, created_at, origin, status, confirmed_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -1071,15 +1074,13 @@ pub fn set_patch(
     status: &str,
 ) {
     let conn = open();
-    set_patch_conn(&conn, pipeline, proc_name, impl_name, field, value, origin, status)
+    set_patch_conn(
+        &conn, pipeline, proc_name, impl_name, field, value, origin, status,
+    )
 }
 
 /// v0.18.6 P1-1：生命周期迁移——tentative → confirmed（验证通过）或 reverted（证伪/回滚）。
-pub fn transition_patch_conn(
-    conn: &Connection,
-    id: i64,
-    to: &str,
-) -> Result<(), String> {
+pub fn transition_patch_conn(conn: &Connection, id: i64, to: &str) -> Result<(), String> {
     let to = match to {
         "confirmed" => "confirmed",
         "reverted" => "reverted",
@@ -1519,7 +1520,16 @@ mod tests {
             "llm:qwen3.8:27b",
             "confirmed",
         );
-        set_patch_conn(&conn, "p1", "arch", "llm", "guide", "human 改", "human", "confirmed");
+        set_patch_conn(
+            &conn,
+            "p1",
+            "arch",
+            "llm",
+            "guide",
+            "human 改",
+            "human",
+            "confirmed",
+        );
         let rows = load_patches_conn(&conn, "p1");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].value, "human 改");
@@ -1736,16 +1746,42 @@ mod conn_tests {
 
     // ── patches 回路 ──
 
-
     #[test]
     fn patch_set_load_remove() {
         let conn = memdb();
-        set_patch_conn(&conn, "pl", "proc", "impl", "enabled", "false", "human", "confirmed");
-        set_patch_conn(&conn, "pl", "proc", "impl", "cost.latency", "42", "human", "confirmed");
+        set_patch_conn(
+            &conn,
+            "pl",
+            "proc",
+            "impl",
+            "enabled",
+            "false",
+            "human",
+            "confirmed",
+        );
+        set_patch_conn(
+            &conn,
+            "pl",
+            "proc",
+            "impl",
+            "cost.latency",
+            "42",
+            "human",
+            "confirmed",
+        );
         let patches = load_patches_conn(&conn, "pl");
         assert_eq!(patches.len(), 2);
         // 同字段重设 = 覆盖非追加
-        set_patch_conn(&conn, "pl", "proc", "impl", "cost.latency", "99", "human", "confirmed");
+        set_patch_conn(
+            &conn,
+            "pl",
+            "proc",
+            "impl",
+            "cost.latency",
+            "99",
+            "human",
+            "confirmed",
+        );
         let patches = load_patches_conn(&conn, "pl");
         assert_eq!(patches.len(), 2);
         assert!(patches
@@ -1765,37 +1801,52 @@ mod conn_tests {
     fn patch_lifecycle_tentative_confirm_revert() {
         let conn = memdb();
         // tentative 写入（doctor 处方形态）
-        set_patch_conn(&conn, "pl", "proc", "impl", "guide", "R1", "llm:qwen3.8:27b", "tentative");
+        set_patch_conn(
+            &conn,
+            "pl",
+            "proc",
+            "impl",
+            "guide",
+            "R1",
+            "llm:qwen3.8:27b",
+            "tentative",
+        );
         let rows = load_patches_conn(&conn, "pl");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].status, "tentative");
         let id = patch_id_conn(&conn, "pl", "proc", "impl", "guide").unwrap();
-        let t0: String = conn.query_row(
-            "SELECT confirmed_at FROM patches WHERE id = ?1",
-            params![id],
-            |r| r.get(0),
-        ).unwrap();
+        let t0: String = conn
+            .query_row(
+                "SELECT confirmed_at FROM patches WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(t0, "", "tentative 无 confirmed_at");
         // 确认 → 生效
         transition_patch_conn(&conn, id, "confirmed").unwrap();
         let rows = load_patches_conn(&conn, "pl");
         assert_eq!(rows[0].status, "confirmed");
-        let t1: String = conn.query_row(
-            "SELECT confirmed_at FROM patches WHERE id = ?1",
-            params![id],
-            |r| r.get(0),
-        ).unwrap();
+        let t1: String = conn
+            .query_row(
+                "SELECT confirmed_at FROM patches WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert!(!t1.is_empty());
         // 证伪 → reverted，行还在（审计），状态翻转
         transition_patch_conn(&conn, id, "reverted").unwrap();
         let rows = load_patches_conn(&conn, "pl");
         assert_eq!(rows.len(), 1, "reverted 保留审计痕迹不删除");
         assert_eq!(rows[0].status, "reverted");
-        let t2: String = conn.query_row(
-            "SELECT reverted_at FROM patches WHERE id = ?1",
-            params![id],
-            |r| r.get(0),
-        ).unwrap();
+        let t2: String = conn
+            .query_row(
+                "SELECT reverted_at FROM patches WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert!(!t2.is_empty());
         // 坏目标 fail-closed
         assert!(transition_patch_conn(&conn, id, "explode").is_err());

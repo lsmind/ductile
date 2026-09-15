@@ -6,8 +6,8 @@
 //! 读写与 shell 执行（read/write/run/sh）。
 
 use crate::core::ast::*;
-use crate::negotiate;
 use crate::core::dslresult::{encode_structured_result, parse_dsl_result_block};
+use crate::negotiate;
 use crate::textargs::{
     expand_fs_path, extract_all_string_args, extract_first_bare_arg, extract_first_string,
     extract_string_arg, resolve_vars, strip_wrapping_quotes,
@@ -923,8 +923,12 @@ fn exec_llm(
     // 循环在引擎不在模型；每轮 LLM 调用完全无状态（规格 §1）。
     // 预算默认 3 轮（[agents.x] negotiate_rounds 调，0=关）。协商失败 fail-closed。
     let negotiate_on = {
-        let env_on = std::env::var("NEGOTIATE").map(|v| v == "1").unwrap_or(false);
-        let env_off = std::env::var("NEGOTIATE").map(|v| v == "0").unwrap_or(false);
+        let env_on = std::env::var("NEGOTIATE")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        let env_off = std::env::var("NEGOTIATE")
+            .map(|v| v == "0")
+            .unwrap_or(false);
         if env_off {
             false
         } else if env_on {
@@ -975,7 +979,11 @@ fn exec_llm(
             return Err(format!(
                 "llm negotiate: 预算耗尽（{}轮）模型仍声明信息不足 — fail-closed。最后缺口: {}",
                 max_rounds,
-                missing.iter().map(|m| m.ref_str.clone()).collect::<Vec<_>>().join(", ")
+                missing
+                    .iter()
+                    .map(|m| m.ref_str.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         // resolve 每条缺口 → 补充块（成功+unavailable 都告知模型）
@@ -984,7 +992,10 @@ fn exec_llm(
         let mut unavailable = Vec::new();
         for m in &missing {
             if negotiate::already_provided(&prompt, &m.ref_str) {
-                unavailable.push(format!("{}（already-provided：已在上下文中，请直接使用）", m.ref_str));
+                unavailable.push(format!(
+                    "{}（already-provided：已在上下文中，请直接使用）",
+                    m.ref_str
+                ));
                 continue;
             }
             match negotiate::resolve_ref(&m.ref_str, topic, results) {
@@ -996,7 +1007,9 @@ fn exec_llm(
             }
         }
         if items.is_empty() && unavailable.is_empty() {
-            return Err("llm negotiate: enough=false 但 missing 全部不可解析 — 违约 fail-closed".into());
+            return Err(
+                "llm negotiate: enough=false 但 missing 全部不可解析 — 违约 fail-closed".into(),
+            );
         }
         let mut block = negotiate::supplement_block(round, &items);
         if !unavailable.is_empty() {
@@ -1049,8 +1062,16 @@ fn negotiate_prompt_base(
         if let Some(a) = agents.agents.get(name) {
             let schema = extract_string_arg("schema", body);
             let system = extract_string_arg("system", body);
-            let schema_ref = if schema.is_empty() { a.schema.clone() } else { schema };
-            let system_ref = if system.is_empty() { a.system.clone() } else { system };
+            let schema_ref = if schema.is_empty() {
+                a.schema.clone()
+            } else {
+                schema
+            };
+            let system_ref = if system.is_empty() {
+                a.system.clone()
+            } else {
+                system
+            };
             if let Some(p) = NodeCtx::synthesize_auto_prompt(
                 topic,
                 results,
@@ -1353,10 +1374,17 @@ fn exec_llm_core(
             if i > tier_idx && tier_arg.is_none() {
                 if let Some(name) = &first_bare {
                     let conn = crate::db::open();
-                    let mut notes =
-                        crate::db::tier_failure_notes_conn(&conn, name, &ladder[tier_idx], 3, &tier_ctx);
+                    let mut notes = crate::db::tier_failure_notes_conn(
+                        &conn,
+                        name,
+                        &ladder[tier_idx],
+                        3,
+                        &tier_ctx,
+                    );
                     for lower in ladder[tier_idx + 1..i].iter() {
-                        notes.extend(crate::db::tier_failure_notes_conn(&conn, name, lower, 2, &tier_ctx));
+                        notes.extend(crate::db::tier_failure_notes_conn(
+                            &conn, name, lower, 2, &tier_ctx,
+                        ));
                     }
                     if !notes.is_empty() {
                         let digest: String =
@@ -1387,7 +1415,8 @@ fn exec_llm_core(
                         if !kvs.is_empty() {
                             eprintln!(
                                 "    -> llm result: {} fields (tier={})",
-                                kvs.len(), tier_name
+                                kvs.len(),
+                                tier_name
                             );
                             // 刀4：τ_off 检测——模型自报 escalate=true 时携带 partial
                             // 升档续做（PyroDash 单次交接）。只有还有更高档可升才交棒；
@@ -1426,7 +1455,9 @@ fn exec_llm_core(
                             // 跨档成功（i > 起步档）说明低档确实不行，也记 success
                             // 于实际服务档，经验键为 agent 名。
                             if let Some(name) = &first_bare {
-                                crate::db::record_tier_outcome(name, tier_name, true, "", &tier_ctx);
+                                crate::db::record_tier_outcome(
+                                    name, tier_name, true, "", &tier_ctx,
+                                );
                             }
                             // v0.18.6 P0-刀1：llm 成功 → 自动播种 canary。
                             // 保真：快照含协议尾巴（重放字节级还原当时输入；
@@ -1463,7 +1494,9 @@ fn exec_llm_core(
                     // v0.18.10 双向自适应（升半边）：失败反馈记账——失败原因
                     // 落 tier_journal，升档时随梯上传注入高档 prompt（免重蹈）。
                     if let Some(name) = &first_bare {
-                        crate::db::record_tier_outcome(name, tier_name, false, &last_err, &tier_ctx);
+                        crate::db::record_tier_outcome(
+                            name, tier_name, false, &last_err, &tier_ctx,
+                        );
                     }
                 }
                 Err(e) => {
@@ -2405,7 +2438,10 @@ mod tests {
             .find(|(k, _)| k == "partial")
             .map(|(_, v)| v.clone());
         assert_eq!(escal, "true");
-        assert_eq!(partial.as_deref(), Some("已化简为 x^2=t 的换元，剩余求根未完成"));
+        assert_eq!(
+            partial.as_deref(),
+            Some("已化简为 x^2=t 的换元，剩余求根未完成")
+        );
         // 无自报：escalate 空 → 不升档
         let calm = "##DSL_RESULT\nok=1\nscore=85\n##DSL_END";
         let kvs2 = parse_dsl_result_block(calm).unwrap();

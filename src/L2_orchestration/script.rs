@@ -346,12 +346,23 @@ print("hi")
     #[test]
     fn mcsm_field_parsed_and_normalized() {
         // v0.18.11：mcsm 契约键 — F-O-P-T 认知坐标进卡
-        let src = GOOD.replace("# timeout: 60", "# timeout: 60\n# mcsm: F(2)-o(1)-P(3)-t(4)");
+        let src = GOOD.replace(
+            "# timeout: 60",
+            "# timeout: 60\n# mcsm: F(2)-o(1)-P(3)-t(4)",
+        );
         let card = parse_contract(&src, "/tmp/x.py").unwrap();
         assert_eq!(card.mcsm, "F(2)-O(1)-P(3)-T(4)", "小写规范化大写");
         // 非法坐标 fail-closed
-        for bad in ["F(9)-O(1)-P(3)-T(4)", "f(2)-x(1)-P(3)-T(4)", "F(2)-O(1)-P(3)", "F(2)O(1)P(3)T(4)"] {
-            let src = GOOD.replace("# timeout: 60", format!("# timeout: 60\n# mcsm: {bad}").as_str());
+        for bad in [
+            "F(9)-O(1)-P(3)-T(4)",
+            "f(2)-x(1)-P(3)-T(4)",
+            "F(2)-O(1)-P(3)",
+            "F(2)O(1)P(3)T(4)",
+        ] {
+            let src = GOOD.replace(
+                "# timeout: 60",
+                format!("# timeout: 60\n# mcsm: {bad}").as_str(),
+            );
             assert!(parse_contract(&src, "/tmp/x.py").is_err(), "应拒绝: {bad}");
         }
     }

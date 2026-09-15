@@ -63,12 +63,14 @@ pub fn state_db_path() -> PathBuf {
 
 /// run 失败时落 flag；修复路径清 flag。会话例行检查项。
 pub fn set_degraded(name: &str, reason: &str) {
-    let f = degraded_dir_with(std::env::var_os("DUCTILE_DATA")).join(format!("{}.flag", name.replace('/', "_")));
+    let f = degraded_dir_with(std::env::var_os("DUCTILE_DATA"))
+        .join(format!("{}.flag", name.replace('/', "_")));
     let _ = std::fs::write(&f, reason);
 }
 
 pub fn clear_degraded(name: &str) -> bool {
-    let f = degraded_dir_with(std::env::var_os("DUCTILE_DATA")).join(format!("{}.flag", name.replace('/', "_")));
+    let f = degraded_dir_with(std::env::var_os("DUCTILE_DATA"))
+        .join(format!("{}.flag", name.replace('/', "_")));
     std::fs::remove_file(&f).is_ok()
 }
 
@@ -910,9 +912,16 @@ mod tests {
         // 参数化内核: data=Some → 落隔离目录; None → 落真目录
         let tmp = std::env::temp_dir().join(format!("abl_deg_{}", std::process::id()));
         let iso = degraded_dir_with(Some(tmp.clone().into_os_string()));
-        assert!(iso.starts_with(&tmp), "隔离 flag 应落 DUCTILE_DATA 下: {:?}", iso);
+        assert!(
+            iso.starts_with(&tmp),
+            "隔离 flag 应落 DUCTILE_DATA 下: {:?}",
+            iso
+        );
         let real = degraded_dir_with(None);
-        assert!(real.starts_with(crate::L4_structure::harvest::share_dir()), "无 env 落真目录");
+        assert!(
+            real.starts_with(crate::L4_structure::harvest::share_dir()),
+            "无 env 落真目录"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

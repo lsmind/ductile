@@ -1406,7 +1406,7 @@ mod prim_tests {
         // 拉高 b 的 rank: 先合并两个空类 c→b 使 rank[b]=1
         let c = mk(&mut eg);
         let _ = eg.merge_classes(c, b); // rank 平局 → 根=b, rank[b]=1
-        // 再给 a/b 各塞一个节点
+                                        // 再给 a/b 各塞一个节点
         let n1 = crate::L2_orchestration::egraph::ENode {
             op: "run".into(),
             children: vec![],
@@ -1431,6 +1431,12 @@ mod prim_tests {
         assert_eq!(total, 2, "两个节点都必须在规范类里, 实际 {}", total);
         // 且规范类(通过 find 到达的)必须能看见全部节点
         let canon_class = &eg.classes[eg.uf.find_imm(a)];
-        assert_eq!(canon_class.nodes.len(), 2, "规范视图节点蒸发! find(a)={}, nodes={}", eg.uf.find_imm(a), canon_class.nodes.len());
+        assert_eq!(
+            canon_class.nodes.len(),
+            2,
+            "规范视图节点蒸发! find(a)={}, nodes={}",
+            eg.uf.find_imm(a),
+            canon_class.nodes.len()
+        );
     }
 }

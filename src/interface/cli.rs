@@ -158,9 +158,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             cmd_incident_close(&args[3], &args[4..].join(" "))
         }
         // v0.18.6 P0-刀2：判别实验真重跑（canary 快照 → bridge → pass_rate → triage 回写）
-        "incident" if args.len() >= 4 && args[2] == "triage" => {
-            cmd_incident_triage(&args[3])
-        }
+        "incident" if args.len() >= 4 && args[2] == "triage" => cmd_incident_triage(&args[3]),
         // v0.15 L4 端到端复核（缺口 #4，冷启动 log-only）
         "l4" if args.len() >= 3 && args[2] == "list" => cmd_l4_list(),
         // v0.18.6 P1-2：盲评自动打标（校准闭环的标签注入通道）
@@ -346,7 +344,9 @@ fn cmd_incident_triage(id: &str) -> Result<i32, String> {
         return Ok(0);
     }
     let rate_f = passes as f64 / ran as f64;
-    let disc = shelve::classify_discriminant(Some(rate_f)).to_label().to_string();
+    let disc = shelve::classify_discriminant(Some(rate_f))
+        .to_label()
+        .to_string();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs().to_string())
@@ -358,7 +358,12 @@ fn cmd_incident_triage(id: &str) -> Result<i32, String> {
     .map_err(|e| format!("triage write failed: {e}"))?;
     println!(
         "incident #{id}: replay {}/{}, pass {}/{} (rate {:.2}) → {}",
-        ran, targets.len(), passes, ran, rate_f, disc
+        ran,
+        targets.len(),
+        passes,
+        ran,
+        rate_f,
+        disc
     );
     Ok(0)
 }
@@ -397,8 +402,8 @@ fn cmd_l4_list() -> Result<i32, String> {
 /// 独立性：标签源（盲评相对判断）与 verdict 源（intent+deliver 绝对判断）
 /// 不同源——这正是校准的意义：两个不同源的判断器的一致率。
 fn cmd_l4_calibrate(path: &str, prefix: &str, source: &str) -> Result<i32, String> {
-    let tally = std::fs::read_to_string(path)
-        .map_err(|e| format!("read tally log: {e} (先跑 tally)"))?;
+    let tally =
+        std::fs::read_to_string(path).map_err(|e| format!("read tally log: {e} (先跑 tally)"))?;
     let pass_marker = format!("{prefix}-PASS");
     let fail_marker = format!("{prefix}-FAIL");
     let pass = tally.contains(&pass_marker);
@@ -1876,7 +1881,11 @@ fn cmd_cost_report() -> Result<i32, String> {
         }
         println!();
     }
-    println!("impls: {} | mean norm: {:.2}x", cnt, grand / cnt.max(1) as f64);
+    println!(
+        "impls: {} | mean norm: {:.2}x",
+        cnt,
+        grand / cnt.max(1) as f64
+    );
     Ok(0)
 }
 

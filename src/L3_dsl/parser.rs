@@ -289,7 +289,9 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
             return Err(ParseError {
                 line: start_idx + 1,
                 col: 1,
-                msg: "unbalanced parens in .proc(...) — reached EOF while joining continuation lines".into(),
+                msg:
+                    "unbalanced parens in .proc(...) — reached EOF while joining continuation lines"
+                        .into(),
                 line_text: lines[start_idx].to_string(),
             });
         }
@@ -2283,7 +2285,11 @@ mod prim_tests {
         let ask = &pl.procs[1];
         assert_eq!(ask.name, "ask");
         // prompt 必须完整保留（含上游 @src 引用 → 依赖边）
-        assert!(ask.plan[0].body_text.contains("材料: @src"), "prompt 蒸发: {}", ask.plan[0].body_text);
+        assert!(
+            ask.plan[0].body_text.contains("材料: @src"),
+            "prompt 蒸发: {}",
+            ask.plan[0].body_text
+        );
         assert_eq!(ask.plan[0].refs, vec!["src".to_string()]);
     }
 
