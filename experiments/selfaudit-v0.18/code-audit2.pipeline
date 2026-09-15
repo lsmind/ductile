@@ -1,0 +1,15 @@
+Pipeline("code-audit2", "自审第二轮——大模块 + a3 补跑")
+.proc("m1", read("/home/beef/projects/ductile/src/L2_orchestration/executor.rs"))
+.proc("m2", read("/home/beef/projects/ductile/src/L2_orchestration/egraph.rs"))
+.proc("m3", read("/home/beef/projects/ductile/src/L1_feedback/errflow.rs"))
+.proc("m4", read("/home/beef/projects/ductile/src/L2_orchestration/textargs.rs"))
+.proc("a1", llm(auditor,
+  prompt="审查模块1 (executor.rs——编排主干/重试/foreach/critical_set)。只报真实缺陷: 逻辑错/边界/错误吞掉/竞态/不变量违反:\n@m1\nfindings 每条 \"file:line [severity] what -- why\"。控制在最重要3条内。"))
+.proc("a2", llm(auditor,
+  prompt="审查模块2 (egraph.rs——e-graph 等价类/R1R2R3熔合/when守卫)。只报真实缺陷:\n@m2\nfindings 每条 \"file:line [severity] what -- why\"。控制在最重要3条内。"))
+.proc("a3", llm(auditor,
+  prompt="审查模块3 (errflow.rs——十五类错误分类/策略/响应)。只报真实缺陷:\n@m3\nfindings 每条 \"file:line [severity] what -- why\"。控制在最重要3条内。"))
+.proc("a4", llm(auditor,
+  prompt="审查模块4 (textargs.rs——变量解析/参数提取原语)。只报真实缺陷:\n@m4\nfindings 每条 \"file:line [severity] what -- why\"。控制在最重要3条内。输出前自行删除已被你推演否定的猜想——只留你确信的。"))
+.proc("collect", run("echo done"))
+  .when(@a1.count)

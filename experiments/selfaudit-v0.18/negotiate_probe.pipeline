@@ -1,0 +1,3 @@
+Pipeline("negotiate_probe", "v0.18.16 协商E2E: 模型声明缺口->引擎补料->二轮收敛")
+.proc("src", run("/usr/bin/printf '##DSL_RESULT\nconstraints=预算500元内,单机部署,别用云服务\n##DSL_END\n'"))
+.proc("ask", llm(nego_probe, prompt="任务: 基于上游约束设计部署方案。上游: @src\n要求: answer 字段必须逐条体现约束。"))

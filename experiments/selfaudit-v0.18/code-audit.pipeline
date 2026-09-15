@@ -1,0 +1,16 @@
+Pipeline("code-audit", "ductile 审查 ductile——auditor 逐模块找真实缺陷")
+.proc("m1", read("/home/beef/projects/ductile/src/L3_dsl/when.rs"))
+.proc("m2", read("/home/beef/projects/ductile/src/L2_orchestration/negotiate.rs"))
+.proc("m3", read("/home/beef/projects/ductile/src/L2_orchestration/textargs.rs"))
+.proc("m4", read("/home/beef/projects/ductile/src/core/dslresult.rs"))
+.proc("a1", llm(auditor,
+  prompt="审查模块1 (L3_dsl/when.rs——.when 条件文法与求值):\n@m1\n只报真实缺陷: 逻辑错/边界溢出/错误吞掉/不变量违反。findings 每条格式 \"file:line [severity] what -- why\"。"))
+.proc("a2", llm(auditor,
+  prompt="审查模块2 (L2_orchestration/negotiate.rs——v0.18.16 上下文协商,新代码重点审):\n@m2\n只报真实缺陷。findings 每条格式 \"file:line [severity] what -- why\"。"))
+.proc("a3", llm(auditor,
+  prompt="审查模块3 (L2_orchestration/textargs.rs——变量解析/参数提取):\n@m3\n只报真实缺陷。findings 每条格式 \"file:line [severity] what -- why\"。"))
+.proc("a4", llm(auditor,
+  prompt="审查模块4 (core/dslresult.rs——结构化字段编解码):\n@m4\n只报真实缺陷。findings 每条格式 \"file:line [severity] what -- why\"。"))
+.proc("collect", run("echo done"))
+  .when(@a1.count)
+  .needs(@a4)
