@@ -328,7 +328,34 @@ pub const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS pipelines (
             created_at  TEXT DEFAULT '',
             resolved_at TEXT DEFAULT ''
         );
-        CREATE INDEX IF NOT EXISTS idx_shelved_status ON shelved(status);";
+        CREATE INDEX IF NOT EXISTS idx_shelved_status ON shelved(status);
+        CREATE TABLE IF NOT EXISTS wrapped_cmds (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            tag         TEXT NOT NULL,
+            cmd         TEXT NOT NULL,
+            exit_code   INTEGER,
+            recorded_at TEXT DEFAULT '',
+            UNIQUE(tag, cmd)
+        );
+        CREATE TABLE IF NOT EXISTS promotions (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            tag         TEXT NOT NULL,
+            cmd         TEXT NOT NULL,
+            count       INTEGER,
+            gain_bits   REAL,
+            promoted_at TEXT DEFAULT '',
+            UNIQUE(tag, cmd)
+        );
+        CREATE TABLE IF NOT EXISTS scaffolds (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            text        TEXT NOT NULL,
+            save_b      INTEGER,
+            use_count   INTEGER,
+            lines       INTEGER,
+            source      TEXT DEFAULT 'v26',
+            imported_at TEXT DEFAULT '',
+            UNIQUE(text)
+        );";
 
 pub fn init_db() {
     let conn = open();
