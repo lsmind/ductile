@@ -33,6 +33,27 @@ pub fn degraded_dir() -> PathBuf {
     d
 }
 
+/// degraded_dir 的参数化内核（同 db_path_with 模式，v0.18.15）：
+/// DUCTILE_DATA 隔离下的 run 失败 flag 必须落隔离目录——
+/// 实锤：消融探针 ab1/ab3 设 DUCTILE_DATA 跑失败，flag 却穿透到
+/// 真目录 ~/.local/share/ductile/degraded/，doctor 因此报 56 个
+/// OUTSTANDING（含隔离探针）。与 v0.15 db_path_with 修的是同族坑。
+/// 注意：share_dir() 本身不重定向——envs/与 state.db 是感知数据源
+/// （harvest 读 hermes 历史库），只有 degraded 这类运行副作用才隔离。
+pub fn degraded_dir_with(data: Option<std::ffi::OsString>) -> PathBuf {
+    let base = match data {
+        Some(d) => {
+            let dir = PathBuf::from(&d);
+            let _ = std::fs::create_dir_all(&dir);
+            dir
+        }
+        None => share_dir(),
+    };
+    let d = base.join("degraded");
+    let _ = std::fs::create_dir_all(&d);
+    d
+}
+
 pub fn state_db_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(&home).join(".hermes/state.db")
@@ -42,18 +63,18 @@ pub fn state_db_path() -> PathBuf {
 
 /// run 失败时落 flag；修复路径清 flag。会话例行检查项。
 pub fn set_degraded(name: &str, reason: &str) {
-    let f = degraded_dir().join(format!("{}.flag", name.replace('/', "_")));
+    let f = degraded_dir_with(std::env::var_os("DUCTILE_DATA")).join(format!("{}.flag", name.replace('/', "_")));
     let _ = std::fs::write(&f, reason);
 }
 
 pub fn clear_degraded(name: &str) -> bool {
-    let f = degraded_dir().join(format!("{}.flag", name.replace('/', "_")));
+    let f = degraded_dir_with(std::env::var_os("DUCTILE_DATA")).join(format!("{}.flag", name.replace('/', "_")));
     std::fs::remove_file(&f).is_ok()
 }
 
 pub fn list_degraded() -> Vec<String> {
     let mut out = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(degraded_dir()) {
+    if let Ok(rd) = std::fs::read_dir(degraded_dir_with(std::env::var_os("DUCTILE_DATA"))) {
         for e in rd.flatten() {
             if let Some(n) = e.file_name().to_str() {
                 if n.ends_with(".flag") {
@@ -881,5 +902,17 @@ mod tests {
     #[test]
     fn normalize_strips_hash_comment() {
         assert_eq!(normalize("cmd arg # comment"), "cmd arg");
+    }
+
+    // ── v0.18.15 degraded flag 隔离（DUCTILE_DATA 同族坑第三例） ──
+    #[test]
+    fn degraded_flag_respects_ductile_data() {
+        // 参数化内核: data=Some → 落隔离目录; None → 落真目录
+        let tmp = std::env::temp_dir().join(format!("abl_deg_{}", std::process::id()));
+        let iso = degraded_dir_with(Some(tmp.clone().into_os_string()));
+        assert!(iso.starts_with(&tmp), "隔离 flag 应落 DUCTILE_DATA 下: {:?}", iso);
+        let real = degraded_dir_with(None);
+        assert!(real.starts_with(crate::L4_structure::harvest::share_dir()), "无 env 落真目录");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
