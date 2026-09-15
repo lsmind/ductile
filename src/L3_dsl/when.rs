@@ -44,16 +44,6 @@ impl Op {
             Op::Lt => lhs < rhs,
         }
     }
-    fn as_str(&self) -> &'static str {
-        match self {
-            Op::Eq => "==",
-            Op::Ne => "!=",
-            Op::Ge => ">=",
-            Op::Le => "<=",
-            Op::Gt => ">",
-            Op::Lt => "<",
-        }
-    }
 }
 
 /// 操作数（文法 operand）。

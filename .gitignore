@@ -11,3 +11,4 @@ build/
 config.toml
 ductile.toml
 target/ship-msg.txt
+examples/ductile.db

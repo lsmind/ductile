@@ -46,9 +46,6 @@ impl Interner {
     fn get(&self, id: u32) -> &str {
         &self.strings[id as usize]
     }
-    fn len(&self) -> usize {
-        self.strings.len()
-    }
 }
 
 /// 全语料生长. 返回报告; 构式写 scaffolds (source='grown').
