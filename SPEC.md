@@ -123,6 +123,13 @@ Pipeline("name", "optional description", cwd="...", env=["K=V", ...])
 - 路径格式：`name -> body`（`->` 前是 impl 名，后面是函数调用文本）
 - `.tags()` 只在 impl（叶子）上声明
 - `.deliver()` 的 proc 不执行，仅标记终端输出
+- **deliver fail-closed（v0.18.15）**：三种病态形态 parse 期直接拒绝（带行号）：
+  - 自指：`.deliver(@x)` 归到 proc x 自己（顶层独行写法的典型误用）——x 永远被跳过，主产出不可能产出
+  - 幽灵引用：`@x` 指向不存在的 proc
+  - 空引用：deliver proc 无任何引用（哨兵形同虚设）
+  正确形态：专门的哨兵 proc 引用**别人**——`.proc("deliver")` 换行缩进 `.deliver(@target)`。
+  运行时另有兜底：deliver 引用的目标缺席 results（被跳过/链式哨兵/热补丁变异）= 管线判红，
+  禁止静默 success（parser 静态校验是第一道闸，executor 双路径兜底任何运行期形态）
 - 标签用 `#` 前缀，标签集是 BTreeSet（有序、去重）
 - 依赖关系自动推导：body 中 `@proc_name` 引用即声明依赖
 - **`.when(cond)` 两种写法（v0.11.1）**：
@@ -276,7 +283,23 @@ HyperGraph("name")
 
 复用：`similar` / `nodes`（结构键对齐；tags 仅软排序）。示例：`examples/hyper/`。
 
-### 2.4c devcycle
+### 2.4c explore（v0.19 探索环）
+
+```
+ductile explore <file.pipeline> <topic> [--drs]
+ductile explore x <report-id> --report     # 只读检索冻结报告
+```
+
+探索-固化循环：curriculum LLM 出题（探针任务）→ 沙箱真跑（`DUCTILE_DATA` 隔离；
+`cmd:` 前缀 = shell 探针，`.pipeline` 路径 = 管线探针）→ 确定性裁判判 Pass/Fail
+（判据语言：`exit 0` / `exit N` / `含 <s>` / `不含 <s>`，分号连接）→ Fail 固化成
+incidents 三元组（action/condition/consequence，err_code=explore_finding）→
+报告 freeze 到 `$DUCTILE_DATA/explore/`。
+
+前置：config.toml 需 `[agents.curriculum]`（出题角色）+ llm bridge 在搜索路径。
+预算：默认 8 波 / 12 深步。`--drs` 只跑深评阶段。
+
+### 2.4d devcycle
 
 本仓库工程周期入口：`./devcycle.pipeline`。说明见 [`docs/DEVCYCLE.md`](docs/DEVCYCLE.md)。
 
@@ -952,6 +975,10 @@ ductile script detach <name>            注销
 机制成熟循环，不是价值阶梯；沉淀后回 1'，F(1)-O(1)-P(1)-T(1)=稳态）。
 四维 = 场域/本体论/现象/目的论（存在论的空间性/内容/显现/方向性）。
 声明了就 fail-closed 校验（格式垃圾拒绝注册），`script show` 展示。
+**v0.19 起声明 mcsm 必须伴随实例级注解**：`# mcsm_note_{f,o,p,t}:` 四行，
+每维写明该维度**在当前环境下的具体指称**（如 `# mcsm_note_f: 本机文件系统+PATH里的coreutils`），
+不是通用维度名——注"场域"等于没注，裸通用名拒收。注解存 `mcsm_note` 列，
+`script show` 卡直接展示四行（读卡即知，不翻文档）。
 管线/拓扑/层用注释约定标注。**F(1)-O(1)-P(1)-T(1)=稳态**（机制稳定通用）；含 4 越多=越多维度在实践
 扩展（活跃变动期）；坐标不分好坏，每个阶段对应不同处理措施（1可信赖可熔合
 当基座 / 2记录矛盾+隔离 / 3 tentative+canary 构造观察 / 4实跑+账本+promote），
