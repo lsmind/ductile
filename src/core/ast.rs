@@ -157,6 +157,10 @@ pub struct Proc {
     pub deliver_refs: Vec<String>,
     pub foreach_var: String,
     pub pick_by: String, // pick strategy
+    /// v0.19 审计③：显式信任的 @ref 清单（`.trust(@a, @b)`）——
+    /// run()/sh() 命令体里注入 @ref 必须在此声明（§13.5 引擎层封死，
+    /// 不再靠作者自觉）。parser 静态校验 + executor 运行时兜底双闸。
+    pub trust_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -393,6 +397,7 @@ mod tests {
                     foreach: None,
                     foreach_var: String::new(),
                     pick_by: "cost".into(),
+                    trust_refs: Vec::new(),
                 },
                 Proc {
                     name: "b".into(),
@@ -411,6 +416,7 @@ mod tests {
                     foreach: None,
                     foreach_var: String::new(),
                     pick_by: "cost".into(),
+                    trust_refs: Vec::new(),
                 },
             ],
             weights: Weights::default(),
@@ -445,6 +451,7 @@ mod tests {
                 foreach: None,
                 foreach_var: String::new(),
                 pick_by: "cost".into(),
+                trust_refs: Vec::new(),
             }],
             weights: Weights::default(),
             cwd: None,

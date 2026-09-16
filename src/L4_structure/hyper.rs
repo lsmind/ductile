@@ -1192,6 +1192,22 @@ pub fn emit_pipeline(spec: &HyperSpec) -> String {
             ));
         }
         out.push_str("    )\n");
+        // v0.19 审计③：judge stage 的 run() stub 注入 @deps → 此处输出 proc 级
+        // .trust(...)（parse 期静态闸要求，emit 产物必须自洽可 round-trip）
+        if matches!(stage.role, HyperRole::Judge)
+            || stage.tags.iter().any(|t| t == "judge" || t == "gate")
+        {
+            if !after.is_empty() {
+                out.push_str(&format!(
+                    "    .trust({})\n",
+                    after
+                        .iter()
+                        .map(|a| format!("@{}", a))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
     }
 
     let deliver = resolve_deliver(spec);
@@ -1288,6 +1304,7 @@ fn default_tags_for_role(role: &HyperRole) -> BTreeSet<String> {
 fn primary_body(stage: &HyperStage, after: &[String], tags: &BTreeSet<String>) -> String {
     if matches!(stage.role, HyperRole::Judge) || tags.iter().any(|t| t == "judge" || t == "gate") {
         // Deterministic judge stub; embed @deps so DAG edges exist for after=.
+        // (v0.19 审计③：@deps 注入 run() 的 trust 由 emit_pipeline 输出 proc 级 .trust)
         let deps = after
             .iter()
             .map(|a| format!("@{}", a))

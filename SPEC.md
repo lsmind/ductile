@@ -142,6 +142,13 @@ Pipeline("name", "optional description", cwd="...", env=["K=V", ...])
   - 语义联动：① egraph 建排序边（needs 声明的上游先执行）；② 合成器把 needs 并入 upstream 引用集合（进入 LLM 上下文）
   - 典型场景：审计/裁判节点 `.when(@上游产出存在)` 只声明门禁，但审计清单脚手架来自更早的节点——用 `.needs` 把清单喂进上下文。实证：regchain audit 节点挂 `.needs(@req)` 后盲评 s3 段 -7.3 → +8.0
   - 判别法：如果缺了这个上游的**内容**产出质量会掉，用 `.needs`；如果缺了这个上游的**状态**流程走不通，用 `.when`
+- **`.trust(@ref, ...)` 修饰符（v0.19 审计③）**：显式信任声明——`run()`/`sh()`
+  命令体里注入 `@ref`（上游产出进 shell）必须在该 proc 点名，否则 parse 期
+  ParseError（带行号）；executor 在 resolve 后另有运行时兜底（覆盖动态拼接
+  形态）。§13.5 的"LLM 输出不进 bash"从纪律升级为引擎层物理闸。
+  - 与 `.needs` 的分工：`.needs` = 喂给 LLM 上下文（数据流白名单）；`.trust` =
+    允许进 shell 命令体（注入信任）
+  - 已知豁免形态：`@self`、`@localhost`（主机名/邮箱，非 proc 引用）
 - **`.constraint(fields)` 修饰符（v0.18.1）**：把上游某个结构化字段声明为链级约束，引擎注入所有下游节点的合成 prompt（"继承的约束"段）。
   - 语法：`.constraint(resolved_constraints)` —— 参数是**裸字段名**（不带 `@`）；声明处所在的 proc 即约束生产者，字段值从该 proc 的 §§FIELDS§§ 提取
   - 挂在"产出干净约束清单"的节点上（如问询链的 resolver：schema 含 `resolved_constraints` 字段）
@@ -442,9 +449,21 @@ ductile version diff <file.pipeline> <v1> <v2>
 
 - 存储在 `~/.local/share/ductile/versions/<pipeline_name>/`
 
+### 2.13b script doctor / archive（v0.19 审计①⑤）
+
+```
+ductile script doctor    # 逐条 stat 契约路径：DEAD=文件缺失；死路径 exit 1
+ductile archive          # wal_checkpoint(TRUNCATE)+整库拷贝 $DUCTILE_DATA/archive/，保留 10 份
+```
+
+- doctor 只读不删——删之前先看见；修复用 `script detach <name>` 或重 attach
+- archive 是 SQLite 单点的最低限度物理保障（无远端、无增量，完整快照 ×10）
+
 ### 2.14 canary（v0.15 认知层）
 
 ```
+ductile script doctor
+ductile archive
 ductile canary list [proc]
 ductile canary add <pipeline> <proc> <input> [expect] [note...]
 ductile canary rm <id>
@@ -520,7 +539,7 @@ ductile shelve resolve <id> <resolution...>
    - **R2 merge 扁平化**：merge 节点的传递扁平子集相等 → union（涵盖交换律 `merge(@a,@b)≡merge(@b,@a)`、嵌套折叠 `merge(merge(a,b),c)≡merge(a,b,c)`、退化 `merge(@x)≡x`）
    - **R3 write/read 对消**：`read(from=P)` ≡ `write(to=P, content=@src)` 的 `src`（即 write→read 融合为 pass-through，路径精确匹配，`{topic}` 等占位符原样比较）
    - **when-载体守卫（v0.11.1）**：挂 `.when()` 的 impl 投影为 when-载体节点，R1/R2/R3 一律不熔合含载体的 class——熔合会抹掉裁判依赖序（judge→consumer 边消失，deliver 抢跑、判决落空）。纯等价 proc 的 CSE 能力不受影响
-3. **提取器**：class 级 Kahn 拓扑（确定性）→ 逐 class 选最小静态 `cost_total` 的 enabled impl；对消 class 中 read 节点降级为缓存路径（class 内存在非 read 节点时不参与首选竞争）
+3. **提取器**：class 级 Kahn 拓扑（确定性）→ 逐 class 选最小 `cost_total` 的 enabled impl；对消 class 中 read 节点降级为缓存路径（class 内存在非 read 节点时不参与首选竞争）。**v0.19 审计⑥注**：`.cost()` 声明通道 v0.11 退役后所有 impl 的静态 cost=0，同 cost 平手实际由 `(proc, impl)` 字典序 tiebreak 决胜——排序真正起作用的通道是 exec_proc 内的历史惩罚/ImplPrefs 学习偏好（pick_by 默认值已从 "cost + history" 改为 "history" 以名副其实）
 4. **CSE**：同 class 只执行代表 proc，其余成员共享结果（执行日志 `[egraph]` 行可见 classes/融合命中/别名表）
 
 两层分工：e-graph 决定"谁跑"（class 代表/序/别名），exec_proc 内部仍按历史惩罚/偏好排序决定"怎么跑"（impl 序 + retry）。默认关闭——不声明时行为与 v0.9 完全一致。
@@ -1236,6 +1255,10 @@ LLM 结果**一律不进 bash**。`echo '@ref'`、`echo x='@ref' >/dev/null` 都
 2. **`write` 内置动词落盘**：`write(to="f.md", content=@plan)` 后 `cat f.md`——
    write 在 Rust 侧解析 `@ref`，不过 shell
 
+v0.19 起第三层：**引擎层物理闸**——`run()`/`sh()` 命令体注入 `@ref` 必须
+`.trust(@ref)` 点名（parser 静态 ParseError + executor 运行时兜底，见
+`.trust` 修饰符）。前两条是使用纪律，这条是制度。
+
 ---
 
 ## 14. LLM 管线配方（v0.18 实战沉淀）
@@ -1320,6 +1343,10 @@ R1 owner 枚举比人工版更严。但全量应用后 9B 直接输出不了 JSO
 | **27B 问询链** | **82.7** | 主力：直提链 84 同级 |
 | 9B 加压 guide | 61-64（触顶） | s0 提问臂 + 粗拆解 |
 | 8B 问询链 | 32-36 | 不可用于深推理 |
+
+> **证据等级注记（v0.19 审计④）**：本表数字为**单 seed 历史实测**（盲评
+> harness 脚本已随 /tmp 清理失传，无 multi-seed 复跑条件）。按当前证据纪律，
+> 引用时视作"量级参考"而非"精确对比"；复跑需先重建 harness（3-seed 起）。
 
 ### 14.7 工程纪律（外部实测反馈单，v0.18.4 已修）
 

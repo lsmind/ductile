@@ -125,6 +125,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             cmd_explore(&args[2], &args[3], drs_only)
         }
         "version" if args.len() >= 5 && args[2] == "save" => cmd_version_save(&args[3], &args[4]),
+        "archive" if args.len() >= 2 => cmd_archive(),
         "version" if args.len() >= 4 && args[2] == "log" => cmd_version_log(&args[3]),
         "version" if args.len() >= 6 && args[2] == "diff" => {
             cmd_version_diff(&args[3], &args[4], &args[5])
@@ -197,6 +198,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             cmd_script_detach(&args[3])
         }
         "script" if args.len() >= 3 && args[2] == "list" => cmd_script_list(),
+        "script" if args.len() >= 3 && args[2] == "doctor" => cmd_script_doctor(),
         "script" if args.len() >= 3 && args[2] == "show" && args.len() >= 4 => {
             cmd_script_show(&args[3])
         }
@@ -586,6 +588,38 @@ fn cmd_script_list() -> Result<i32, String> {
     Ok(0)
 }
 
+/// v0.19 审计①：死契约诊断——逐条 stat 契约卡路径，列出不存在的。
+/// 只读不删（删之前先看见）；死路径 exit 1（可接 devcycle 门禁）。
+/// 修复：ductile script detach <name> 或重新 attach 真实文件。
+fn cmd_script_doctor() -> Result<i32, String> {
+    let scripts = crate::db::script_list();
+    if scripts.is_empty() {
+        println!("no scripts attached — nothing to check");
+        return Ok(0);
+    }
+    let mut dead = 0;
+    println!("{:<18} {:<6} {}", "NAME", "STATE", "PATH");
+    for c in &scripts {
+        let state = if std::path::Path::new(&c.path).exists() {
+            "ok"
+        } else {
+            dead += 1;
+            "DEAD"
+        };
+        println!("{:<18} {:<6} {}", c.name, state, c.path);
+    }
+    if dead > 0 {
+        println!(
+            "\n{} dead contract(s) — fix: ductile script detach <name> (unregister) \
+             or re-attach the real file",
+            dead
+        );
+        return Ok(1);
+    }
+    println!("\nall {} contracts alive", scripts.len());
+    Ok(0)
+}
+
 fn cmd_script_show(name: &str) -> Result<i32, String> {
     let c = match crate::db::script_get(name) {
         Some(c) => c,
@@ -701,6 +735,7 @@ fn print_usage() {
     eprintln!("Script contracts (v0.12 — 脚本即 API):");
     eprintln!("  script attach <file>    Register script (parses # ductile: contract header)");
     eprintln!("  script list             Show attached scripts");
+    eprintln!("  script doctor           Check all contract paths (DEAD = file missing)");
     eprintln!("  script show <name>      Show contract card (LLM reads this, not the script)");
     eprintln!("  script call <name> \"k=v, k=v\"   One-off invoke (debug)");
     eprintln!("  script detach <name>    Unregister");
@@ -710,6 +745,13 @@ fn print_usage() {
         "  explore <file> <topic> [--drs]    Curriculum 出题→沙箱探针→确定性裁判→incidents 固化"
     );
     eprintln!("  explore x <report-id> --report    只读检索冻结报告");
+    eprintln!();
+    eprintln!("Maintenance (v0.19 审计五件):");
+    eprintln!("  archive                 Snapshot db (wal_checkpoint + copy, keep=10)");
+    eprintln!();
+    eprintln!("DSL verbs (SPEC §2/§5 — help 只列入口，动词全表见 SPEC):");
+    eprintln!("  run/sh/write/read/llm/gate/judge/spawn/cp/ftp ... + proc 修饰符");
+    eprintln!("  .when .needs .trust .deliver .constraint .pick .tags .desc .retry");
 }
 
 // ── run ──
@@ -2031,6 +2073,55 @@ fn cmd_explore_report(path: &str, id: &str) -> Result<i32, String> {
         let body = std::fs::read_to_string(h).unwrap_or_default();
         println!("== {} ==\n{}", h.display(), body);
     }
+    Ok(0)
+}
+
+/// v0.19 审计⑤：库快照——wal_checkpoint(TRUNCATE) 折叠 WAL 后整库拷贝到
+/// `$DUCTILE_DATA/archive/`，保留最近 ARCHIVE_KEEP 份（时间戳命名，超出淘汰
+/// 最旧）。SQLite 单点无归档的最低限度物理保障。
+const ARCHIVE_KEEP: usize = 10;
+
+fn cmd_archive() -> Result<i32, String> {
+    use std::path::PathBuf;
+    let db = db::db_path();
+    if !db.exists() {
+        return Err(format!("no database at {}", db.display()));
+    }
+    // 折叠 WAL 进主库，拷贝才是完整态
+    let conn = rusqlite::Connection::open(&db).map_err(|e| format!("open: {e}"))?;
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .map_err(|e| format!("checkpoint: {e}"))?;
+    drop(conn);
+    let mut dir: PathBuf = db.clone();
+    dir.pop();
+    dir.push("archive");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+    let stamp = crate::L0_physical::time::now_ts().replace(['-', ':', ' '], "");
+    let dest = dir.join(format!("ductile_{}.db", stamp));
+    std::fs::copy(&db, &dest).map_err(|e| format!("copy: {e}"))?;
+    // retention: 最旧淘汰
+    let mut snaps: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.file_name()
+                        .map(|n| n.to_string_lossy().starts_with("ductile_"))
+                        .unwrap_or(false)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    snaps.sort();
+    while snaps.len() > ARCHIVE_KEEP {
+        let oldest = snaps.remove(0);
+        let _ = std::fs::remove_file(&oldest);
+    }
+    println!(
+        "archived: {} ({} bytes, keep={})",
+        dest.display(),
+        std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0),
+        ARCHIVE_KEEP
+    );
     Ok(0)
 }
 

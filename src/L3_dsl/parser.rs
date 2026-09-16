@@ -144,6 +144,75 @@ use a dedicated sentinel .proc(\"deliver\").deliver(@{})",
         }
     }
 
+    // v0.19 审计③ trust fail-closed：run()/sh() 命令体里注入 @ref（上游产出
+    // 进 shell）必须在该 proc 的 .trust(@ref) 里点名。静态校验（最早炸、带
+    // 行号）；executor 在 resolve 后另有运行时兜底（覆盖动态拼接形态）。
+    // @ref 识别：@name 或 @name.field，name 为字母/下划线开头 alnum。
+    // 已知误报源排除：@self / @localhost（非 proc 引用形态）。
+    for (i, p) in procs.iter().enumerate() {
+        let line_no = proc_lines.get(i).copied().unwrap_or(0) + 1;
+        let line_text = lines.get(line_no.saturating_sub(1)).copied().unwrap_or("");
+        for imp in &p.plan {
+            let body = &imp.body_text;
+            let is_shell = body.contains("run(") || body.contains("sh(");
+            if !is_shell {
+                continue;
+            }
+            // 扫描 @token（含 .field 尾巴），@word 边界外的命中跳过（如 a@b）
+            let chars: Vec<char> = body.chars().collect();
+            let mut j = 0;
+            while j < chars.len() {
+                if chars[j] == '@'
+                    && (j == 0 || !(chars[j - 1].is_alphanumeric() || chars[j - 1] == '_'))
+                {
+                    let mut k = j + 1;
+                    while k < chars.len() && (chars[k].is_alphanumeric() || chars[k] == '_') {
+                        k += 1;
+                    }
+                    // 可选 .field（可能多级 a.b.c）
+                    let mut k2 = k;
+                    while k2 < chars.len()
+                        && chars[k2] == '.'
+                        && k2 + 1 < chars.len()
+                        && chars[k2 + 1].is_alphanumeric()
+                    {
+                        k2 += 2;
+                        while k2 < chars.len() && (chars[k2].is_alphanumeric() || chars[k2] == '_')
+                        {
+                            k2 += 1;
+                        }
+                    }
+                    let name: String = chars[j + 1..k].iter().collect();
+                    let full: String = chars[j..k2].iter().collect();
+                    j = k2;
+                    if name.is_empty() || name == "self" || name == "localhost" {
+                        continue;
+                    }
+                    if p.trust_refs.contains(&name) {
+                        continue;
+                    }
+                    // 有 .trust 但没点这个名，或完全没有 .trust——仅当名字
+                    // 是真实 proc 时红（未知名可能是 @ref 之外的字符串形态）
+                    if procs.iter().any(|q| q.name == name) {
+                        return Err(ParseError {
+                            line: line_no,
+                            col: 1,
+                            msg: format!(
+                                "shell injection of @{} requires explicit trust: add \
+                                 .trust(@{}) to this proc (§13.5 — upstream output \
+                                 entering run()/sh() must be declared, got: {})",
+                                name, name, full
+                            ),
+                            line_text: line_text.to_string(),
+                        });
+                    }
+                } else {
+                    j += 1;
+                }
+            }
+        }
+    }
+
     Ok(Pipeline {
         name,
         description,
@@ -396,7 +465,8 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
     let mut deliver_refs: Vec<String> = Vec::new();
     let mut foreach_src: Option<String> = None;
     let mut foreach_var = String::new();
-    let mut pick_by = "cost + history".to_string();
+    let mut pick_by = "history".to_string();
+    let mut trust_refs: Vec<String> = Vec::new();
     let mut description = String::new();
     let mut proc_when: Option<String> = None;
     let mut contract: Option<crate::core::ast::Contract> = None;
@@ -461,6 +531,45 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
                 let r = raw_ref[1..].to_string();
                 if !needs.contains(&r) {
                     needs.push(r);
+                }
+            }
+            idx += 1;
+            continue;
+        }
+
+        // .trust(@ref) — v0.19 审计③：显式信任声明。run()/sh() 命令体里注入
+        // @ref（上游产出进 shell）必须在 .trust(...) 里点名，否则 parse 期
+        // 静态红（§13.5 引擎层封死，不靠作者自觉）。可叠多个：.trust(@a, @b)。
+        if trimmed.starts_with(".trust(") || trimmed.starts_with(".trust (") {
+            let after = &trimmed[6..];
+            let close = find_matching_paren(after).ok_or_else(|| ParseError {
+                line: idx + 1,
+                col: 1,
+                msg: "unbalanced parens in .trust(...)".into(),
+                line_text: raw.to_string(),
+            })?;
+            let inner = &after[1..close];
+            if inner.trim().is_empty() {
+                return Err(ParseError {
+                    line: idx + 1,
+                    col: 1,
+                    msg: ".trust() requires at least one @ref".into(),
+                    line_text: raw.to_string(),
+                });
+            }
+            for part in inner.split(',') {
+                let raw_ref = part.trim();
+                if !raw_ref.starts_with('@') || raw_ref.len() < 2 {
+                    return Err(ParseError {
+                        line: idx + 1,
+                        col: 1,
+                        msg: ".trust() ref must be @name (bare words not allowed)".into(),
+                        line_text: raw.to_string(),
+                    });
+                }
+                let r = raw_ref[1..].to_string();
+                if !trust_refs.contains(&r) {
+                    trust_refs.push(r);
                 }
             }
             idx += 1;
@@ -732,6 +841,7 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
             foreach: foreach_src,
             foreach_var,
             pick_by,
+            trust_refs,
         },
         idx,
     ))
@@ -1498,6 +1608,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_trust_gate_static() {
+        // v0.19 审计③ 静态闸三态：
+        // 1) run() 注入真实 proc 名且无 .trust → ParseError
+        let bad = "Pipeline(\"t\")\n.proc(\"gen\")\n  .plan(a -> run(\"echo seed\"))\n.proc(\"rep\")\n  .plan(r -> run(\"echo @gen\"))\n";
+        let err = parse_pipeline(bad).unwrap_err();
+        assert!(
+            err.msg.contains("requires explicit trust"),
+            "untrusted @ref must be ParseError, got: {}",
+            err.msg
+        );
+        // 2) 有 .trust(@gen) → 放行
+        let ok = "Pipeline(\"t\")\n.proc(\"gen\")\n  .plan(a -> run(\"echo seed\"))\n.proc(\"rep\")\n  .plan(r -> run(\"echo @gen\"))\n  .trust(@gen)\n";
+        let pl = parse_pipeline(ok).unwrap();
+        assert_eq!(pl.procs[1].trust_refs, vec!["gen".to_string()]);
+        // 3) 非流水线字的 @token（@localhost 邮箱/ssh 主机、@self）→ 不误伤
+        let benign =
+            "Pipeline(\"t\")\n.proc(\"ssh\")\n  .plan(s -> run(\"ssh beef@localhost echo hi\"))\n";
+        assert!(parse_pipeline(benign).is_ok());
+        // 4) .trust 裸词/空 → ParseError
+        let bare = "Pipeline(\"t\")\n.proc(\"gen\")\n  .plan(a -> run(\"echo seed\"))\n.proc(\"rep\")\n  .plan(r -> run(\"echo @gen\"))\n  .trust(gen)\n";
+        assert!(parse_pipeline(bare)
+            .unwrap_err()
+            .msg
+            .contains("must be @name"));
+    }
+
+    #[test]
     fn parse_deliver_sentinel_form_ok() {
         // 生产规范形态：专门哨兵 proc 引用别人，必须继续合法
         let input =
@@ -1992,7 +2129,9 @@ Pipeline("t")
   .pick
 "#;
         let pl = parse_pipeline(input).unwrap();
-        assert_eq!(pl.procs[0].pick_by, "cost + history");
+        // v0.19 审计⑥：cost 声明通道 v0.11 退役后，默认值从 "cost + history"
+        // 改为 "history"（ranking 的学习偏好通道仍在；名字不再虚报 cost）
+        assert_eq!(pl.procs[0].pick_by, "history");
     }
 
     // ── computed_tags from parsed pipeline ──
@@ -2242,6 +2381,7 @@ mod prim_tests {
             foreach: None,
             foreach_var: String::new(),
             pick_by: String::new(),
+            trust_refs: Vec::new(),
         };
         // L1 通过 + L2 通过
         let ok_val = Value::Text("§§FIELDS§§score=85§§note=x§§RAW§§raw".into());

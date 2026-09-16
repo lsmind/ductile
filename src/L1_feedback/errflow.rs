@@ -1178,7 +1178,7 @@ mod tests {
     fn mini_pipeline() -> crate::core::ast::Pipeline {
         // gen → report → deliver 主链；notify 旁路
         crate::parser::parse_pipeline(
-            "Pipeline(\"x\")\n  .proc(\"gen\")\n    .plan(a -> run(\"echo @seed\"))\n  .proc(\"report\")\n    .plan(r -> run(\"echo @gen\"))\n  .proc(\"notify\")\n    .plan(n -> run(\"echo side\"))\n  .proc(\"deliver\")\n    .deliver(@report)\n",
+            "Pipeline(\"x\")\n  .proc(\"gen\")\n    .plan(a -> run(\"echo @seed\"))\n  .proc(\"report\")\n    .plan(r -> run(\"echo @gen\"))\n    .trust(@gen)\n  .proc(\"notify\")\n    .plan(n -> run(\"echo side\"))\n  .proc(\"deliver\")\n    .deliver(@report)\n",
         )
         .unwrap()
     }

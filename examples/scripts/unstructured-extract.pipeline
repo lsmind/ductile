@@ -23,6 +23,7 @@ Pipeline("unstructured_extract", "非结构化 blurb → title/url/topic 结构�
         .when(@extract.title)
         .when(@extract.url)
     )
+    .trust(@extract)
   .proc("report", write(to="/tmp/unstructured_extract.txt", content="title=@extract.title url=@extract.url topic=@extract.topic gate=@gate.ok"))
     .desc("落盘")
     .when(@gate.ok == 1)

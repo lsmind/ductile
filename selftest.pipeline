@@ -25,5 +25,6 @@ Pipeline("selftest", "ductile 用 ductile 自测：unit → 正向/负向探针 
     .desc("七层认知栈边界探针：src/ 生产代码 use crate:: 只许向下依赖，违规即红（v0.18.5 分层重组门禁）")
   .proc("report", run("mkdir -p target/devcycle && { echo '@unit'; echo '@pos'; echo '@neg'; echo '@scripts'; echo '@hyper'; echo '@cognition'; echo '@l4probe'; echo '@patchorigin'; echo '@layers'; } > target/devcycle/selftest-summary.txt && grep -q '; 0 failed' target/devcycle/selftest-summary.txt && grep -q '^1$' target/devcycle/selftest-summary.txt && grep -q 'ghost-ok' target/devcycle/selftest-summary.txt && grep -q 'disabled-ok' target/devcycle/selftest-summary.txt && grep -q 'scripts-ok' target/devcycle/selftest-summary.txt && grep -q 'hyper-ok' target/devcycle/selftest-summary.txt && grep -q 'cognition-ok' target/devcycle/selftest-summary.txt && grep -q 'l4-ok' target/devcycle/selftest-summary.txt && grep -q 'patchorigin-ok' target/devcycle/selftest-summary.txt && grep -q 'layers-ok' target/devcycle/selftest-summary.txt && echo SELFTEST-PASS || (echo SELFTEST-FAIL; exit 1)")).tags(#gate))
     .desc("九重 grep 门禁 — 落盘文件版：@ref 含单引号不再炸 bash")
+    .trust(@cognition, @hyper, @l4probe, @layers, @neg, @patchorigin, @pos, @scripts, @unit)
   .proc("deliver", run("echo done"))
     .deliver(@report)

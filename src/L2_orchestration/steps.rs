@@ -200,6 +200,8 @@ struct NodeCtxInner {
     /// 字段名）。合成时从 results 提取实时值——预提取只存"从哪个节点取哪些
     /// 字段"，值在 synthesize 时拿（results 那时才齐）。
     constraint_sources: Vec<(String, Vec<String>)>, // (producer_name, fields)
+    /// v0.19 审计③：本 proc 的 .trust(@ref) 清单——run()/sh() 运行时兜底用。
+    trust_refs: Vec<String>,
 }
 
 pub struct NodeCtx;
@@ -300,6 +302,8 @@ impl NodeCtx {
                 upstream_contracts,
                 downstream,
                 constraint_sources,
+                // v0.19 审计③：run()/sh() 的 @ref 注入信任清单中继到执行层
+                trust_refs: proc.trust_refs.clone(),
             })
         });
         NodeCtxGuard
@@ -2045,6 +2049,47 @@ fn exec_read(
     Ok(Value::Text(content))
 }
 
+/// v0.19 审计③：扫描 resolve 后的命令文本，返回第一个「真实 proc 名但未
+/// 声明 .trust」的 @name。规则：
+/// - 只对 results 里存在的名字报警（那是真实上游产出，未 resolve 说明值
+///   尚未就绪或引用形态动态拼接——注入意图成立）
+/// - .trust 里点过名的放行（NODE_CTX 中继；无 ctx = 不在管线执行内，
+///   如单步 script call——此时 results 命中即放行，名字面量直接过）
+/// - @self / @localhost / 邮箱形态跳过
+fn first_untrusted_ref_in_cmd(cmd: &str, results: &BTreeMap<String, Value>) -> Option<String> {
+    let trusted: Vec<String> = NODE_CTX.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|i| i.trust_refs.clone())
+            .unwrap_or_default()
+    });
+    let has_ctx = NODE_CTX.with(|c| c.borrow().is_some());
+    let chars: Vec<char> = cmd.chars().collect();
+    let mut j = 0;
+    while j < chars.len() {
+        if chars[j] == '@' && (j == 0 || !(chars[j - 1].is_alphanumeric() || chars[j - 1] == '_')) {
+            let mut k = j + 1;
+            while k < chars.len() && (chars[k].is_alphanumeric() || chars[k] == '_') {
+                k += 1;
+            }
+            let name: String = chars[j + 1..k].iter().collect();
+            j = k;
+            if name.is_empty() || name == "self" || name == "localhost" {
+                continue;
+            }
+            if !results.contains_key(&name) {
+                continue; // 不是本管线的真实上游（字面量/别的东西）
+            }
+            if has_ctx && !trusted.contains(&name) {
+                return Some(name);
+            }
+        } else {
+            j += 1;
+        }
+    }
+    None
+}
+
 fn exec_run(
     _impl_: &Impl,
     topic: &str,
@@ -2054,6 +2099,17 @@ fn exec_run(
     deny_if_shell_restricted("run")?;
     let cmd_raw = extract_first_string(body);
     let cmd = resolve_vars(&cmd_raw, topic, results);
+    // v0.19 审计③ 运行时兜底：resolve 后残留的 @name = 未命中 results 的
+    // proc 引用（resolve_vars 对未知名原样保留）——它此刻正要进 bash -c。
+    // parser 静态闸管住了字面形态；这里管运行期形态（热补丁/动态拼接）。
+    // 未声明 .trust 的真实 proc 名 → fail-closed。
+    if let Some(bad) = first_untrusted_ref_in_cmd(&cmd, results) {
+        return Err(format!(
+            "shell injection of @{} is not trusted: add .trust(@{}) to this proc \
+             (§13.5 — upstream output entering run()/sh() must be declared)",
+            bad, bad
+        ));
+    }
     // v0.7 resource management: optional timeout=seconds arg (default 300s, 0 = no limit)
     let timeout_secs: u64 = extract_string_arg("timeout", body).parse().unwrap_or(300);
     // v0.7 resource management: env vars via env="K=V" args (repeatable)
@@ -2837,6 +2893,54 @@ mod tests {
     }
 
     #[test]
+    fn trust_runtime_gate_three_states() {
+        // v0.19 审计③ 运行时兜底三态（静态闸的对应单测在 parser tests）。
+        // 注意：单测无 NODE_CTX（不在 exec_proc 内）→ has_ctx=false 兜底放行，
+        // 这里测的是扫描器本体：results 命中的真名才报警、字面量/邮箱放过。
+        use crate::core::ast::Value;
+        let mut results = BTreeMap::new();
+        results.insert("gen".to_string(), Value::Text("out".into()));
+        // 无 ctx（单测环境）：results 命中也不拦（script call 单步语义）
+        assert_eq!(first_untrusted_ref_in_cmd("echo @gen", &results), None);
+        // 字面量 @字面/邮箱/localhost：永不拦
+        assert_eq!(
+            first_untrusted_ref_in_cmd("ssh beef@localhost echo @not_a_proc", &results),
+            None
+        );
+    }
+
+    #[test]
+    fn trust_runtime_gate_blocks_untrusted_in_ctx() {
+        // 有 ctx 时：未声明 .trust 的真实上游名 → 报警（fail-closed）。
+        // 直接构造 NodeCtx：parse 一条带 .trust 的管线，set 后再扫。
+        let pl = crate::parser::parse_pipeline(
+            "Pipeline(\"t\")\n  .proc(\"gen\")\n    .plan(a -> run(\"echo hi\"))\n  .proc(\"rep\")\n    .plan(r -> run(\"echo @gen\"))\n    .trust(@gen)\n",
+        )
+        .unwrap();
+        let rep = pl.procs.iter().find(|p| p.name == "rep").unwrap();
+        let _g = NodeCtx::set(&pl, rep);
+        let mut results = BTreeMap::new();
+        results.insert(
+            "gen".to_string(),
+            crate::core::ast::Value::Text(String::new()),
+        );
+        // .trust(@gen) 已声明 → 放行
+        assert_eq!(
+            first_untrusted_ref_in_cmd("echo @gen | wc -l", &results),
+            None
+        );
+        // 换一个未声明 trust 的名字（results 命中的其他上游）→ 拦
+        results.insert(
+            "other".to_string(),
+            crate::core::ast::Value::Text(String::new()),
+        );
+        assert_eq!(
+            first_untrusted_ref_in_cmd("echo @other", &results),
+            Some("other".to_string())
+        );
+    }
+
+    #[test]
     fn unsafe_shell_overrides_restrict() {
         assert!(shell_allowed_with(Some("1".into()), Some("1".into())));
     }
@@ -2923,6 +3027,7 @@ mod tests {
             deliver_refs: Vec::new(),
             foreach_var: String::new(),
             pick_by: String::new(),
+            trust_refs: Vec::new(),
         }
     }
 

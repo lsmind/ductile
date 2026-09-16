@@ -20,6 +20,7 @@ Pipeline("demo", "最小演示：run() + check + 多路径降级")
         .tags(#transform, #shell)
         .desc("大写转换")
     )
+    .trust(@fetch)
 
   .proc("output")
     .desc("写结果")

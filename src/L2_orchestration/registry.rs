@@ -162,6 +162,7 @@ mod tests {
             foreach: None,
             foreach_var: String::new(),
             pick_by: "cost".into(),
+            trust_refs: Vec::new(),
         }
     }
 

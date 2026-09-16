@@ -8,5 +8,6 @@ Pipeline("hyper_reuse_drill", "hyper 层场景：整图同构 + 节点复用可�
     .desc("跑 hyper_reuse_drill.sh — 九项场景 → HYPER-REUSE-PASS")
   .proc("gate", run("echo '@drill' | grep -q HYPER-REUSE-PASS && echo DRILL-OK || (echo DRILL-FAIL; echo '@drill'; exit 1)").tags(#gate))
     .desc("门禁")
+    .trust(@drill)
   .proc("deliver")
     .deliver(@gate)

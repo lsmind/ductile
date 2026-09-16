@@ -923,7 +923,8 @@ mod tests {
             deliver_refs: vec![],
             foreach: None,
             foreach_var: String::new(),
-            pick_by: "cost + history".into(),
+            pick_by: "history".into(),
+            trust_refs: Vec::new(),
         }
     }
 

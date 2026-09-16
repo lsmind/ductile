@@ -12,7 +12,9 @@ Pipeline("regchain3", "三臂对比：管线27B vs 管线8B vs 裸27B", cwd="/tm
   .proc("chain8", run("{ echo '@chain'; } > c8dep.txt && grep -q chain-ok c8dep.txt && sed 's/tiers = \"[a-z,]*\"/tiers = \"light\"/g' /tmp/regchain_data/regconf.toml > /tmp/regchain_data/regconf8.toml && grep -c 'tiers = \"light\"' /tmp/regchain_data/regconf8.toml && DUCTILE_CONFIG=/tmp/regchain_data/regconf8.toml ductile run /home/beef/projects/ductile/pipelines/regchain.pipeline \"$(cat /tmp/regchain_data/story_game.txt)\" > game_chain8.log 2>&1 && grep -q 'executed successfully' game_chain8.log && cp reg_req.txt g8_req.txt && cp reg_arch.txt g8_arch.txt && cp reg_brk.txt g8_brk.txt && cp reg_audit.txt g8_audit.txt && echo chain8-ok"))
 
   // ===== 臂C：裸 27B（无管线：单发直出五段，同 schema 无上下文承接）=====
+  .trust(@chain)
   .proc("bare", run("{ echo '@chain8'; } > cbdep.txt && grep -q chain8-ok cbdep.txt && DUCTILE_CONFIG=/tmp/regchain_data/regconf.toml ductile run /home/beef/projects/ductile/pipelines/regbare.pipeline \"$(cat /tmp/regchain_data/story_game.txt)\" > game_bare.log 2>&1 && grep -q 'executed successfully' game_bare.log && echo bare-ok"))
+    .trust(@chain8)
 
   .proc("deliver")
     .deliver(@bare)
