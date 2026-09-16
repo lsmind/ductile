@@ -256,6 +256,7 @@ ductile run examples/scripts/unstructured-extract.pipeline   # 同场景 ductile
 | 脚本接入 | tool 封装代码 | tool 封装代码 | tool 封装代码 | task 封装代码 | **契约头注释即接口，零封装** |
 | 执行历史 | 框架各表 | 框架各表 | 框架各表 | 元数据库 | **SQLite 单库，历史直接驱动路径选择** |
 | 问题追踪 | 无内建 | 无内建 | 无内建 | 日志层 | **incident/canary/l4 认知层内建** |
+| 本地可视化 | LangSmith 云服务 | AutoGen Studio | 无 | UI 付费版 | **`ductile tui` 终端四视图（纯读侧，零依赖）** |
 
 **公平性说明**（怕误导，写清楚）：
 
