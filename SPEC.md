@@ -453,6 +453,10 @@ ductile canary pass <pipeline> <proc>
 
 - **已知好输入库**：五分类归因闸的判别面。class2（上游投毒）vs class3/4（本地问题）
   的唯一判别手段 = 用归档的 canary 输入重跑本节点。
+- **矛盾态禁播（v0.19 X3 接线）**：proc 有 open incident 期间禁止归档 canary——
+  矛盾期一次侥幸成功不代表"已知好输入"，播下去会洗白坏节点（canary 绿 → 归因
+  误判 class2 → 矛盾被掩盖）。自动播种（首胜归档）静默跳过；`canary add` 显式
+  报错并指引 `ductile incident close <id>`。incident 关闭后自动恢复。
 - `expect` 谓词用 `.when()` 语法（`@self.field` 引用结果字段），缺省 `@self.ok == 1`。
 - `canary pass` 记录硬门禁通过面——**无 canary 通过记录禁止本地 patch**。
 - canary 绿（canary 过 + 真实输入挂）→ 上游投毒，本节点清白；canary 红 → 本地问题。

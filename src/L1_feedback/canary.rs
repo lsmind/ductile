@@ -15,7 +15,6 @@
 use crate::db::CanaryRow;
 use rusqlite::Connection;
 
-/// 新建 canary 记录（add 子命令的纯逻辑）。
 /// expect 为空时默认 `@self.ok == 1`（llm 桥标准字段）。
 pub fn normalize_expect(expect: &str) -> String {
     let e = expect.trim();
@@ -35,7 +34,9 @@ pub fn eval_expect(expect: &str, result_text: &str) -> bool {
     crate::when::eval_cond_str(expect, &std::collections::BTreeMap::new(), &results)
 }
 
-/// db CRUD 薄封装（conn 注入）。
+/// 新建 canary 记录（add 子命令的纯逻辑）。
+/// v0.19 X3：矛盾态（open incident）禁播与 seed_canary_conn 同语义——
+/// 手动路径显式报错（有意的 CLI 操作要看得见拒绝原因），不是静默跳过。
 pub fn add_canary_conn(
     conn: &Connection,
     pipeline: &str,
@@ -44,6 +45,21 @@ pub fn add_canary_conn(
     expect: &str,
     note: &str,
 ) -> Result<i64, String> {
+    let in_conflict: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM incidents WHERE status='open' AND proc_name=?1",
+            rusqlite::params![proc_name],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if in_conflict > 0 {
+        return Err(format!(
+            "canary add refused: proc '{}' has an open incident (conflict state) — \
+             no 'known-good input' while a contradiction is unresolved; \
+             close the incident first (ductile incident close <id>)",
+            proc_name
+        ));
+    }
     let expect = normalize_expect(expect);
     let now = now_str();
     conn.execute(
@@ -58,6 +74,11 @@ pub fn add_canary_conn(
 /// 把“设计期自觉”改成“运行期制度”——canary=0 是归因闸硬门禁永远关死的根因。
 /// 旁路写入（open_try 失败静默）：播种不能搞死主管线。
 /// cap: 每 (pipeline, proc_name) 最多 CANARY_AUTO_CAP 条，防膨胀。
+///
+/// v0.19 X3 接线：矛盾态禁播——open incident（与 mcsm_effective 派生同源：
+/// incidents.proc_name 匹配即矛盾）期间不归档「已知好输入」。矛盾期一次
+/// 侥幸成功会洗白坏节点（canary 绿 → 归因误判 class2 → 矛盾被掩盖）。
+/// Mappings 表「2=矛盾：隔离防传染」的 canary 侧物理化。incident 关闭自动恢复。
 pub const CANARY_AUTO_CAP: i64 = 3;
 
 pub fn seed_canary_conn(
@@ -68,6 +89,23 @@ pub fn seed_canary_conn(
     expect: &str,
     note: &str,
 ) -> Option<i64> {
+    // X3 矛盾态闸：open incident 期间禁播（含 explore:* 维度外的全部 incident 形态，
+    // 与 mcsm_effective 的 proc_name 匹配口径一致）
+    let in_conflict: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM incidents WHERE status='open' AND proc_name=?1",
+            rusqlite::params![proc_name],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if in_conflict > 0 {
+        eprintln!(
+            "    -> canary seed skipped: {} in conflict (open incident) — \
+             no 'known-good input' while a contradiction is unresolved",
+            proc_name
+        );
+        return None;
+    }
     let cap = CANARY_AUTO_CAP;
     let count: i64 = conn
         .query_row(
@@ -253,5 +291,54 @@ mod tests {
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].expect, "@self.ok == 1");
         assert_eq!(rows[0].note, "auto-seed");
+    }
+
+    #[test]
+    fn canary_seed_blocked_on_open_incident() {
+        // v0.19 X3 接线：矛盾态禁播 canary——open incident 期间一次侥幸成功
+        // 不代表「已知好输入」，播下去会洗白坏节点（canary 绿 → 归因误判
+        // class2 上游投毒 → 本节点清白 → 矛盾被掩盖）。
+        // Mappings 表「2=矛盾：隔离防传染下游」的 canary 侧物理化。
+        let conn = mem_conn();
+        // 前置：制造 open incident（与 mcsm_effective 派生同源同字段）
+        conn.execute(
+            "INSERT INTO incidents (pipeline, proc_name, signals, err_code, evidence, status, created_at)
+             VALUES ('p','arch','explore','explore_finding','triple','open','0')",
+            [],
+        )
+        .unwrap();
+        // 矛盾态播种被拒
+        assert!(seed_canary_conn(&conn, "p", "arch", "prompt-A", "", "").is_none());
+        // 非矛盾 proc 不受影响
+        assert!(seed_canary_conn(&conn, "p", "brk", "prompt-A", "", "").is_some());
+        // incident 关闭（矛盾解除）→ 播种恢复
+        conn.execute(
+            "UPDATE incidents SET status='closed' WHERE pipeline='p' AND proc_name='arch'",
+            [],
+        )
+        .unwrap();
+        assert!(seed_canary_conn(&conn, "p", "arch", "prompt-A", "", "").is_some());
+    }
+
+    #[test]
+    fn canary_manual_add_refused_on_open_incident() {
+        // X3 手动路径：canary add 在矛盾态显式报错（CLI 有意操作要看得见拒绝原因）
+        let conn = mem_conn();
+        conn.execute(
+            "INSERT INTO incidents (pipeline, proc_name, signals, err_code, evidence, status, created_at)
+             VALUES ('p','judge','explore','explore_finding','triple','open','0')",
+            [],
+        )
+        .unwrap();
+        let err = add_canary_conn(&conn, "p", "judge", "input", "", "").unwrap_err();
+        assert!(err.contains("open incident"), "{}", err);
+        assert!(err.contains("incident close"), "指引关单命令: {}", err);
+        // 矛盾解除后手动添加恢复
+        conn.execute(
+            "UPDATE incidents SET status='closed' WHERE pipeline='p' AND proc_name='judge'",
+            [],
+        )
+        .unwrap();
+        assert!(add_canary_conn(&conn, "p", "judge", "input", "", "").is_ok());
     }
 }
