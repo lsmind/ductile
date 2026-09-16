@@ -1,268 +1,187 @@
-# Ductile DSL — API 规格文档（供 AI 调用者阅读）
+# Ductile DSL — 规格文档（v0.19）
 
-> 本文档面向 AI agent / LLM 调用者。读完本文档后，你应能独立完成 Ductile 的安装、pipeline 编写、执行、调试和调优。
+> 面向 AI agent / LLM 调用者与人类维护者。读完应能独立完成安装、管线编写、执行、调试、调优。
+> 本文只描述**当前状态**；历史沿革与版本地质见 git log 与 `docs/`，不在此堆叠。
 
 ---
 
-## 0. 快速开始
+## 0. 安装与快速开始
 
 ```bash
-pip install ductile
-```
-
-验证安装：
-
-```bash
+pip install ductile          # PyPI wheel（cp311 manylinux，maturin 构建）
 ductile --help
 ```
 
-如果 `ductile` 不可用，从源码编译：
+源码编译（开发态）：
 
 ```bash
 git clone https://github.com/lsmind/ductile.git
-cd ductile && cargo build --release
-# 二进制：target/release/ductile，加入 PATH 或用全路径调用
+cd ductile && cargo build --release   # 二进制 target/release/ductile
 ```
+
+最小管线：
+
+```
+Pipeline("hello", "我的第一条管线")
+  .proc("greet", run("echo hello ductile"))
+  .proc("save", write(to="/tmp/hello.txt", content=@greet))
+  .proc("deliver")
+    .deliver(@save)
+```
+
+```bash
+ductile check hello.pipeline   # 先检查（好习惯：错误在执行前被拦下）
+ductile run hello.pipeline     # 再执行
+```
+
+新手向导见 [README.md](README.md)（5 分钟上手 + 八级功能阶梯）。
 
 ---
 
-## 1. 编写 .pipeline 文件
+## 1. 管线文件（.pipeline）
 
 ### 1.1 文件格式
 
-纯文本，扩展名 `.pipeline`。`//` 开头为注释，空行忽略。
+纯文本，扩展名 `.pipeline`；`//` 注释；`#!` 首行可作 shebang 直跑（`#!/…/ductile run` + `chmod +x`）。
 
-### 1.2 语法规则
+### 1.2 完整语法
 
 ```
-Pipeline("name", "optional description", cwd="...", env=["K=V", ...])
+Pipeline("name", "desc", cwd="...", env=["K=V", ...])
   .proc("proc_name")
-    .desc("optional description")
+    .desc("说明")
     .plan(
-      impl_name -> body_function(args)
+      impl_a -> verb(args)
         .tags(#tag1, #tag2)
-        .desc("optional")
+        .desc("impl 说明")
         .retry(n=3)
-        .when(mode == "deep")          // 内联 when（impl 级）
+        .when(mode == "deep")     // 内联 when（impl 级）
         .disabled
         .stub,
-      fallback_name -> body_function(args)
-        .tags(#tag3, #tag4)
+      impl_b -> verb(args)
     )
-    .when(@upstream_judge.score < 80)  // 块级 when（下推到全部 impls，内联优先）
-    .foreach(source=@upstream_proc, var=item_name)
-    .deliver(@upstream_proc)
+    .when(@upstream.field OP value)  // 块级 when（下推到全部无内联 when 的 impl）
+    .needs(@upstream)             // 上下文数据流（喂 LLM 合成 prompt）
+    .trust(@upstream)             // shell 注入信任声明（run/sh 体内 @ref 必须）
+    .constraint(field)            // 链级约束继承（裸字段名）
+    .contract(outputs="a,b", invariants="@self.score >= 80")
+    .foreach(source=@upstream, var=item)
+    .pick(by=history)             // 排序通道声明
+  .proc("deliver")                // 哨兵 proc 不执行，只标记终端产出
+    .deliver(@save)
 ```
 
-> **v0.16 简炼三刀**（ship.pipeline 已糖化改写，狗粮验证 48b33b0）：
->
-> 1. **单 impl 内联糖**：`.proc("name", verb(args))` ≡ `.plan(verb -> verb(args))`。
->    单 impl proc 不再写 `.plan(x -> ...)` 仪式；impl 名自动取动词名；尾部修饰符
->    （`.retry/.when/.tags`）照常可用。**箭头保留给多路选择**——`name -> body`
->    形态只在 `.plan(a -> ..., b -> ...)` 里出现。未知动词不脱糖（fail-closed）。
-> 2. **tags 动词推导**：impl 未手写 `.tags` 时自动取动词名（#run/#write/#script…）。
->    语义域标记（#git/#gate）仍手写叠加。
-> 3. **管线级 cwd/env**：`Pipeline(..., cwd="${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)}")`
->    ——run/spawn 子进程 `current_dir`；write/read/cp 等 fs 动词的相对路径同样
->    锚到 cwd（expand_fs_path 统一处理）。cwd 值内可写 `$VAR`/`$(...)`/`~`（bash
->    规范化，坏路径整流 fail-closed 退出）。env 注入全部子进程，身份变量
->    PATH/HOME/USER 永不覆盖。无 cwd/env 声明 = v0.15 行为不变。
-> 4. **llm agent 引用（裸首参）**：`llm(planner, prompt="{topic}")` ——首参裸标识符
->    引用 config.toml 的 `[agents.<name>]` 段（model/system/schema/timeout_secs，
->    system 内 `\n` 展开为真换行）。合并序：显式实参 > agent 配置 > `[llm]` 全局
->    > 内置默认。agent 不存在 → 硬错误并列出可用 agents（fail-closed）。
->    base_url/api_key 永远来自 `[llm]`（连接层不属于 agent 语义）。
->    示例：`pipelines/agent_probe.pipeline`。
-> 5. **智力阶梯（v0.16.1）**：`[models.<tier>]` 定义命名档位（model 必填 +
->    base_url/api_key/timeout_secs 可选回落 [llm]）；`[agents.x]` 声明
->    `tiers = "light,medium,high"`（升序）。档位选择三信号：`tier=` 实参（最高）
->    > 复杂度打分（schema 字段数 ≥3/≥6、prompt >1200/>4000、system >400，
->    确定性）> 单档阶梯钉死。**失败升级**：档 i 桥失败自动升 i+1 直到阶梯顶
->    （有界 Reroute）；阶梯耗尽 → 汇总错误。`model=` 实参完全旁路阶梯（探测
->    场景）。阶梯引用未定义档位 / `tier=` 不在阶梯内 → 硬错误（fail-closed）。
->    结果自动附 `meta_tier`/`meta_model_id` 字段。档位是语义能力级，非裸模型名。
-> **v0.18 三刀半（约束继承 + owner 槽位 + 提示词进化环）**：
->
-> 7. **`.constraint(fields)` 链级约束继承（v0.18.1）**：proc 修饰符
->    `.constraint(resolved_constraints)` 声明某个上游结构化字段为**链级约束**。
->    引擎提取该字段的实时值（2000 字符窗口），自动注入**所有下游节点**合成
->    prompt 的"继承的约束（贯穿全链，任何设计/拆解/任务分配不得违背）"段。
->    与 `.contract(invariants=)` 的分工：contract 是**静态手写不变式**（人写死），
->    constraint 是**运行时字段提取**（上游 LLM 产出什么就继承什么）。
->    动机：约束在链上逐跳衰减（中游节点消化进散文，下游靠运气接住）。
->    实证：s2 段盲评 -16.3 → 收窄；合成 prompt 全文落盘（见 §3.8）。
->    语法：`.constraint(constraints)` 裸字段名（@ref/空/带括号硬错误）。
->
-> 8. **auto-prompt 认知上下文合成（v0.17）**：`llm(agent)` 不写 `prompt=` 时，
->    引擎按节点在图中的位置/属性/功能自动合成 prompt（认知上下文管理，
->    cognition spec §4 pull 模型）。八段结构：**身份**（管线+节点+desc）→
->    **主题**（topic 原文）→ **上游输入**（refs/.when 引用的上游 §§FIELDS§§
->    字段预览，值截断 200 字符，RAW 不进，最多 8 个）→ **继承约束**（本节点
->    `.when` 门禁 + 上游契约 outputs/invariants）→ **下游消费者**（引用本节点
->    的后续节点——产出粒度为它们负责）→ **开放动作**（`[agents.x]` 新增
->    `guide` 字段：检索方式/命令/示例）→ **错误记忆**（同节点 open incidents
->    指针卡：id+信号+证据摘要，最近 3 条；pull 模型，全文 `ductile incident`
->    展开）→ **输出契约**（schema 字段+示例 JSON）。历史统计（近 20 次 runs
->    成功率/时延带）≥3 条时注入（L3 冷启动只记不判）。无 agent 或无身份
->    信息（desc/system 全空）→ 硬错误（fail-closed，合成器是糖不是承重墙）。
->    `[models.x]` 新增 `max_tokens`（思考型模型预算，显式值覆盖
->    OPENAI_MAX_TOKENS）。示例：`/tmp` 探针 `autoprompt_probe.pipeline`。
->    e2e 实测：中文场景产出直接引用用户原话痛点，隐含约束全捕获——
->    盲评中"英文 system 干中文活"的 10+ 分坑被自动填平。
->
-> **v0.11 退役语法**（仍可解析但警告+忽略，不入 AST）：`.cost(latency=..., ...)`、
-> `.ensure(result => ..., "...")`、`.check(result => ..., "...")`。
-> cost/权重 → `.eval` 策略文件 + `--policy` 挂载（§2/§3）；质量门槛 → 独立 judge proc +
-> 块级 `.when` 路由。**不要在新管线中使用。**
+**单 impl 内联糖**：`.proc("name", verb(args))` ≡ `.plan(verb -> verb(args))`，impl 名自动取动词名，尾部修饰符照常。箭头 `name -> body` 只在多路选择 `.plan(a -> …, b -> …)` 里出现。未手写 `.tags` 时自动取动词名（#run/#write/#script…），语义域标记（#git/#gate）手写叠加。未知动词不脱糖，fail-closed。
 
-### 1.3 语法约定
+**管线级 cwd/env**：`cwd=` 锚定 run/spawn 子进程与 fs 动词的相对路径（值内可写 `$VAR`/`$(...)`/`~`，bash 规范化）；`env=["K=V"]` 注入全部子进程，PATH/HOME/USER 永不覆盖。未声明 = 旧行为。
 
-- Pipeline 必须以 `Pipeline("name")` 或 `Pipeline("name", "desc")` 开头
-- 每层缩进 2 空格（仅人类可读性，解析器不依赖缩进）
-- `.plan(...)` 内多条路径用逗号分隔
-- 路径格式：`name -> body`（`->` 前是 impl 名，后面是函数调用文本）
-- `.tags()` 只在 impl（叶子）上声明
-- `.deliver()` 的 proc 不执行，仅标记终端输出
-- **deliver fail-closed（v0.18.15）**：三种病态形态 parse 期直接拒绝（带行号）：
-  - 自指：`.deliver(@x)` 归到 proc x 自己（顶层独行写法的典型误用）——x 永远被跳过，主产出不可能产出
-  - 幽灵引用：`@x` 指向不存在的 proc
-  - 空引用：deliver proc 无任何引用（哨兵形同虚设）
-  正确形态：专门的哨兵 proc 引用**别人**——`.proc("deliver")` 换行缩进 `.deliver(@target)`。
-  运行时另有兜底：deliver 引用的目标缺席 results（被跳过/链式哨兵/热补丁变异）= 管线判红，
-  禁止静默 success（parser 静态校验是第一道闸，executor 双路径兜底任何运行期形态）
-- 标签用 `#` 前缀，标签集是 BTreeSet（有序、去重）
-- 依赖关系自动推导：body 中 `@proc_name` 引用即声明依赖
-- **`.when(cond)` 两种写法（v0.11.1）**：
-  - 内联（impl 级）：`name -> body.when(cond)` 只作用于该 impl
-  - 块级（proc 级）：`.when(cond)` 独立成行，下推到该 proc 全部未持有内联 when 的 impls；条件里的 `@ref` 并入 refs，egraph 据此建裁判→消费者边（保证裁判先执行）
-  - 块级语法错误（空条件/括号不平衡）= 解析期硬错误，不再静默丢弃
-- **`.needs(@ref, ...)` 修饰符（v0.17.3）**：声明上下文数据流——把指定上游产出并入本 proc（llm agent）的合成 prompt 上下文，不改变门禁/路由行为。
-  - 与 `.when` 的分工：`.when` = 控制流（门禁/路由，条件不满足不放行）；`.needs` = 数据流（"我的上下文需要它"，只喂料不判闸）
-  - 语法：`.needs(@a, @b)`，参数必须是 `@name` 格式（裸词硬错误）；可与其他修饰符组合（如先 `.when(@brk.tickets)` 再 `.needs(@req)`）
-  - 语义联动：① egraph 建排序边（needs 声明的上游先执行）；② 合成器把 needs 并入 upstream 引用集合（进入 LLM 上下文）
-  - 典型场景：审计/裁判节点 `.when(@上游产出存在)` 只声明门禁，但审计清单脚手架来自更早的节点——用 `.needs` 把清单喂进上下文。实证：regchain audit 节点挂 `.needs(@req)` 后盲评 s3 段 -7.3 → +8.0
-  - 判别法：如果缺了这个上游的**内容**产出质量会掉，用 `.needs`；如果缺了这个上游的**状态**流程走不通，用 `.when`
-- **`.trust(@ref, ...)` 修饰符（v0.19 审计③）**：显式信任声明——`run()`/`sh()`
-  命令体里注入 `@ref`（上游产出进 shell）必须在该 proc 点名，否则 parse 期
-  ParseError（带行号）；executor 在 resolve 后另有运行时兜底（覆盖动态拼接
-  形态）。§13.5 的"LLM 输出不进 bash"从纪律升级为引擎层物理闸。
-  - 与 `.needs` 的分工：`.needs` = 喂给 LLM 上下文（数据流白名单）；`.trust` =
-    允许进 shell 命令体（注入信任）
-  - 已知豁免形态：`@self`、`@localhost`（主机名/邮箱，非 proc 引用）
-- **`.constraint(fields)` 修饰符（v0.18.1）**：把上游某个结构化字段声明为链级约束，引擎注入所有下游节点的合成 prompt（"继承的约束"段）。
-  - 语法：`.constraint(resolved_constraints)` —— 参数是**裸字段名**（不带 `@`）；声明处所在的 proc 即约束生产者，字段值从该 proc 的 §§FIELDS§§ 提取
-  - 挂在"产出干净约束清单"的节点上（如问询链的 resolver：schema 含 `resolved_constraints` 字段）
-  - 硬错误形态：`.constraint(@x)`（带 @）、`.constraint()`（空）、`.constraint(a+b)`（带括号）
-  - 动机：用户隐含约束（"没有程序员"）在中游节点被消化成散文后，下游能否接住靠运气——constraint 让它结构化在场、不逐跳衰减。实证：game 场景 s2 盲评 -16.3 收窄，配 owner 槽位后 +14.7 反超裸模型
+### 1.3 修饰符语义总表
 
-### 1.4 变量替换规则
+| 修饰符 | 级别 | 语义 | 硬错误形态 |
+|---|---|---|---|
+| `.desc(s)` | 任意 | 说明文字 | — |
+| `.tags(#a)` | impl | 检索/同构线索 | — |
+| `.retry(n=)` | impl | 失败重试 n+1 次，退避 2s→4s→8s | — |
+| `.when(cond)` | impl / proc | 门禁/路由，引擎内求值 fail-closed | 空条件/括号不平衡/裸 `@proc`（须 `.field`） |
+| `.disabled` / `.stub` | impl | 禁用 / 桩 | — |
+| `.needs(@a, @b)` | proc | 数据流：上游产出并入 LLM 合成 prompt 上下文；建排序边 | 裸词（须 `@name`） |
+| `.trust(@a)` | proc | 注入信任：run()/sh() 体内引用 `@ref` 必须点名 | 裸词/空 |
+| `.constraint(f)` | proc | 链级约束：本 proc 的字段值注入全部下游合成 prompt | `@x`（带 @）/空/带括号 |
+| `.contract(outputs=, invariants=)` | proc | 节点契约卡：执行后确定性校验（L1 字段存在 + L2 谓词） | — |
+| `.foreach(source=@x, var=item)` | proc | 逐条展开（source 进排序边） | source 不存在 |
+| `.pick(by=…)` | proc | 排序通道，默认 `history` | — |
+| `.deliver(@x)` | proc | 终端产出标记 | 自指/幽灵引用/空（parse 期拒） |
 
-| 语法 | 替换为 | 时机 |
-|------|--------|------|
-| `{topic}` | run 命令的 topic 参数 | 执行前 |
-| `{hash(topic)}` | topic 的 djb2 hash | 执行前 |
-| `{var_name}` | foreach 的当前 item | 每次 foreach 迭代 |
-| `@proc_name` | 上游 proc 的完整输出文本 | 依赖完成后 |
-| `@proc_name.field` | 上游 proc 的 DSL_RESULT 字段值 | 依赖完成后 |
+### 1.4 变量替换（resolve_vars，执行前统一解析）
 
-未匹配的 `@name` 原样保留。未匹配的 `{name}` 原样保留。
+| 语法 | 替换为 | 未命中时 |
+|---|---|---|
+| `{topic}` | run 的 topic 参数 | 原样保留 |
+| `{hash(topic)}` | topic 的 djb2 短哈希 | 原样保留 |
+| `{var}` | foreach 当前 item（或 results 内任意 proc 值） | 原样保留（JSON 字面花括号安全） |
+| `{var.field}` | 同上，字段通道 | 原样保留 |
+| `@proc` | 上游 proc 完整输出文本 | 原样保留 |
+| `@proc.field` | 上游 DSL_RESULT 字段值 | `<no field:proc.field>` |
 
-### 1.5 内置谓词（check / ensure）
+### 1.5 内置动词全表（step_registry，21 个）
 
-| 谓词 | 判断逻辑 |
-|------|---------|
-| `not_empty` | `text.len() > 0` |
-| `has_results` / `has_content` / `has_summary` / `valid_output` | `text.len() > 20` |
-| `has_items` | 非空行数 ≥ 2 |
-| `no_error` | 不含 "ERROR" / "Error" / "error" |
-| `has_date` | 含 2020-2030 范围内的年份字符串 |
-| `has_citations` | 含 `[1]` 或 `[链接` 或 `来源` |
-| `file_exists` / `has_keywords` | `text.len() > 10` |
-| 其他 | 默认通过（pass） |
-
-### 1.6 内置函数
-
-| 函数 | body 文本格式 | 说明 |
-|------|--------------|------|
-| `web_search` | `web_search(query="...")` | 网页搜索 |
-| `mcp_search` | `mcp_search(query="...", engine=zai)` | MCP 搜索 |
-| `llm` | `llm(analyst)` 或 `llm(analyst, prompt="{topic}", schema="title,url")` | OpenAI 兼容 LLM。**推荐 agent 形态**：模型档位/system/schema 全在 config `[agents.X]` 统一管理（换模型不改管线），裸参数写法（`model=` 硬编码）只用于一次性小抽取。`prompt`/`input` 同义；不写 `prompt=` 时按节点图位置自动合成八段认知上下文（v0.17，§14.1）；`schema` 时 stdout 含 `##DSL_RESULT` |
-| `write` | `write(to="path", content=@prev)` | 写文件 |
-| `read` | `read(from="path")` | 读文件 |
-| `run` | `run("shell command")` | 执行 shell 命令 |
-| `sh` | `sh("shell command")` | run 的别名 |
+| 动词 | 形态 | 说明 |
+|---|---|---|
+| `run` / `sh` | `run("cmd", timeout=300, env="K=V")` | shell 执行；timeout=0 不限；env 可重复 |
+| `write` | `write(to="path", content=@ref)` | Rust 侧解析 @ref 落盘，不过 shell |
+| `read` / `read_file` | `read(from="path")` | 读文件 |
+| `llm` | `llm(agent)` 或 `llm(agent, prompt="…", schema="…", tier="…")` | OpenAI 兼容；见 §5 |
+| `script` | `script(name, k=v, …)` | 脚本契约调用，见 §7 |
 | `merge` | `merge(@a, @b, dedup)` | 合并结果（可选去重） |
-| `contract` | `.contract(outputs="a,b", invariants="@self.score >= 80")` | 节点契约卡（proc 修饰符，见 §13） |
-| 其他 | — | 未知函数 fail-closed（硬错误，不再 `<noop>`） |
+| `search` / `mcp_search` / `web_search` | `search(query="…")` | 检索动词（桥接） |
+| `spawn` | `spawn(name="h", cmd="…")` | 后台启动返回 pid，自立进程组 |
+| `procs` | `procs(name="h")` | 列句柄：name pid age_s alive cmd |
+| `kill` | `kill(name="h")` | SIGKILL 整进程组（防孤儿）；接受裸 pid |
+| `wait` | `wait(name="h", timeout=60)` | 阻塞等句柄退出；僵尸感知 |
+| `exists` | `exists("path")` | → "true"/"false" |
+| `stat` | `stat("path")` | → "kind size_bytes mtime_unix" |
+| `ls` | `ls("dir")` | → 每行一个条目，排序 |
+| `cp` | `cp(from="src", to="dst")` | 文件直拷（目录树用 shell cp -r） |
+| `mkdir` | `mkdir("path")` | create_dir_all |
+| `rm` | `rm("path")` | 递归删除；拒 / 与 $HOME 根（编译期硬保护） |
+| `disk` | `disk("/tmp")` | → "avail_gb total_gb" |
 
-`run` / `sh` / `llm`（带 `schema`）的输出如果包含 `##DSL_RESULT` 块，自动解析为结构化数据（见第 7 节）。
+未知动词 fail-closed（`<noop>` 假成功已删除）。
 
-`llm` 通过仓库内 [`bridge/llm_bridge.py`](bridge/llm_bridge.py) 调用 OpenAI 兼容 API。
+### 1.6 @ref 进 shell 的铁律（.trust 闸）
 
-**配置优先级**（高→低）：`llm()` 参数（如 `model=`）→ 环境变量 `OPENAI_BASE_URL` / `OPENAI_API_KEY` / `OPENAI_MODEL` → [`config.toml`](config.toml.example) 的 `[llm]` → 内置默认。
+`run()`/`sh()` 命令体里引用 `@proc` / `@proc.field`，必须在该 proc 声明 `.trust(@proc)`：
 
-`config.toml` 查找顺序：`$DUCTILE_CONFIG` → `./config.toml` → `./ductile.toml` → `~/.config/ductile/config.toml` → `~/.local/share/ductile/config.toml`。
+- **parser 静态闸**：check 期扫描 run/sh 体，命中真实 proc 名且未点名 → ParseError（带行号）
+- **executor 运行时兜底**：resolve 后残留的 `@name`（动态拼接形态）同判
+- 豁免：`@self`、`@localhost`（主机名/邮箱形态）
+- 合法的结构化消费通道（不走 shell）：`.when(@proc.field OP v)`、契约 invariants、`write(content=@ref)` 落盘后 `cat`
 
-无 key 时该 impl 失败，可走 `.plan` 备选路径。
+> LLM 输出含单引号会炸 shell 引号结构——这是物理闸存在的根因，不是风格建议。
+
+### 1.7 已退役语法（解析期警告 + 忽略，不入 AST）
+
+`.cost(latency=…)` / `.check(result => …)` / `.ensure(result => …)`。
+替代：cost → `.eval` 策略文件 + `--policy`（§3.4）；质量门槛 → 独立 judge proc + `.when` 路由。
+**不要在新管线中使用。**
 
 ---
 
 ## 2. CLI 命令参考
 
-### 2.1 check
+前置：`ductile <command> …`。退出码 0/1；`--json` 用于机器输出（similar/nodes/fts/discover）。
 
-```bash
-ductile check <file.pipeline>
-```
+### 2.1 管线生命周期
 
-- 输入：`.pipeline` 文件路径
-- 动作：解析 + 类型检查
-- 退出码：0 = 通过，1 = 有错误
-- 输出：`Type check passed` 或错误列表
+| 命令 | 动作 |
+|---|---|
+| `ductile check <file>` | 解析 + 类型检查（不执行） |
+| `ductile parse <file>` | 仅解析，展示 AST 摘要 + 同构提示 |
+| `ductile graph <file>` | E-graph 结构：节点/边/e-class/融合命中/CSE 别名/并行组/关键路径 |
+| `ductile run <file> [topic] [-- k=v …]` | 解析 + 检查 + 执行；`--policy f.eval` 挂策略；`--restrict-shell` 禁 run/sh/spawn |
+| `ductile import <dir\|file>` | 批量导入 .pipeline 到库（目录递归） |
+| `ductile version save/log/diff` | 管线版本快照（`~/.local/share/ductile/versions/<name>/`） |
 
-### 2.2 run
+### 2.2 检索与复用
 
-```bash
-ductile run <file.pipeline> [topic] [--key=value ...]
-```
+| 命令 | 动作 |
+|---|---| 
+| `ductile search "q"` | proc 库 LIKE 检索（tags+name+desc） |
+| `ductile fts "q" [--json]` | BM25 全文检索（相关度排序） |
+| `ductile discover [--json]` | 跨管线同构 proc 组（tag 集相等） |
+| `ductile compose <name> <desc> <#tags> …` | 按 tag 链组装管线 |
+| `ductile learn [dir]` | 静态 tag 序列模式学习（频率 ≥2） |
+| `ductile similar [--json] [dirs]` | 结构键对齐检索 |
+| `ductile build` | 从材料构建 |
+| `ductile cost` | cost 相关操作 |
 
-- 输入：文件路径 + 可选 topic + 可选参数
-- topic 格式：`--` 之前的所有词 join 为 topic
-- 参数格式：`--` 之后的 `key=value` 对
-- 动作：解析 + 检查 + 执行
-- 副作用：
-  - 自动导入 pipeline 到 SQLite
-  - 执行记录写入 SQLite runs 表
-  - 同构提示输出到 stdout
-  - patch 应用日志输出到 stderr
-- 退出码：0 = 成功，1 = 失败
-
-**示例：**
-
-```bash
-ductile run research.pipeline "AI 安全" --mode=deep --lang=zh
-```
-
-topic = `"AI 安全"`，params = `{mode: "deep", lang: "zh"}`
-
-### 2.3 parse
-
-```bash
-ductile parse <file.pipeline>
-```
-
-- 动作：仅解析，展示 AST 结构 + 同构提示
-- 不执行，不写 SQLite
-
-### 2.4b hyper（超网络）
-
-方案不确定时，用 `.hyper` **生成**可运行的 `.pipeline`；`check` 校验运行图是否仍符合该超网络。执行期不解释超边。
+### 2.3 超网络（.hyper）
 
 ```bash
 ductile hyper parse <file.hyper>
 ductile hyper build <file.hyper> [-o out.pipeline]
 ductile hyper check <file.hyper> <file.pipeline>
-ductile hyper similar <file.hyper|file.pipeline> [--json] [dirs...]
+ductile hyper similar <file> [--json] [dirs...]
 ductile hyper nodes <file>[:node]|--role X [--op Y] [--json] [dirs]
 ```
 
@@ -271,1087 +190,385 @@ HyperGraph("name")
   .goal("…")
   .require(judge=true, min_impls=1)
   .vertex("a", role=source)
-  .vertex("b", role=default)
   .vertex("j", role=judge)
-  .vertex("c", role=sink)
   .hedge("flow", kind=chain, a, b, c)
   .hedge("q", kind=gate, judge=j, producers=b, consumers=c)
   .deliver(c)
 ```
 
 | kind | 含义 |
-|------|------|
+|---|---|
 | `chain` | 有序数据路径 |
-| `gate` | `judge=` / `producers=` / `consumers=`（consumer 用 `.when(@judge…)`） |
+| `gate` | judge=/producers=/consumers=（consumer 用 `.when(@judge.…)`） |
 | `bundle` | 共现 |
 | `xor` | 互斥方案（slot + 多 impl） |
 
-兼容旧写法：`.stage(..., after=, gated_by=)`（内部降糖为 vertex/hedge）。
+`hyper check` 语义：stage 名**精确等于** proc 名；chain 边要求下游 body 含 `@ref`；gate 要求 `.when(@judge.…)`.
+写图前 `hyper similar` 查重，写节点前 `hyper nodes`。
 
-复用：`similar` / `nodes`（结构键对齐；tags 仅软排序）。示例：`examples/hyper/`。
+### 2.4 探索环（explore）
 
-### 2.4c explore（v0.19 探索环）
-
-```
+```bash
 ductile explore <file.pipeline> <topic> [--drs]
-ductile explore x <report-id> --report     # 只读检索冻结报告
+ductile explore --report <id>        # 只读检索冻结报告
 ```
 
-探索-固化循环：curriculum LLM 出题（探针任务）→ 沙箱真跑（`DUCTILE_DATA` 隔离；
-`cmd:` 前缀 = shell 探针，`.pipeline` 路径 = 管线探针）→ 确定性裁判判 Pass/Fail
-（判据语言：`exit 0` / `exit N` / `含 <s>` / `不含 <s>`，分号连接）→ Fail 固化成
-incidents 三元组（action/condition/consequence，err_code=explore_finding）→
-报告 freeze 到 `$DUCTILE_DATA/explore/`。
+出题（curriculum LLM）→ 沙箱真跑（`DUCTILE_DATA` 隔离；`cmd:` = shell 探针，`*.pipeline` = 管线探针）→ 确定性裁判（`exit 0` / `exit N` / `含 X` / `不含 X`，分号连接）→ Fail 固化 incidents（action/condition/consequence 三元组，err_code=explore_finding）→ 报告冻结 `$DUCTILE_DATA/explore/`。预算 8 波/12 深步；`--drs` 只深探。前置：`[agents.curriculum]`。
 
-前置：config.toml 需 `[agents.curriculum]`（出题角色）+ llm bridge 在搜索路径。
-预算：默认 8 波 / 12 深步。`--drs` 只跑深评阶段。
+### 2.5 认知层命令
 
-### 2.4d devcycle
+| 命令 | 动作 |
+|---|---|
+| `ductile canary list/add/rm/pass` | 已知好输入库（归因判别面） |
+| `ductile incident list/close/triage` | 事故单生命周期（open→close） |
+| `ductile l4 status/list/review/label/calibrate` | 端到端复核（log-only→enforcing） |
+| `ductile shelve list/resolve` | 判别实验模糊搁置队列 |
+| `ductile degraded [clear <name>]` | degraded 标志管理 |
+| `ductile patch <pl> <proc> <impl> <field> <val>` / `list` / `clear` / `revert` | 运行时覆盖（不改源文件）；origin 出处标注 |
 
-本仓库工程周期入口：`./devcycle.pipeline`。说明见 [`docs/DEVCYCLE.md`](docs/DEVCYCLE.md)。
+### 2.6 脚本契约与维护
 
-### 2.4 graph
+| 命令 | 动作 |
+|---|---|
+| `ductile script attach/list/show/call/detach` | 脚本契约注册与调用（§7） |
+| `ductile script doctor` | 逐条 stat 契约路径，DEAD → exit 1（只读） |
+| `ductile archive` | wal_checkpoint(TRUNCATE) + 整库拷贝 `$DUCTILE_DATA/archive/`，保留 10 份 |
+| `ductile db-stats` | 库统计 |
+| `ductile wrap/harvest/promote/grow/scaffold` | 命令收割/构式生长线（数据源为终端历史） |
 
-```bash
-ductile graph <file.pipeline>
-```
+### 2.7 工程周期（本仓库）
 
-- 动作：展示 E-graph 结构
-- 输出：节点数、边数、**e-class 数、融合规则命中、CSE 别名**、并行组、关键路径、静态提取计划
-
-### 2.5 import
-
-```bash
-ductile import <dir>
-ductile import <file.pipeline>
-ductile import <dir1> <dir2> <file.pipeline>
-```
-
-- 动作：批量导入 `.pipeline` 文件到 SQLite
-- 目录会递归扫描 `.pipeline` 文件
-
-### 2.6 search
-
-```bash
-ductile search "query"
-```
-
-- 动作：在 proc 库中搜索（LIKE 匹配 tags + name + description）
-- 输出：匹配的 proc 列表（名称、tags、描述、来源 pipeline、impl 数）
-
-### 2.7 compose
-
-```bash
-ductile compose <name> <description> <#tag1,#tag2> <#tag3,#tag4> ...
-```
-
-- 动作：按 tag 链从 proc 库组装 pipeline
-- 每步输出 top-3 候选 + 自动选第一个
-- 结果保存到 compositions 表
-
-**示例：**
-
-```bash
-ductile compose "translate" "翻译流水线" "#search,#web" "#llm,#parse" "#write,#file"
-```
-
-### 2.8 db-stats
-
-```bash
-ductile db-stats
-```
-
-- 输出：pipelines / procs / runs / compositions 计数 + 数据库路径
-
-### 2.9 discover
-
-```bash
-ductile discover
-ductile discover <file.pipeline>
-```
-
-- 动作：展示跨 pipeline 的同构 proc 组（tag 集合相同）
-- 如果给 file 参数，先导入再发现
-
-### 2.10 learn
-
-```bash
-ductile learn [dir]
-```
-
-- 无参数：扫描 `~/projects/ductile/pipelines/` + `experiments/`
-- 有参数：扫描指定目录
-- 动作：静态扫描 tag 序列，发现频率 ≥ 2 的重复模式
-- 输出：重复模式 + 压缩率
-
-### 2.11 patch
-
-```bash
-ductile patch <pipeline> <proc> <impl> <field> <value>
-ductile patch list
-ductile patch clear <pipeline>
-```
-
-- 动作：运行时覆盖节点属性，不改源文件
-- 存储在 SQLite patches 表（UPSERT 语义）
-- **v0.18.5 出处标注（节点平等问责基建）**：每条 patch 带 `origin` 列——
-  `human` / `llm:<model_id>` / `machine`。人手敲命令默认 `human`；程序化写
-  patch 的路径（进化环 doctor 处方、agent 工具调用）**必须**经
-  `DUCTILE_PATCH_ORIGIN` 环境变量显式声明出处（如
-  `DUCTILE_PATCH_ORIGIN=llm:qwen3.8:27b ductile patch …`）。upsert 覆盖时
-  origin 跟着新值走。`patch list` 逐条显示 origin。有了出处才能按"物种"
-  统计 patch 存活率（human patch vs llm patch 谁的处方更能过 probe 复检）。
-  老库自动迁移补列，存量行默认 `human`。
-
-**可 patch 字段：**
-
-| field | value | 类型 |
-|-------|-------|------|
-| `enabled` | `true` / `false` | bool |
-| `cost.latency` | 整数 | i64 |
-| `cost.risk` | 浮点数 | f64 |
-| `cost.tokens` | 整数 | i64 |
-| `cost.money` | 浮点数 | f64 |
-| `retry` | 整数 | usize |
-| `stub` | `true` / `false` | bool |
-
-**示例：**
-
-```bash
-ductile patch research search web enabled false
-ductile patch research search web cost.latency 5000
-ductile patch research summarize s1 retry 5
-ductile patch research search mcp stub true
-ductile patch list
-ductile patch clear research
-```
-
-### 2.12 promote / grow / scaffold（v0.9.x 自组织线）
-
-```
-ductile promote [days] [top] [--dry]   # 跨会话 MDL 晋升门
-ductile grow [days] [top_import]       # 命令全文构式生长
-ductile scaffold [query]               # 查询构式库
-```
-
-- **promote**：从 state.db 收割命令 → 两部码检验（晋升成本 8B/char+32b 选择码 vs 次数×节省）→ 自动入 `_harvested` pipeline。**计数单位是跨会话数 sessions（≥2 才是复用证据）**——会话内重复是 agent 调试迭代（探索），不是知识。账本表 `promotions`（UNIQUE(tag,cmd)，可审计可回滚）。`--dry` 只评不写。
-- **grow**：行级 token 在 60d 命令全文语料上贪心 pair-merge（增益门>0，同 promote 账法），长出的多行构式入 `scaffolds`（source='grown'）。物理：脚手架住在行间，首行归一化会毁掉它。
-- **scaffold**：按关键词查 scaffolds（LIKE，按 save_b 降序）。
-- 表：`scaffolds(text, save_b, use_count, lines, source, imported_at)`；`use_count` 语义 = **迭代频率**（对召回排序有信息量），不是知识证据；知识证据 = promotions.count（跨会话数）。
-
-### 2.13 version
-
-```bash
-ductile version save <file.pipeline> "change description"
-ductile version log <file.pipeline>
-ductile version diff <file.pipeline> <v1> <v2>
-```
-
-- 存储在 `~/.local/share/ductile/versions/<pipeline_name>/`
-
-### 2.13b script doctor / archive（v0.19 审计①⑤）
-
-```
-ductile script doctor    # 逐条 stat 契约路径：DEAD=文件缺失；死路径 exit 1
-ductile archive          # wal_checkpoint(TRUNCATE)+整库拷贝 $DUCTILE_DATA/archive/，保留 10 份
-```
-
-- doctor 只读不删——删之前先看见；修复用 `script detach <name>` 或重 attach
-- archive 是 SQLite 单点的最低限度物理保障（无远端、无增量，完整快照 ×10）
-
-### 2.14 canary（v0.15 认知层）
-
-```
-ductile script doctor
-ductile archive
-ductile canary list [proc]
-ductile canary add <pipeline> <proc> <input> [expect] [note...]
-ductile canary rm <id>
-ductile canary pass <pipeline> <proc>
-```
-
-- **已知好输入库**：五分类归因闸的判别面。class2（上游投毒）vs class3/4（本地问题）
-  的唯一判别手段 = 用归档的 canary 输入重跑本节点。
-- **矛盾态禁播（v0.19 X3 接线）**：proc 有 open incident 期间禁止归档 canary——
-  矛盾期一次侥幸成功不代表"已知好输入"，播下去会洗白坏节点（canary 绿 → 归因
-  误判 class2 → 矛盾被掩盖）。自动播种（首胜归档）静默跳过；`canary add` 显式
-  报错并指引 `ductile incident close <id>`。incident 关闭后自动恢复。
-- `expect` 谓词用 `.when()` 语法（`@self.field` 引用结果字段），缺省 `@self.ok == 1`。
-- `canary pass` 记录硬门禁通过面——**无 canary 通过记录禁止本地 patch**。
-- canary 绿（canary 过 + 真实输入挂）→ 上游投毒，本节点清白；canary 红 → 本地问题。
-
-### 2.15 incident（v0.15 认知层）
-
-```
-ductile incident list [status]
-ductile incident close <id> <resolution...>
-```
-
-- **事故一等实体**：节点失败自动落库（exec 失败分支 + 契约违例点双接线），带分层信号
-  （contract 缺字段→L1 / 谓词违例→L2 / timeout 等→L0 / truncation→L0.5）。
-- 同 `(pipeline, proc, code)` 的 open 事故聚合为一条（信号束语义，不刷屏）。
-- `close` 带 resolution（最终归因），evidence 追加 resolved 记录，可审计。
-
-### 2.16 l4（v0.15 认知层）
-
-```
-ductile l4 status                     # 当前升格状态 + 一致率
-ductile l4 list                       # 复核记录（最新 20 条）
-ductile l4 review <pipeline> <pass|fail> <evidence...>
-ductile l4 label <id> <ok|bad>
-```
-
-- **端到端复核**：任务意图 vs deliver 的独立判断（唯一合法 LLM 检测层）。
-- 冷启动 **log-only**：复核只记录不拦截；攒够 **≥8 个操作者标签且 L4 与标签一致率 ≥70%**
-  才升格 **enforcing**（fail verdict 升格为管线错误）。
-- 管线收尾自动记录：`DUCTILE_L4=1 ductile run x.pipeline`（Success→pass 带 deliver 摘要，
-  Failed→fail 带致命错误）。
-
-### 2.17 shelve（v0.15 认知层）
-
-```
-ductile shelve list [status]
-ductile shelve resolve <id> <resolution...>
-```
-
-- **判别实验模糊搁置队列**：canary 通过率落灰区（0.25–0.75）= 判别实验本身不可信，
-  强制搁置进 designer 审队列，**不写错误认知**（test-the-test）。
-- `resolve` 裁决不可撤销（verdicts are immutable）。
+`./devcycle.pipeline "start: …"` → 改代码 → `./devcycle.pipeline "feat: …"`；提交走 `./ship.pipeline "msg"`（test 门禁→add→commit→push→verify）；自测走 `./selftest.pipeline`。详见 `docs/DEVCYCLE.md`。
 
 ---
 
 ## 3. 执行引擎行为
 
-### 3.0 e-graph 执行模式（v0.10）
-
-启用方式（二选一）：
+### 3.1 执行流水
 
 ```
-.proc("x").pick(egraph)    # 单 pipeline 内任一 proc 声明即全局生效
-环境变量 DUCTILE_EGRAPH=1  # 全局开关
+apply_patches(pl) → build_egraph(pl) → parallel_groups(eg) → 逐层执行（层内串行）
 ```
 
-管线内部：
-
-1. 每个 proc 一个初始 e-class；每个 impl 投影为 e-node `(op, children)`，op = body 检测到的函数名，children = `@ref` 的 canonical class id
-2. **equality saturation**（union-only，canonical class 数单调下降 → 必然终止，上限 64 轮）：
-   - **R1 同构合并**：两 class 的 canonical 节点集一致 → union
-   - **R2 merge 扁平化**：merge 节点的传递扁平子集相等 → union（涵盖交换律 `merge(@a,@b)≡merge(@b,@a)`、嵌套折叠 `merge(merge(a,b),c)≡merge(a,b,c)`、退化 `merge(@x)≡x`）
-   - **R3 write/read 对消**：`read(from=P)` ≡ `write(to=P, content=@src)` 的 `src`（即 write→read 融合为 pass-through，路径精确匹配，`{topic}` 等占位符原样比较）
-   - **when-载体守卫（v0.11.1）**：挂 `.when()` 的 impl 投影为 when-载体节点，R1/R2/R3 一律不熔合含载体的 class——熔合会抹掉裁判依赖序（judge→consumer 边消失，deliver 抢跑、判决落空）。纯等价 proc 的 CSE 能力不受影响
-3. **提取器**：class 级 Kahn 拓扑（确定性）→ 逐 class 选最小 `cost_total` 的 enabled impl；对消 class 中 read 节点降级为缓存路径（class 内存在非 read 节点时不参与首选竞争）。**v0.19 审计⑥注**：`.cost()` 声明通道 v0.11 退役后所有 impl 的静态 cost=0，同 cost 平手实际由 `(proc, impl)` 字典序 tiebreak 决胜——排序真正起作用的通道是 exec_proc 内的历史惩罚/ImplPrefs 学习偏好（pick_by 默认值已从 "cost + history" 改为 "history" 以名副其实）
-4. **CSE**：同 class 只执行代表 proc，其余成员共享结果（执行日志 `[egraph]` 行可见 classes/融合命中/别名表）
-
-两层分工：e-graph 决定"谁跑"（class 代表/序/别名），exec_proc 内部仍按历史惩罚/偏好排序决定"怎么跑"（impl 序 + retry）。默认关闭——不声明时行为与 v0.9 完全一致。
-
-### 3.1 执行顺序（legacy 默认）
-
-1. `apply_patches(pl)` — 从 SQLite 加载补丁，克隆并覆盖
-2. `build_egraph(pl)` — 构建 e-graph（v0.10 起为真 e-class 结构，调度视图兼容旧接口）
-3. `parallel_groups(eg)` — 拓扑分层
-4. 逐层执行（层内串行）
-
-### 3.2 路径选择算法
-
-对每个 proc：
+### 3.2 路径选择（exec_proc 内）
 
 ```
-eligible = plan.filter(impl => when_condition_passes)
-ranked = eligible.sort_by(score)
-
-score(impl) = base_cost × (1 + penalty) / pref
+eligible = plan.filter(when 通过)
+ranked   = eligible.sort_by(score)
+score    = base_cost × (1 + penalty) / pref
 ```
 
-- `base_cost = 0.001×latency + 10×risk + 0.0001×tokens + 1×money`
-- `penalty` 见下表
-- `pref` = 乘性学习权重（成功 ×1.1 / 失败 ÷1.5，clamp [0.05, 20]）
+- `base_cost = 0.001×latency + 10×risk + 0.0001×tokens + 1×money`（静态声明通道已退役，全 0）
+- 同 cost 平手由 `(proc, impl)` 字典序 tiebreak 决胜；**真正起作用的排序通道是历史惩罚/ImplPrefs 学习偏好**（`.pick(by=history)` 默认）
+- `pref` 乘性学习权重：成功 ×1.1 / 失败 ÷1.5，clamp [0.05, 20]，落 impl_prefs 表
 
-### 3.3 滑动窗口惩罚
+### 3.3 滑动窗口惩罚（窗口 20 次）
 
-每个 impl 保留最近 20 次执行记录。
+| 条件 | penalty |
+|---|---|
+| 无记录 / 窗口 <3 / 失败率 ≤10% | 0.0 |
+| 失败率 >10% | e^(7×rate) − 1 |
+| 连续失败 ≥3 | ∞（BLOCKED） |
 
-| 条件 | penalty 值 | 效果 |
-|------|-----------|------|
-| 无记录 | 0.0 | 原始排序 |
-| 窗口 < 3 | 0.0 | 冷启动探索 |
-| 失败率 ≤ 10% | 0.0 | 无惩罚 |
-| 失败率 > 10% | `e^(7×rate) - 1` | 指数惩罚 |
-| 连续失败 ≥ 3 | `∞` | 永久 BLOCKED |
-
-**惩罚域**：penalty 只管瞬时故障（可 retry 恢复的失败）。
-
-### 3.7 评价策略（.eval，v0.11「裁判分离」）
-
-评价与流程分离：`.pipeline` 只描述流程；权重与 cost 来源写在 `.eval` 策略文件，运行时挂载：
+### 3.4 评价策略（.eval，裁判分离）
 
 ```
 ductile run x.pipeline "topic" --policy strict.eval
 ```
 
-`.eval` 行式格式（`#`/`//` 注释）：
+`.eval` 行式格式（`#`/`//` 注释）：`weights latency=0.001 risk=10.0 …`、`fail_closed = true`、`render.sdxl cost latency=measure("bench.sh {topic}")`。cost 两形态：直接数值 / `measure("cmd")` 实测（stdout 首个浮点数，latency 单位毫秒，cost_cache 表 TTL 24h）。未挂载 = 引擎默认权重 + `.plan()` 声明序。
+
+### 3.5 运行测量（自动落库）
+
+`rate_tokens` = 输出字符数/4；`latency_ms` = Instant 实测；`est_loss` 字段覆盖度函数（供 judge proc）。
+
+### 3.6 e-graph 执行模式（默认关闭）
+
+启用：任一 proc `.pick(egraph)` 或 env `DUCTILE_EGRAPH=1`。每 proc 一 e-class，equality saturation（union-only，上限 64 轮）：R1 同构合并 / R2 merge 扁平化 / R3 write-read 对消；**when-载体守卫**（挂 `.when` 的 class 不熔合——熔合抹裁判依赖序）；提取器 class 级 Kahn 拓扑 + CSE（同 class 只执行代表）。**FOPT 派生刀**：脚本 open incident → mcsm 派生 (2) → 禁熔合/禁 CSE（单向棘轮，incident 关闭回稳态）。
+
+两层分工：e-graph 决定"谁跑"；exec_proc 决定"怎么跑"。熔合只影响静态提取计划，run 执行计数不变。
+
+### 3.7 错误流（errflow，全自动零 DSL 面）
+
+**错误分类 15 类**（判定链先具体后兜底）：
 
 ```
-weights latency=0.001 risk=10.0 tokens=0.0001 money=1.0
-fail_closed = true
-render.sdxl cost latency=measure("pipelines/bench_sdxl.sh {topic}") risk=0.05
-render.flux  cost latency=5000.0
+cancelled → contract → ratelimit → auth → timeout → memory → dependency
+→ permission → network → resource → truncation → format → schema → data → crash
 ```
 
-- cost 值两形态：直接数值，或 `measure("命令")` 链接测试脚本——引擎执行脚本取 stdout 第一个浮点数（**latency 单位：毫秒**），按 `(proc, impl, field)` 缓存进 `cost_cache` 表，TTL 24h
-- 未挂载 `--policy` 时用引擎默认权重与 `.plan()` 顺序（不读 `.cost()`——v0.11 起 `.cost()/.check()/.ensure()` 均退役，解析期警告+忽略）
-- 幽灵 impl 防御：`.plan()` 内非 `name ->` 条目（如旧 SPEC 幻觉语法 `weights(rd=N)`）现在硬错误，不再静默生成 path_N 假成功
-- 未知函数 fail-closed：`<noop>` 假成功已删除，不可识别的函数体触发 Err 正常降级
-- 质量门槛新形态：独立 judge proc 输出 `##DSL_RESULT` 结构化字段 + `.when(@judge.score < 80)` 路由（`.when` fail-closed）
+| 类 | 锚点 | strategy | respond |
+|---|---|---|---|
+| cancelled | SIGINT/KeyboardInterrupt | Escalate（禁自动重试） | Exit |
+| contract | script not attached / param not in contract | Escalate | Exit |
+| ratelimit | 429 / quota | Retry{2,linear} | Wait |
+| auth | 401/403/invalid key | Escalate | Switch（换供应商） |
+| timeout | run timed out | Retry{2,linear} | Wait |
+| memory | CUDA OOM / exit 137 | Retry{1,linear} | Wait |
+| dependency | ModuleNotFound / command not found | Escalate | Ignore |
+| permission | EACCES/EPERM | Escalate | Ignore |
+| network | conn refused / DNS / 5xx | Retry{2,linear} | Wait |
+| resource | file not found / ENOSPC | Retry{1,linear} | Wait |
+| truncation | finish_reason=length | Retry（重采样） | Wait |
+| format | JSONDecodeError | Reroute | Switch |
+| schema | KeyError/TypeError | Reroute | Switch |
+| data | ValueError/IndexError | Reroute | Switch |
+| crash | 兜底 | Escalate | Ignore |
 
-### 3.6 运行测量（v0.11 接线）
+**失败是值**：proc 失败不中止管线，`results[p] = §§FIELDS§§err=1§§err_code=…§§`（Left）；下游死源引用且无可切换 → 传播 Left（err_code 继承）；任何 Left → run exit 1。
 
-每次执行自动测量并落库：
+**关键性判定（critical_set）**：`.deliver(@x)` 引用闭包 BFS = 主产出链 = 关键节点（Retry 预算 ×2，Left 致命 `critical proc 'x' failed`）；旁路失败容忍（Success + `bypass failures tolerated`）。无 deliver = 全关键。
 
-- `rate_tokens` = 输出字符数 / 4（token 代理）
-- `latency_ms` = Instant 实测（v0.10 恒 0，v0.11 起真实值）——"cost 从测量来"的地基
-- `est_loss` v1 字段覆盖度函数保留（`est_loss_field_coverage`），供 judge proc 评测用；排序公式不再使用 RD 附加费（`weights.rd` 已随 v0.11 移除）
+### 3.8 认知上下文合成（auto-prompt）
 
-### 3.4 retry
+`llm(agent)` 不写 `prompt=` 时，引擎按节点图位置自动合成八段 prompt：身份 → 主题 → 上游输入（§§FIELDS§§ 预览，截 200/2000 字符双窗——约束敏感下游宽窗）→ 继承约束 → 下游消费者 → guide（`[agents.x]` 开放动作）→ 错误记忆（open incidents 指针卡 ≤3）→ 输出契约。历史统计（近 20 次）≥3 条注入。fail-closed：无 agent 或身份信息全空 → 硬错误。
 
-`.retry(n=3)` 失败后等待 `2^(attempt+1)` 秒：2s → 4s → 8s。共尝试 n+1 次。
-
-### 3.5 check 流程（已退役）
-
-v0.11 起谓词层退役（裁判与生产分离）：`.check()` / `.ensure()` 解析期降级为警告+忽略，不影响执行。
-质量门槛改用独立 judge proc + `.when` 路由，见 3.7。
+**上下文协商（negotiate，declare-then-run）**：`[agents.x] negotiate=true` 或 env NEGOTIATE=1（默认关）。模型输出 `{"enough":false,"missing":[{"ref":"@x.y","why":…}]}` → 引擎按解析表补料追加式重跑（预算 3 轮 fail-closed）。协商日志落 runs.negotiation；协商中间轮禁播 canary。
 
 ---
 
-## 4. SQLite schema
+## 4. 配置（config.toml）
 
-数据库路径：`$DUCTILE_DATA/ductile.db`（未设置时 `~/.local/share/ductile/ductile.db`）。
-`DUCTILE_DATA` 同时是自测/探针的隔离开关——所有认知层表都落在这一个库里。
+查找顺序：`$DUCTILE_CONFIG` → `./config.toml` → `./ductile.toml` → `~/.config/ductile/config.toml` → `~/.local/share/ductile/config.toml`。
 
-```sql
-CREATE TABLE pipelines (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT UNIQUE NOT NULL,
-    description TEXT DEFAULT '',
-    source_file TEXT DEFAULT '',
-    imported_at TEXT DEFAULT ''
-);
+```toml
+[llm]                    # 连接层（base_url/api_key 永远在此，不属于 agent 语义）
+base_url = "http://localhost:11434/v1"
+api_key  = "ollama"
+model    = "qwen3.8:27b"
 
-CREATE TABLE procs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    pipeline_id INTEGER NOT NULL,
-    description TEXT DEFAULT '',
-    tags TEXT DEFAULT '',          -- 逗号分隔
-    impl_count INTEGER DEFAULT 0,
-    is_deliver INTEGER DEFAULT 0,
-    FOREIGN KEY (pipeline_id) REFERENCES pipelines(id)
-);
+[models.light]           # 命名档位（model 必填；base_url/api_key/timeout 回落 [llm]）
+model = "qwen3.8:9b"
+max_tokens = 4000        # 思考型模型预算，覆盖 OPENAI_MAX_TOKENS
 
-CREATE TABLE runs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    proc_name TEXT NOT NULL,
-    impl_name TEXT NOT NULL,
-    pipeline TEXT DEFAULT '',
-    status TEXT NOT NULL,          -- "Ok" 或 "Fail"
-    latency_ms INTEGER DEFAULT 0,
-    err_hash TEXT DEFAULT '',
-    err_at TEXT DEFAULT '',
-    rate_tokens INTEGER DEFAULT 0, -- RD: 输出字符数/4（token 代理）
-    est_loss REAL DEFAULT 0.0,     -- RD: v1 字段覆盖度；无结构化证据 = 0
-    recorded_at TEXT DEFAULT ''
-);
+[agents.analyst]         # 语义角色（system/schema/guide/timeout_secs/tiers/negotiate）
+system  = "…（\\n 展开为真换行）"
+schema  = "sid int, pass bool"
+tiers   = "light,medium,high"   # 升序阶梯
+guide   = "检索方式/命令/示例"
+negotiate = false
 
-CREATE TABLE compositions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    description TEXT DEFAULT '',
-    proc_names TEXT DEFAULT '',    -- 逗号分隔
-    created_at TEXT DEFAULT ''
-);
-
-CREATE TABLE patches (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    pipeline TEXT NOT NULL,
-    proc_name TEXT NOT NULL,
-    impl_name TEXT NOT NULL,
-    field TEXT NOT NULL,
-    value TEXT NOT NULL,
-    created_at TEXT DEFAULT '',
-    UNIQUE(pipeline, proc_name, impl_name, field)
-);
-
--- v0.8.1+ 自组织线 (harvest/wrap) 与 v0.9.x (promote/grow/scaffold)
-CREATE TABLE wrapped_cmds (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tag TEXT NOT NULL, cmd TEXT NOT NULL,
-    exit_code INTEGER, recorded_at TEXT DEFAULT '',
-    UNIQUE(tag, cmd)
-);
-
-CREATE TABLE promotions (          -- 跨会话 MDL 晋升账本 (v0.9.0+)
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tag TEXT NOT NULL, cmd TEXT NOT NULL,
-    count INTEGER,                 -- 跨会话数 (sessions): ≥2 = 复用证据
-    gain_bits REAL,                -- 两部码净收益
-    promoted_at TEXT DEFAULT '',
-    UNIQUE(tag, cmd)
-);
-
-CREATE TABLE scaffolds (           -- 构式库 (V26 生长, v0.9.2+)
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    text TEXT NOT NULL,
-    save_b INTEGER,                -- 总节省 bits
-    use_count INTEGER,             -- 迭代频率 (非知识证据, 见 §2.12)
-    lines INTEGER,
-    source TEXT DEFAULT 'grown',   -- 'grown' = ductile grow; 'v26' = 首次导入
-    imported_at TEXT DEFAULT '',
-    UNIQUE(text)
-);
-
--- v0.15 认知层（见 §13）
-CREATE TABLE canaries (            -- 已知好输入库（归因判别面）
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    pipeline TEXT NOT NULL, proc_name TEXT NOT NULL,
-    input TEXT NOT NULL,
-    expect TEXT NOT NULL DEFAULT '@self.ok == 1',
-    note TEXT DEFAULT '', saved_at TEXT DEFAULT ''
-);
-CREATE TABLE incidents (           -- 事故一等实体（信号束聚合）
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    pipeline TEXT NOT NULL, proc_name TEXT NOT NULL,
-    signals TEXT NOT NULL DEFAULT '',   -- L0-L2 分层信号
-    err_code TEXT DEFAULT '',
-    evidence TEXT DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'open',
-    created_at TEXT DEFAULT '', closed_at TEXT DEFAULT ''
-);
-CREATE TABLE l4_reviews (          -- L4 端到端复核（log-only → enforcing）
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    pipeline TEXT NOT NULL,
-    verdict TEXT NOT NULL,         -- pass / fail
-    evidence TEXT DEFAULT '',
-    label TEXT NOT NULL DEFAULT '',-- 操作者标签 ok/bad（升格判据）
-    run_id INTEGER, reviewed_at TEXT DEFAULT ''
-);
-CREATE TABLE shelved (             -- 判别实验模糊搁置队列
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    pipeline TEXT NOT NULL, proc_name TEXT NOT NULL,
-    reason TEXT DEFAULT '', evidence TEXT DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'open',
-    resolution TEXT DEFAULT '',
-    created_at TEXT DEFAULT '', resolved_at TEXT DEFAULT ''
-);
+[agents.curriculum]      # explore 出题角色（必需，硬文法）
 ```
+
+**档位选择三信号**：`tier=` 实参（最高）> 复杂度打分（schema 字段数 ≥3/≥6、prompt >1200/>4000、system >400）> 单档钉死。**失败升级**：档 i 失败自动升 i+1 到顶（有界）；`model=` 实参完全旁路。阶梯引未定义档 / tier 不在阶梯 → 硬错误。结果附 meta_tier/meta_model_id。
+
+**llm 合并序**：显式实参 > agent 配置 > `[llm]` > 内置默认。
 
 ---
 
-## 5. 同构发现
+## 5. LLM 集成
 
-### 5.1 匹配规则
+- 桥：仓库内 `bridge/llm_bridge.py`（OpenAI 兼容 API）
+- **OPENAI_MAX_TOKENS 必设**：bridge 不传 max_tokens 时本地服务默认 ~200 token 截断——长 JSON 尾部字段静默丢失且管线全绿。长任务前 `export OPENAI_MAX_TOKENS=4000`
+- 环境变量 `OPENAI_BASE_URL` / `OPENAI_API_KEY` / `OPENAI_MODEL` > config.toml `[llm]` > 内置默认
+- **影子桥劫持**：repo 外运行 llm() 会落到旧遗留桥（位置参数式）。修法：`cp bridge/llm_bridge.py ~/.local/share/ductile/bridge/` 保持同步
+- 裁判独立性：producer 与 judge 同模型会橡皮图章；judge 的 schema 数值字段排前、评语排后（截断保数值）
 
-两个 proc 的 tag 集合**完全相等** → 同构。
-
-### 5.2 提示时机
-
-- `parse`：解析后展示与已注册 proc 的同构匹配
-- `run`：执行前展示同构匹配
-- `discover`：全局展示所有同构组（≥2 个成员且来自不同 pipeline）
-
-### 5.3 提示格式
-
-```
-Isomorphism hints:
-  search ≅ find [translate] — 网页检索
-```
-
-含义：当前 pipeline 的 `search` proc 与 `translate` pipeline 的 `find` proc 同构（tags 相同）。
-
----
-
-## 6. 热补丁机制
-
-### 6.1 生命周期
-
-```
-patch 命令 → SQLite patches 表（UPSERT）
-                ↓
-run 命令 → apply_patches(pl)
-           1. db::load_patches(pipeline_name)
-           2. pl.clone()
-           3. 遍历 patch，按 (proc, impl) 匹配
-           4. 覆盖字段值
-           5. 执行修改后的 clone
-                ↓
-patch clear → DELETE FROM patches WHERE pipeline = ?
-```
-
-### 6.2 stderr 日志
-
-应用补丁时输出：
-
-```
-[patch] search.web: enabled=false
-[patch] summarize.s1: retry=5
-```
-
----
-
-## 6a. 资源管理算子（v0.7）
-
-### 6a.1 进程管理
-
-```
-spawn(name="handle", cmd="long-running-cmd")   // 后台启动，返回 pid
-procs(name="handle")                           // 列句柄: name pid age_s alive cmd
-kill(name="handle")                            // SIGKILL 整个进程组（防孤儿）；也接受 kill(name="1234") 裸 pid
-wait(name="handle", timeout=60)                // 阻塞等句柄退出；超时报错
-```
-
-- 句柄注册进全局进程表（进程内 OnceLock），pipeline 结束后进程表不持久化
-- `kill` 用 `kill -9 -PID`（负 pid = 进程组），确保 `bash -c "foo &"` 的孤儿子进程一并回收
-- liveness 检查走 `/proc/<pid>`，无平台依赖
-
-### 6a.2 文件系统
-
-```
-exists("path")          // → "true" / "false"
-stat("path")            // → "kind size_bytes mtime_unix"（kind = file|dir|other）
-ls("dir")               // → 每行一个条目名，排序后
-cp(from="src", to="dst") // 文件直拷；目录树 shell 出 cp -r
-mkdir("path")           // create_dir_all，父目录自动建
-rm("path")              // 递归删除；拒绝 / 和 $HOME 根（硬保护，不可关闭）
-```
-
-### 6a.3 磁盘与 run() 增强
-
-```
-disk("/tmp")            // → "avail_gb total_gb"（df -BG 解析）
-
-run("cmd", timeout=120)             // 超时杀进程组后报错；默认 300s；timeout=0 不限
-run("cmd", env="K1=V1" env="K2=V2") // 重复 env 注入；PATH/HOME/USER 防覆写
-```
-
-### 6a.4 安全边界
-
-- `rm` 的根保护是编译期常量行为，无开关
-- `kill` 只能杀本 pipeline spawn 的句柄，或显式给出的 pid
-- `env` 注入不碰身份变量（PATH/HOME/USER）
-- 全部路径走 `expand_tilde`，支持 `~/...`
-
-### 6a.5 示例
-
-`~/notes/obsidian/default/个人系统/流程pipeline/resource-demo.pipeline`（仓库外 dogfooding 副本）：disk-check → spawn/kill → mkdir/cp/stat/ls/rm → timeout 降级，四 proc 全通过。
-
----
-
-## 7. DSL_RESULT 协议
-
-### 7.1 脚本输出格式
-
-任何通过 `run()` / `sh()` 执行的脚本，在 stdout 末尾加块即可：
+## 6. DSL_RESULT 协议（结构化数据流）
 
 ```
 ##DSL_RESULT
 key1=value1
-key2=value2
 ##DSL_END
 ```
 
-### 7.2 下游引用
+任何 run/sh/llm(schema) 的 stdout 末尾带此块 → 自动解析为结构化字段，下游 `@proc.field` 引用。内部编码 `§§FIELDS§§k=v§§RAW§§原始stdout`。无块时整体 stdout 为结果（>5000 字符截断）。
 
-```
-@proc_name.field_name
-```
+## 7. 脚本契约（脚本即 API）
 
-引擎解析时提取对应字段值。找不到则输出 `<no field:proc.field>`。
-
-### 7.3 实现细节
-
-内部编码：`§§FIELDS§§k1=v1§§k2=v2§§RAW§§原始stdout`
-
-字段提取：遍历 `§§` 分隔段，匹配 `key=value`，遇到 `RAW§§` 停止。
-
----
-
-## 8. AI 调用者操作手册
-
-### 8.1 新建 pipeline
-
-1. 分析用户需求，确定 proc 链
-2. 为每个 proc 设计备选路径（至少 1 条）
-3. 为叶子 impl 声明 tags
-4. 写 check 谓词
-5. 保存为 `.pipeline` 文件
-6. 先 `ductile check` 验证语法
-7. `ductile run` 执行
-
-### 8.2 调优 pipeline
-
-1. 多次 `ductile run`，观察哪些路径失败
-2. 对不稳定路径 `ductile patch <pipeline> <proc> <impl> enabled false`
-3. 或 `ductile patch <pipeline> <proc> <impl> cost.latency 9999` 降低排名
-4. `ductile run` 验证效果
-5. 满意后 `ductile version save` 存快照
-
-### 8.3 复用已有节点
-
-1. `ductile import ./pipelines` 导入全部
-2. `ductile search "关键词"` 搜索可用 proc
-3. `ductile discover` 查看同构组
-4. `ductile compose` 从零件库组装
-
-### 8.4 错误排查
-
-| 现象 | 排查方向 |
-|------|---------|
-| `Parse error` | 检查语法：括号匹配、逗号、`->` |
-| `Type check errors: CostNegative` | cost 字段有负值 |
-| `Type check errors: EmptyPlan` | proc 没有 plan 也没有 deliver |
-| `All paths failed for proc: X` | 所有 impl 都失败，检查 bridge 脚本路径 |
-| 路径总是不被选中 | 可能被 penalty 惩罚，检查 `ductile patch list` |
-| 结构化字段为空 | 检查脚本是否正确输出 `##DSL_RESULT` 块 |
-| `script 'X' not attached` | 先 `ductile script attach <file>` 注册 |
-| `param 'k' not in contract` | 调用传了契约未声明的参数，`ductile script show X` 查契约 |
-| `missing required param` | 必填参数缺失或为空 |
-| `bad .when(@x) ... fail-closed at check`（v0.18.4） | when 条件静态解析失败：裸 `@proc` 引用缺 `.field`（须 `@proc.field`）、空算子数等。**check 期拦截**，改好再 run |
-| `agent ladder references undefined tier` | 配置文件缺 `[models.<tier>]` 段——独立 config.toml 必须带全 `[llm]` + `[models.*]`，不能只写 `[agents.*]` |
-| `llm bridge: schema requested but no JSON object in model output` | 小模型被重 guide 压垮输出不了 JSON。降 guide 负重，或 agent 配 `tiers = "light,medium"` 加兜底档位 |
-
----
-
-## 9. 脚本契约线（v0.12 — 脚本即 API）
-
-运行层脚本外挂机制：**脚本本体不写入 DSL，DSL 只留 `script(name, k=v...)` 链接**；
-元数据经结构化契约头自描述，LLM 调用时只读契约卡、不读脚本体。
-
-### 9.1 契约头（脚本写作结构）
-
-脚本文件头部用注释行声明（`#` 开头，sh/python/powershell 通用）：
+### 7.1 契约头（脚本头部注释行）
 
 ```
 # ductile: v1
-# name: word_stats                 ← 注册名（DSL 引用它）
-# desc: 一句话描述
-# lang: python                     ← bash | python | powershell（可扩展）
+# name: word_stats
+# desc: 一句话
+# lang: python              ← bash | python | powershell
 # params: text(str, required), n(int, default=10)
 # output: words(int), lines(int)
-# pure: true                       ← 有无副作用（纯函数=true）
-# idempotent: true                 ← 重复执行结果是否不变
-# concurrency: safe                ← safe | exclusive（能否并发）
-# effects: none                    ← none | fs | net | system
-# timeout: 10                      ← 秒；# retries: N 可选
-# mcsm: F(2)-O(1)-P(3)-T(2)        ← 可选：FOPT 认知坐标（fail-closed 校验，见 docs/MCSM.md）
-# mcsm_note_f: 文件系统+PATH工具    ← mcsm 声明时必填：四维实例级注解（当前环境下具体是什么）
-# mcsm_note_o: script契约卡         ← 裸通用名（"场域/本体"）拒收——必须写具体指称
-# mcsm_note_p: ##DSL_RESULT块
-# mcsm_note_t: 单次变换交付
+# pure: true                # 副作用标注（cse_safe 判定用）
+# idempotent: true
+# concurrency: safe         # safe | exclusive
+# effects: none             # none | fs | net | system
+# timeout: 10               # 秒；# retries: N 可选
+# mcsm: F(2)-O(1)-P(3)-T(2)          # 可选 FOPT 坐标
+# mcsm_note_f: 本机文件系统+PATH coreutils   # mcsm 声明时四维注解必填（裸通用名拒收）
 ```
 
-**语义标注的编排意义**（喂给引擎做自动并行/CSE 决策）：
-`pure=true && idempotent && concurrency=safe` → `cse_safe=true`（可安全 CSE/并行）；
-副作用脚本（`pure=false` 或 `concurrency=exclusive`）→ 不可熔合、不可并行，
-防止两个同构副作用节点被 CSE 熔成一个导致双执行变单执行。
+`pure && idempotent && concurrency=safe` → `cse_safe=true`（可 CSE/并行）；副作用脚本不可熔合不可并行。
 
-### 9.2 CLI
-
-```
-ductile script attach <file>            注册（解析契约头，upsert）
-ductile script list                     列出全部（NAME/LANG/PURE/IDEMPOTENT/CONCUR/EFFECTS）
-ductile script show <name>              契约卡（LLM 读这个，不读脚本）
-ductile script call <name> "k=v, k=v"   单发调用（调试）
-ductile script detach <name>            注销
-```
-
-### 9.3 DSL 调用与执行语义
+### 7.2 DSL 调用与执行语义
 
 ```
 .proc("analyze")
-  .plan(
-    py -> script(word_stats, text="{topic}")
-  )
+  .plan(py -> script(word_stats, text="{topic}"))
 ```
 
-- 契约卡从 scripts 表加载；未注册的脚本名 fail-closed 硬错（错误信息列出全部已注册脚本）
-- `k=v` 值支持 `{topic}`、`@proc.field` 上游引用、契约 `default=X` 兜底
-- **必填参数缺失/为空 → 硬错；契约未声明的幻觉参数 → 硬错**（契约即接口）
-- 传参经环境变量 `DUCTILE_ARG_<NAME>`、`DUCTILE_TOPIC`；脚本侧 `getenv` 取参。
-  env 注入前引擎自动剥掉一层对称包围引号（v0.18.4 参数卫生：`@ref`/`resolve_vars`
-  搬运可能引入序列化引号，此前脚本侧 `int('"16"')` 炸在深处而管线绿灯——现在炸在搬运处或被剥净）
-- 输出复用 `##DSL_RESULT` 协议（见 §7）；无协议块时整体 stdout 作为结果（>5000 字符截断）
-- timeout/retries 走契约头
+- 未注册脚本名硬错（列已注册清单）；必填参数缺失/空硬错；契约未声明的幻觉参数硬错
+- 传参：环境变量 `DUCTILE_ARG_<NAME>` + `DUCTILE_TOPIC`（**不是 argv**）
+- 值支持 `{topic}`、`@proc.field`、契约 default；env 注入前引擎剥一层对称包围引号
+- 输出复用 ##DSL_RESULT；timeout/retries 走契约头
 
-### 9.4 脚本写作规范（LLM 生成脚本必读）
+### 7.3 脚本写作四律
 
-1. **bash 必须 `set -euo pipefail`**——否则中间步骤失败被吞、最后的 echo 返回 0，
-   引擎收到 exit 0 → 静默半成功（实测踩过的坑）
-2. 输出机器可读结果一律走 `##DSL_RESULT` 块，人类可读信息走 stderr
-3. 契约头如实标注 pure/concurrency——标注撒谎会让编排优化破坏正确性
-4. 幂等脚本注明 `idempotent: true`，引擎可安全重试
+1. bash 必须 `set -euo pipefail`（否则中间失败被吞、末尾 echo 返回 0 → 静默半成功）
+2. 机器可读走 ##DSL_RESULT，人类可读走 stderr
+3. pure/concurrency 如实标注（撒谎会让编排优化破坏正确性）
+4. 幂等脚本注明 idempotent: true
 
-示例：`examples/scripts/word_stats.py`（纯函数）、`examples/scripts/make_report.sh`（fs 副作用）；
-验收链路：`pipelines/script_demo.pipeline`。
+## 8. 认知层（契约卡 / canary / incident / L4 / shelve）
 
-### 9.5 MCSM/FOPT 认知坐标（v0.18.11）
-
-脚本契约头可选键 `mcsm`：`F(f)-O(o)-P(p)-T(t)`，各维 1-4
-（1=稳定通用机制 2=矛盾出现 3=构造新机制解决矛盾 4=实践扩展新机制——
-机制成熟循环，不是价值阶梯；沉淀后回 1'，F(1)-O(1)-P(1)-T(1)=稳态）。
-四维 = 场域/本体论/现象/目的论（存在论的空间性/内容/显现/方向性）。
-声明了就 fail-closed 校验（格式垃圾拒绝注册），`script show` 展示。
-**v0.19 起声明 mcsm 必须伴随实例级注解**：`# mcsm_note_{f,o,p,t}:` 四行，
-每维写明该维度**在当前环境下的具体指称**（如 `# mcsm_note_f: 本机文件系统+PATH里的coreutils`），
-不是通用维度名——注"场域"等于没注，裸通用名拒收。注解存 `mcsm_note` 列，
-`script show` 卡直接展示四行（读卡即知，不翻文档）。
-管线/拓扑/层用注释约定标注。**F(1)-O(1)-P(1)-T(1)=稳态**（机制稳定通用）；含 4 越多=越多维度在实践
-扩展（活跃变动期）；坐标不分好坏，每个阶段对应不同处理措施（1可信赖可熔合
-当基座 / 2记录矛盾+隔离 / 3 tentative+canary 构造观察 / 4实跑+账本+promote），
-措施按维度独立施加。完整语义与实例打标见 `docs/MCSM.md`。
-
----
-
-## 10. 模块结构与测试架构（v0.12.1 — 全系统解耦）
-
-### 10.1 模块地图
-
-v0.18.5 起源码按七层认知栈物理分层（`docs/LAYERS.md` 是带依赖铁律的完整地图，
-`scripts/layers_probe.py` 是 selftest 门禁）。速览：
+### 8.1 节点契约卡
 
 ```
-src/
-├── interface/        # 横切入口：cli（命令分发）、api（pyo3，32 pub fn）
-├── core/             # 层间共享词汇：ast（类型）、dslresult（协议）、script_card（契约卡）
-├── L4_structure/     # 结构经验：hyper/learn/grow/promote/harvest
-├── L3_dsl/           # 形式层：parser/typecheck/when/config/version
-├── L2_orchestration/ # 执行层：executor/steps/egraph/eval/script/registry/textargs/ranking
-├── L1_feedback/      # 回传层：errflow/canary/incident/l4/shelve
-└── L0_physical/      # 物理层：db（SQLite，18 表）+ canary/l4/shelve 三张 schema.sql
-```
-
-模块职责速记（完整版见 docs/LAYERS.md）：
-
-- `executor`（L2）：编排主干（exec_pipeline/exec_proc/foreach/retry/patches）
-- `steps`（L2）：step_registry 注册表 + 21 个内置执行器
-  （进程：spawn/procs/kill/wait；文件：exists/stat/ls/rm/cp/mkdir/disk；
-  读写：read/write/run/sh + search/llm/merge + script(name,...)）
-- `textargs`（L2）：纯文本解析原语：detect_func/resolve_vars(@proc.field)/extract_*
-- `ranking`（L2）：偏好学习（ImplPrefs 乘性权重 ×1.1/÷1.5 clamp[0.05,20]）+ 排序
-- `eval`（L2）：裁判分离运行时：Evaluator/CostSource(measure 实测)/CostCacheStore
-- `egraph`（L2）：e-graph 等价类 + CSE + when-载体熔合守卫
-- `script`（L2）：v0.12 脚本契约：契约头解析/lang 解释器/cse_safe 判定
-- `db`（L0）：SQLite 层：22 个 *_conn(conn) 注入内核 + 全局薄壳；SCHEMA_DDL 单一事实源
-- `cli`（interface）：命令分发 + 纯参数解析（split_run_args/parse_promote_args）
-
-兼容性：executor 对拆出符号保留 re-export（`executor::detect_func` 等旧路径不变）。
-
-### 10.2 测试
-
-```bash
-cargo test --lib
-```
-
-分层：纯函数、内存库、子进程集成。细节以测试代码为准。
-
-### 10.3 db 层注入模式
-
-数据函数双形态：
-
-```rust
-// 内核：测试注入内存连接
-pub fn record_run_rd_conn(conn: &Connection, proc_name: &str, ...) { ... }
-
-// 薄壳：生产路径（全局库）
-pub fn record_run_rd(proc_name: &str, ...) {
-    let conn = open();
-    record_run_rd_conn(&conn, proc_name, ...)
-}
-```
-
-新增数据函数一律遵循此模式；表结构改动改 `SCHEMA_DDL` 常量（init_db 与测试共用）。
-
-### 10.4 脚本写作的测试纪律
-
-- 测试数据含引号/反斜杠/代理对时，用**字符字面量数组**构造（`vec!['"', '\\', 'n', ...]`），
-  不用 raw string（`"#` 定界符与 `\"` 序列撞车）与双层转义
-- 覆盖率工具（tarpaulin）与 pyo3 不兼容（debug 链接缺 libpython）——以测试面清单为准
-
----
-
-## 11. API 层与 LangChain 集成（v0.13）
-
-### 11.1 架构：core + 薄壳双形态
-
-所有对外 API 函数是双形态：`*_core` 纯 Rust（返回 `String` / `Result<String,String>`），
-pyo3 `#[pyfunction]` 薄壳只做包装。**bin/test 内部代码必须调 `*_core`**——`#[pyfunction]`
-符号会把 pyo3 运行时拉进 bin/test 链接图，而 `extension-module` feature 不链
-libpython（实测：rust-lld `undefined symbol: _Py_Dealloc`）。core 路径下 pyo3
-代码被 `--gc-sections` 丢弃，bin 与 wheel 各自干净。
-
-```
-run_json / script_call_json / pipeline_json → Result<String,String>（core）
-scripts_json / procs_json / runs_json / db_stats_json → String（core，永不失败）
-```
-
-### 11.2 语义约定：失败是数据
-
-- **创作错误**（文件不存在/解析/类型检查/策略非法）→ `Err` / Python 异常
-- **执行失败**（所有路径失败/degraded）→ `Ok({"ok":false,"error":...})`
-  —— agent 与前端按 JSON 路由，不靠异常捕获
-- `script_call_json` 未注册脚本名 → `{"ok":false}` + 已注册清单（不抛）
-- 输出字段解码：`§§FIELDS§§` 内部编码 → 干净 `fields` 对象（RAW 边界防泄漏）
-
-### 11.3 LangChain 适配（python/ductile 混合包）
-
-```
-pip install ductile && pip install langchain-core
-ductile.langchain_tools() → [BaseTool]
-```
-
-工具集 = 6 内省/执行工具 + 每个已注册脚本契约一个类型化工具（docstring/参数
-schema 从契约卡生成）。已知坑（实测）：
-
-1. Pydantic v2 保留参数名 `args` 会被别名化（`v__args`）→ invoke TypeError——工具参数命名避开 `args`
-2. `@tool` 装饰时函数必须已有 docstring（先赋 `__doc__` 再装饰）
-3. `**kwargs` 无法被 Pydantic 内省成 schema → 用 `inspect.Signature` 注入契约参数
-
----
-
-## 12. 全自动错误处理（v0.14 — errflow.rs 统一模块）
-
-错误处理零 DSL 面、零配置面（用户裁定）：分类→策略→响应全部引擎内建。
-
-### 12.1 错误分类（classify，v0.14c 十二类）
-
-判定链先具体后兜底：
-cancelled→contract→ratelimit→auth→timeout→memory→dependency→permission→network→resource→data→crash
-
-| code | 锚点示例 | 划界理由 |
-|------|---------|---------|
-| `cancelled` | `KeyboardInterrupt`、`SIGINT` | 用户意图，禁自动重试 |
-| `timeout` | `run timed out after Ns`、`ReadTimeout` | 慢 |
-| `ratelimit` | `429`、`rate limit`、`quota exceeded` | 限流窗口，退避后有效 |
-| `auth` | `401`、`403`、`invalid api key`、`token expired` | 凭证坏，换供应商 |
-| `memory` | `CUDA out of memory`、`exit 137`、`MemoryError` | 显存/内存瞬时占用 |
-| `dependency` | `ModuleNotFoundError`、`command not found`、`shared libraries` | 环境确定性坏 |
-| `network` | `Connection refused`、`getaddrinfo failed`、`502/503/504` | 网络抖动（与本地缺失分离） |
-| `resource` | `file not found`、`spawn failed`、`ENOSPC` | 本地确定性缺失 |
-| `permission` | `Permission denied`、`EACCES`、`EPERM` | 权限 |
-| `data` | `TypeError`、`ValueError`、`JSONDecodeError` | 数据错，换路径 |
-| `contract` | `script not attached`、`param not in contract` | 创作错误 |
-| `crash` | 其余一切（segfault、panic） | 兜底 |
-
-### 12.2 失败节点策略（strategy）
-
-| code | action | 理由 |
-|------|--------|------|
-| cancelled | `Escalate` | 用户意图，禁止任何自动重试 |
-| timeout | `Retry{2, linear}` | 瞬时资源紧张常自愈 |
-| ratelimit | `Retry{2, linear}` | 限流窗口退避 |
-| auth | `Escalate` | 凭证坏重试无意义（换供应商走 Switch 响应） |
-| memory | `Retry{1, linear}` | 等显存释放一轮 |
-| network | `Retry{2, linear}` | 抖动自愈概率高 |
-| resource | `Retry{1, linear}` | 一轮竞态缓冲 |
-| data | `Reroute` | 同输入必再错，立即换 impl（impl.retry 剩余预算直接跳过） |
-| dependency | `Escalate` | 环境确定性坏 |
-| permission | `Escalate` | 重试无意义 |
-| contract | `Escalate` | 创作错误 fail-fast |
-| crash | `Escalate` | 未知根因不瞎猜 |
-
-### 12.3 正常节点响应（respond，按错误进程的判断进行）
-
-| code | response | 行为 |
-|------|----------|------|
-| cancelled | `Exit` | 用户已表态，整流立即停 |
-| timeout/ratelimit/memory/network/resource | `Wait` | 上游吃满 Retry 预算（分层顺序天然提供）后按传播处理 |
-| auth/data/format/schema | `Switch` | 封锁引用死源的 impl，备选接管（auth=换供应商，data/format/schema=换路径） |
-| truncation | `Wait` | 重采样期间下游等预算耗尽 |
-| dependency/permission/crash | `Ignore` | 无关 proc 照跑；引用者落传播 Left |
-| contract | `Exit` | 立即退出整个流程（partial 保留） |
-
-### 12.4 失败是值（Either 内部语义）
-
-- proc 失败不中止管线：`results[p] = §§FIELDS§§err=1§§err_code=…§§ 编码`（Left）
-- 下游引用死源且无可切换方法 → 传播 Left（`err_msg=propagated from X`，err_code 继承）
-- 任何 Left → `run` exit 1；`run_json` 输出 `{"ok":false,"err_code":…,"partial":{…}}`
-- partial 中 Left 解码为干净对象，Right 原样——debug/agent 不丢现场
-
-### 12.5 关键过程/关键节点判定（v0.14b）
-
-引擎自动判定节点关键性并调整行为（零 DSL 面）：
-
-- **critical_set**：`.deliver(@x)` 引用闭包 BFS 回溯——deliver→x→x 的 refs 逐层上溯，
-  主产出链上的 proc = 关键节点；不在链上 = 旁路（日志/通知/监控类）。
-  无 deliver proc 的管线 = 全部关键（v0.9 兼容）。
-- **strategy_for(code, critical)**：关键节点 Retry 预算 ×2（主链值得更努力），旁路基础预算
-- **fatal_left 终局裁决**：只有关键 proc 上的 Left 致命（`critical proc 'x' failed`）；
-  旁路失败容忍——主产出不受牵连，流水线仍 Success（stderr 明示
-  `bypass failures tolerated`，旁路 Left 仍在 results/partial 可查）
-- parser 变更：`.deliver(@x)` 参数旧版只置 is_deliver 即丢弃——现解析进
-  `Proc.deliver_refs`（v0.4 起的潜伏遗漏，关键性判定的地基）
-
-
----
-
-## 13. 认知层（v0.15 — 契约卡 / canary / incident / L4 / shelve）
-
-让引擎从「执行成功/失败」升级到「知道为什么失败、谁的责任、该不该改认知」。
-设计全文见 [docs/cognition_spec.md](docs/cognition_spec.md)。
-
-### 13.1 节点契约卡（P0）
-
-```python
 .proc("judge")
   .plan(j -> run("judge.sh {topic}"))
   .contract(outputs="score, note", invariants="@self.score >= 80")
 ```
 
-- 执行后确定性校验（零 LLM）：`outputs` 字段存在性（L1）+ `invariants` 谓词（L2，
-  `.when()` 语法，`@self.field` 自引用本 proc 结果）。
-- 违例 → `contract violation:` 错误（errflow Exit，不重试——契约错不是瞬态错）→
-  自动落 incident。
-- 没有契约就没有误差信号——这是认知层的地基。
+执行后确定性校验（零 LLM）：outputs 字段存在性（L1）+ invariants 谓词（L2）。违例 → Exit 不重试 → 自动落 incident。
 
-### 13.2 五分类归因闸
+### 8.2 五分类归因闸
 
 | class | 归因 | 判定 |
-|-------|------|------|
-| 1 | 环境问题（桥/网络/凭证） | 桥哈希≠仓库、finish_reason、网络锚点——确定性终态，零 LLM |
-| 2 | 上游投毒 | canary 绿（canary 过 + 真实输入挂）|
-| 3 | 描述欠约束 | canary 红 + 判别实验：desc 修订后同模型产出质变 |
+|---|---|---|
+| 1 | 环境问题（桥/网络/凭证） | 确定性终态，零 LLM |
+| 2 | 上游投毒 | canary 绿（canary 过 + 真实输入挂） |
+| 3 | 描述欠约束 | canary 红 + 判别实验：desc 修订后质变 |
 | 4 | 模型能力不足 | canary 红 + 判别实验无改善 |
-| 5 | 世界真变了 | 需外部变化证据，准入最严 |
+| 5 | 世界真变了 | 外部变化证据，准入最严 |
 
-硬门禁：**无 canary 通过记录禁止本地 patch**——class2 排除不了就动手 = 把上游锅
-背到自己身上。
+硬门禁：**无 canary 通过记录禁止本地 patch**。
 
-### 13.3 分层信号（L0-L4）
+### 8.3 分层信号（L0-L4）
 
-| 层 | 检测物 | 载体 |
-|----|--------|------|
-| L0 | 基础设施（timeout/memory/network） | errflow 分类 |
-| L0.5 | 截断（finish_reason=length） | META 块 |
-| L1 | 输出字段缺失 | 契约卡 outputs |
-| L2 | 谓词违例 | 契约卡 invariants |
-| L3 | 统计漂移（长度包络/分数带宽） | 历史分布（待实现） |
-| L4 | 端到端意图达成 | 独立复核（唯一合法 LLM 检测层） |
+L0 基础设施（errflow 分类）/ L0.5 截断 / L1 字段缺失（契约 outputs）/ L2 谓词违例（invariants）/ L3 统计漂移（历史分布）/ L4 端到端意图（独立复核，唯一合法 LLM 检测层）。确定性证据短路 LLM。
 
-确定性证据短路 LLM：L0-L2 全绿时 L4 才有意义。
+### 8.4 canary 矛盾态禁播（X3）
 
-### 13.4 L4 冷启动与升格
+proc 有 open incident 期间禁止归档 canary——矛盾期一次侥幸成功会被播成"已知好输入"洗白坏节点。自动播种静默跳过；`canary add` 显式报错指引 `ductile incident close <id>`。关闭自动恢复。
+
+### 8.5 L4 冷启动与升格
 
 ```
-log_only ──(≥8 标签 且 一致率≥70%)──▶ enforcing
+log_only ──(≥8 标签 且 一致率 ≥70%)──▶ enforcing
 ```
 
-- log-only：复核记录但不拦截（攒标签数据面）。
-- enforcing：fail verdict 升格为管线错误（`L4 enforcing: end-to-end review failed`）。
-- `DUCTILE_L4=1` 开启管线收尾自动复核；`cfg!(test)` 守卫防测试污染真库。
+`DUCTILE_L4=1` 开启管线收尾自动复核（Success→pass，Failed→fail）。
 
-### 13.5 LLM 输出安全（血泪规则）
+## 9. 上下文协商（negotiate）
 
-LLM 结果**一律不进 bash**。`echo '@ref'`、`echo x='@ref' >/dev/null` 都会被输出里的
-单引号炸掉（`>/dev/null` 只丢输出，字符串照样过 shell 解析）。合法消费方式只有两种：
+`[agents.x] negotiate=true` 或 NEGOTIATE=1（默认关）。模型输出 `{"enough":false,"missing":[{"ref":"@x.y","why":…}]}` → 引擎补料重跑（追加式，预算 3 轮 fail-closed）。resolve 支持 @proc.field / @proc 全文 / topic / script:契约卡。日志落 runs.negotiation；中间轮禁播 canary。
 
-1. **结构化字段**：`.when(@proc.field ...)` / 契约 invariants（Rust 侧求值）
-2. **`write` 内置动词落盘**：`write(to="f.md", content=@plan)` 后 `cat f.md`——
-   write 在 Rust 侧解析 `@ref`，不过 shell
+## 10. SQLite schema（18 表）
 
-v0.19 起第三层：**引擎层物理闸**——`run()`/`sh()` 命令体注入 `@ref` 必须
-`.trust(@ref)` 点名（parser 静态 ParseError + executor 运行时兜底，见
-`.trust` 修饰符）。前两条是使用纪律，这条是制度。
+库：`$DUCTILE_DATA/ductile.db`（未设 → `~/.local/share/ductile/ductile.db`）。`DUCTILE_DATA` 同时是隔离探针开关。核心表：
 
----
+| 表 | 用途 |
+|---|---|
+| pipelines / procs / runs / compositions | 管线注册与执行记录（runs 含 latency_ms/rate_tokens/est_loss/negotiation） |
+| patches | 热补丁（origin 出处：human / llm:\<model\> / machine） |
+| impl_prefs | 乘性学习权重 |
+| cost_cache | measure 实测缓存（TTL 24h） |
+| scripts | 脚本契约卡（含 mcsm/mcsm_note） |
+| canaries / incidents / l4_reviews / shelved | 认知层四件 |
+| wrapped_cmds / promotions / scaffolds | 命令收割/构式生长 |
 
-## 14. LLM 管线配方（v0.18 实战沉淀）
+新增表必须进 SCHEMA_DDL 单一事实源（懒建表旁路是历史坑）。完整 DDL 见 `src/L0_physical/db.rs` 的 SCHEMA_DDL。
 
-> 本章是"怎么用好"的操作手册：四个经过盲评验证的配方 + 提示词工程实测规律。
-> 所有数据来自 game 场景三轮独立盲评（judge=qwen3.8:27b，甲乙丙位置轮转，0-100 打分禁并列）。
+## 11. 模块结构（七层认知栈）
 
-### 14.1 五段生成链（基座形态）
+```
+src/
+├── interface/        # cli（命令分发）、api（pyo3 32 pub fn）
+├── core/             # ast、dslresult、script_card（不依赖任何层）
+├── L4_structure/     # hyper/learn/grow/promote/harvest
+├── L3_dsl/           # parser/typecheck/when/config/version
+├── L2_orchestration/ # executor/steps/egraph/eval/script/registry/textargs/ranking
+├── L1_feedback/      # errflow/canary/incident/l4/shelve
+└── L0_physical/      # db + 三张 schema.sql
+```
+
+依赖铁律：只许向下（interface > L4 > L3 > L2 > L1 > L0；core 任意）。`scripts/layers_probe.py` 探针守护（selftest 门禁），违规即红。
+
+**测试**：`cargo test --lib`（476 项）。db 层双形态注入（`*_conn` 内核 + 全局薄壳）。
+
+## 12. API 层（core + 薄壳双形态）
+
+- 所有 API 是 `*_core`（纯 Rust）+ pyo3 `#[pyfunction]` 薄壳；**bin/test 必须调 `*_core`**（pyo3 符号拉进 bin 链接图会炸 rust-lld）
+- 语义：创作错误 → Err/异常；执行失败 → `Ok({"ok":false,"error":…})`（失败是数据）
+- LangChain：`ductile.langchain_tools()`（python/ 混合包）——6 内省/执行工具 + 每脚本契约一个类型化工具
+- PyPI 发布：`maturin build --release -o dist` + twine（token 见 `~/.config/ductile/pypi-token.sh`）
+
+## 13. LLM 管线配方（实战沉淀）
+
+### 13.1 五段生成链（基座）
 
 ```
 req(需求分析) → arch(架构) → brk(任务拆解) → audit(审计门)
 ```
 
-每段一个 `[agents.x]`（schema 强制结构化），`.when(@上游.字段)` 串联，
-audit 挂 `.needs(@req)` 拿原始需求做审计脚手架。这是最简可用形态。
+每段一个 `[agents.x]`（schema 强制结构化），`.when(@上游.字段)` 串联，audit 挂 `.needs(@req)`。
 
-### 14.2 问询链（防臆造约束——最重要的一条）
+### 13.2 问询链（防臆造——最重要）
 
-**问题**：需求节点会把推测写成事实（"预算有限" → 臆造"不能外包"），下游全链被毒。
-
-**配方**：req 和 resolve 两个节点，中间一次"下级提问上级裁决"：
+req 与 resolve 两节点，中间"下级提问上级裁决"：
 
 ```
-.proc("req", llm(req_analyst))                        // schema 含 open_questions
-.proc("resolve", llm(resolver, prompt="原始用户描述：{topic} ||| 下游需求分析师提出的问题：{@req.open_questions}"))
+.proc("req", llm(req_analyst))                     // schema 含 open_questions
+.proc("resolve", llm(resolver, prompt="原始描述：{topic} ||| 问题：{@req.open_questions}"))
   .when(@req.must_have)
-  .constraint(resolved_constraints)                    // 裁决后的干净约束 → 全链继承
+  .constraint(resolved_constraints)                // 干净约束全链继承
 .proc("arch", llm(architect)).when(@resolve.resolved_constraints)
 .proc("brk", llm(breaker)).when(@arch.modules)
 .proc("audit", llm(auditor)).when(@brk.tickets).needs(@req)
 ```
 
-resolver 的 system 写死**两类推断纪律**：
-- 限制性推断（缩小方案空间的解读，如"预算有限"→"不能外包"）——必须原话明确禁止才成立
-- 可执行化推断（"没有程序员"→"技术实现交付外部合约开发"）——应当收录
+resolver 的 system 写死两类推断纪律：限制性推断（须原话明确禁止才成立）/ 可执行化推断（应收录）。实证：27B 问询链 82.7 vs 裸 67.7（+15）。
 
-实证：27B 问询链 82.7 vs 裸 27B 67.7（**+15**）；8B 问询链 36.3（模型太小救不动提问臂）。
+### 13.3 owner 槽位
 
-### 14.3 owner 槽位（约束要有落点）
+任务拆解类 schema 的每张 ticket 内嵌 `owner` 字段（不放顶层），guide 给白名单。实证弧线：-16.3 →（.constraint）-9.7 →（+owner）**+14.7 反超**。
 
-约束送到了门口，schema 还要留门。任务拆解类 schema 的每张 ticket 内嵌 `owner` 字段
-（对齐裸模型自发涌现的形态——不要放顶层）。guide 里给白名单："团队只有6名美术和策划——
-owner 只能是『策划A-E/美术』或『外部合约开发』"。
+### 13.4 提示词五律（9B 档实测）
 
-实证弧线（同场景 s2 段，vs 裸模型）：-16.3 →（.constraint 注入）-9.7 →（+owner 槽位）**+14.7 反超**。
+① 数量锚定有效 ② 字段清单要全 ③ desc 负重要轻（30-60 字+示例是甜剂量）④ 算术指令反噬（对账交引擎）⑤ 结构修正边际递减。**guide 详尽度与模型能力反相关**：加压 guide 对 9B +21.3，对 27B -4.0——27B 档位正确姿势：约束递到手、留好 owner 槽位、然后闭嘴。
 
-### 14.4 提示词自动进化环（评估函数机制化）
+### 13.5 模型档位（单 seed 量级参考）
 
-人工循环（盲评→读批语→改 guide→重跑→回滚）固化为三层管线：
-
-1. **probe**（`scripts/probe_invariants.py`，零 LLM）：结构不变量检查——票数锚/字段完整/
-   desc 负重/est 对账（机器连加，LLM 算不对）/依赖单向/owner 白名单。输出 `##DSL_RESULT`
-   probe_score + issues，`.when` 可门禁。
-2. **批语**：盲评 judge 的 notes（内容层批评）
-3. **doctor**（`[agents.prompt_doctor]` + `pipelines/prompt_evolve.pipeline`）：读 guide 原文
-   +探针报告+批语 → diagnoses（根因）+ prescriptions（target/action/old/new 可执行处方）
-   + expected_effects（可证伪预期）。`scripts/rx_apply.py` 把处方写回 toml。
-
-**验收实录**：g9c（9B 通用 guide，42.7 分）回放 → doctor 四张处方 vs 人工三轮实锤处方逐条对齐，
-R1 owner 枚举比人工版更严。但全量应用后 9B 直接输出不了 JSON（brk 崩）——回滚 R4（自检清单）
-后 probe 88 分结构项全绿。**可证伪环完整咬合：处方→apply→重跑→复检→选择性回滚**。
-
-### 14.5 提示词工程五律（实测，9B 档）
-
-| 律 | 实测证据 |
-|---|---|
-| ① 数量锚定有效 | "15-25 张"把 7 票拉到 20+（无锚=最省力输出） |
-| ② 字段清单要全 | 六字段显式+示例；漏列必丢 |
-| ③ desc 负重要轻 | "三要素"压垮（desc 全空）；一句话 30-60 字+示例是甜剂量 |
-| ④ 算术指令反噬 | est 连加自检 → total_est=0.0 且 owner 退化；27B 也算不对 20 项连加——对账交引擎 |
-| ⑤ 结构修正边际递减 | 防倒置/owner 到人不再加分（裁判打内容深度） |
-
-**guide 详尽度与模型能力反相关**：加压 guide 对 9B +21.3（补短板），对 27B **-4.0**
-（格式清单挤出内容深度——预算论证、时间线消失）。27B 档位的正确姿势：约束递到手、
-留好 owner 槽位、然后闭嘴。
-
-### 14.6 模型档位选择（27B=甜点位实测）
-
-| 档位 | s2 深拆解盲评 | 定位 |
+| 档位 | s2 盲评 | 定位 |
 |---|---|---|
 | 裸 27B | 66.7-79.3（波动大） | 对照臂 |
-| **27B 问询链** | **82.7** | 主力：直提链 84 同级 |
-| 9B 加压 guide | 61-64（触顶） | s0 提问臂 + 粗拆解 |
+| 27B 问询链 | 82.7 | 主力 |
+| 9B 加压 guide | 61-64（触顶） | 提问臂+粗拆解 |
 | 8B 问询链 | 32-36 | 不可用于深推理 |
 
-> **证据等级注记（v0.19 审计④）**：本表数字为**单 seed 历史实测**（盲评
-> harness 脚本已随 /tmp 清理失传，无 multi-seed 复跑条件）。按当前证据纪律，
-> 引用时视作"量级参考"而非"精确对比"；复跑需先重建 harness（3-seed 起）。
+> 证据等级：单 seed 历史实测（harness 已失传，复跑需重建 3-seed 起）。引用视作量级参考非精确对比。
 
-### 14.7 工程纪律（外部实测反馈单，v0.18.4 已修）
+## 14. AI 调用者速查（写管线前必读的坑）
 
-- **写 .pipeline 抄范本，禁止凭记忆**——链式名解析类错误 check 曾漏检（v0.18.4 起
-  `.when` 条件 check 期静态校验，裸 `@proc` 引用直接拦截）
-- **参数序列化引号**在 env 注入前被引擎剥净（`int('"16"')` 类错误炸在搬运处）
-- **err_msg 截断 2000 字符**——诊断信息不再丢关键栈
-- LLM 输出一律不进 bash（§13.5 血泪规则不变）
+1. **抄范本，禁止凭记忆**——`examples/` 与 `pipelines/` 是正典
+2. 多行 @ref 必须引号包裹：`echo "@scan" | grep x`（裸替换管道符掉行首 → bash 语法错）
+3. write() 的 `\n` 是字面量两字符，不转义；要换行拆 impl 或 printf
+4. 一个 proc 只暴露获胜 impl 的值；两个统计量拆两个 proc
+5. 管道末位命令决定 exit code：计数用 `find … | wc -l`
+6. 未声明 cwd 的管线 run() 必须绝对路径；bash 多行 for/if 需 `bash -c` 包装
+7. 无 @ref 的 proc 是旁路会并行抢跑——顺序依赖用 `.when(@upstream.field OP v)`（引擎内求值），不要 `echo '@x' >/dev/null` 占位
+8. 依赖门禁模式：`echo '@test' | grep -q '绿标' && git commit … || echo skipped`
+9. LLM 输出一律不进 bash（§1.6 trust 闸 + 血泪规则）
+10. `run()` 结果是 Text 无字段 → `.when(@x.ok)` fail-closed 判死——先让上游吐 ##DSL_RESULT
+
+**错误排查表**：
+
+| 现象 | 排查 |
+|---|---|
+| Parse error | 括号/逗号/`->`；字符串字面量内的括号已跳过 |
+| `bad .when(@x) … fail-closed` | 裸 @proc 缺 `.field`，check 期拦截 |
+| `shell injection of @x requires explicit trust` | 补 `.trust(@x)` |
+| All paths failed | 检查 bridge 路径 / 桥劫持（§5） |
+| 路径总不被选中 | penalty 惩罚，`ductile patch list` |
+| 结构化字段为空 | 脚本没输出 ##DSL_RESULT 块 |
+| `script 'X' not attached` | 先 `ductile script attach` |
+| `param 'k' not in contract` | 幻觉参数，`script show X` 对契约 |
+| agent ladder references undefined tier | config 缺 `[models.<tier>]` |
+| schema requested but no JSON | 小模型被重 guide 压垮——降 guide 或加兜底档 |
