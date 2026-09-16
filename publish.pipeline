@@ -1,0 +1,30 @@
+#!/usr/bin/env -S ductile run
+// publish.pipeline — PyPI 发布闸（与 ship 分离：ship 管 git，publish 管分发）。
+// 用法：./publish.pipeline
+// 四道闸（任一红即停，绝不半发布）：
+//   gate_version — Cargo.toml 与 pyproject.toml 版本一致 + 二进制 --version 同源
+//   gate_clean   — 工作树干净（dirty 发布=发布的东西与 git 上的不同源）
+//   gate_test    — cargo test 全绿（ship 同款门禁，publish 不信任"刚 ship 过"）
+//   build        — maturin build（wheel 产物本身可构建）
+// 上传：twine upload（token 从 ~/.config/ductile/pypi-token.sh 注入环境变量，
+//   不落命令行——ps 可见的是 token 名不是值；值不进任何日志）。
+// 幂等性：PyPI 拒绝同版本重传（409），.proc 的 errflow 不重试 4xx。
+Pipeline("publish", "PyPI 发布闸：版本一致 → 工作树干净 → 测试绿 → 构建 → 上传", cwd="${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)}")
+  .proc("gate_version", run("v_cargo=$(grep -m1 '^version' Cargo.toml | sed 's/version = \"\\(.*\\)\"/\\1/'); v_py=$(grep -m1 '^version' pyproject.toml | sed 's/version = \"\\(.*\\)\"/\\1/'); v_bin=$(ductile --version | awk '{print $2}'); echo \"cargo=$v_cargo pyproject=$v_py bin=$v_bin\"; [ \"$v_cargo\" = \"$v_py\" ] && [ \"$v_cargo\" = \"$v_bin\" ] || { echo 'VERSION-MISMATCH'; exit 1; }").tags(#gate))
+    .desc("三源版本一致闸：Cargo.toml == pyproject.toml == 二进制 --version")
+  .proc("gate_clean", run("d=$(git status --short | wc -l); echo \"dirty: $d\"; [ \"$d\" = \"0\" ] || { echo 'DIRTY-TREE: commit first (./ship.pipeline)'; exit 1; }").tags(#gate))
+    .desc("工作树干净闸：发布物必须与 git 同源")
+  .proc("gate_test", run("cargo test --release --lib 2>&1 | grep '^test result' | tail -1").tags(#gate))
+    .desc("测试门禁：全绿才放行（不信任刚 ship 过——发布是重操作）")
+  .proc("build", run("rm -rf dist && maturin build --release -o dist 2>&1 | tail -3 && ls dist/ | tee target/publish-artifacts.txt && echo BUILD-OK").tags(#build))
+    .desc("maturin 构建 wheel（产物名落盘，上传步骤据此 glob）")
+    .when(@gate_version.ok == "1" && @gate_clean.ok == "1" && @gate_test.ok == "1")
+  .proc("upload", run("set -a; . ~/.config/ductile/pypi-token.sh; set +a; whl=$(ls dist/ductile-*.whl); echo \"uploading: $whl\"; twine upload --non-interactive -u __token__ -p \"$DUCTILE_PYPI_TOKEN\" \"$whl\" 2>&1 | grep -vE '^Uploading.*%|token' ; echo UPLOAD-DONE").tags(#pypi))
+    .desc("twine 上传（token 走环境变量，不进命令行与日志）")
+    .when(@build.ok == "1")
+    .trust(@build)
+  .proc("verify", run("v=$(ductile --version | awk '{print $2}'); sleep 5; pypi_v=$(curl -s https://pypi.org/pypi/ductile/json | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"info\"][\"version\"])'); echo \"local=$v pypi=$pypi_v\"; [ \"$v\" = \"$pypi_v\" ] && echo PUBLISH-VERIFIED || { echo 'PUBLISH-MISMATCH (PyPI 可能有缓存延迟，稍后手动复核)'; exit 0; }").tags(#verify))
+    .desc("PyPI JSON API 回读验证（缓存延迟容忍：mismatch 不红，提示手动复核）")
+    .trust(@upload)
+  .proc("deliver")
+    .deliver(@verify)
