@@ -118,98 +118,133 @@ Pipeline("fallback_demo", "第一步失败了自动换备用方案")
 
 先 `check` 后 `run` 是好习惯——错误在执行前就被拦下。
 
-## 逐步升级：从"能跑"到"好用"
+## 功能清单
 
-上面 5 分钟的内容只用了 Ductile 的一成功力。往下每一级都是**一个独立的功能**，
-你可以在任何一级停下来——够用就好；也可以一路往上，把整条工作流变成
-"一个文件 + 一条命令"。
+### 备选路径与自动降级
 
-### 第 1 级：条件执行 —— `.when`
-
-某步只在条件满足时才跑（条件是引擎读上游的**结构化字段**，不是字符串比较）：
+一个步骤写多个实现，失败自动换下一个，重试与退避由引擎处理：
 
 ```
-  .proc("audit")
-    .plan(a -> run("./check.sh").when(@gen.ok == 1))
+  .proc("fetch")
+    .plan(
+      a -> run("./fetch_v1.sh"),
+      b -> run("./fetch_v2.sh").desc("备用方案")
+    )
 ```
 
-`@gen.ok` 是 gen 步骤输出的字段。条件不满足 → 这一步自动跳过，下游继续。
+路径排序按**历史成功率**学习（窗口 20 次，失败率 >10% 指数降权，连续 3 败拉黑），跑得越久选得越准。
 
-### 第 2 级：显式依赖与信任 —— `.needs` / `.trust`
+### 条件执行（.when）
 
-- `.needs(@upstream)`：声明"这一步要参考上游的产出"——喂给 AI 步骤当上下文
-- `.trust(@upstream)`：声明"我允许上游产出进入我的 shell 命令"——**安全闸**，
-  没点名的引用会被引擎在检查期直接拦下（带行号报错），防注入
+条件在引擎内求值（读上游结构化字段，不进 shell）：
 
 ```
-  .proc("gen", llm(prompt="...", schema="sid int, pass bool"))
+  .proc("gate")
+    .plan(g -> run("./build.sh").when(@gen.ok == 1))
+```
+
+条件不满足 → 该实现不可用；全部不可用 → 步骤失败（fail-closed，不静默放行）。
+
+### 结构化输出（llm + schema）
+
+AI 步骤强制吐 `字段 类型` 对，引擎解析成结构化结果，下游用 `@步骤.字段` 引用：
+
+```
+  .proc("summarize", llm(analyst, prompt="把 {topic} 摘要", schema="title str, score int"))
+  .proc("gate")
+    .plan(g -> run("echo pass").when(@summarize.score >= 80))
+```
+
+格式崩了不放行，不污染下游。这是管线里 AI 与脚本平权协作的地基。
+
+### 依赖与信任声明（.needs / .trust）
+
+- `.needs(@up)`：把上游产出喂进本步骤 AI 的上下文
+- `.trust(@up)`：**安全闸**——run()/sh() 命令体里引用 `@up` 必须点名，否则检查期直接报错（带行号）。上游文本含引号会炸 shell，这道闸强制你显式承认每一次注入
+
+```
   .proc("build")
     .plan(r -> run("make @gen.target")).trust(@gen)
     .needs(@gen)
 ```
 
-### 第 3 级：AI 步骤 + 结构化输出 —— `llm` + `schema`
+### 多模型档位
 
-AI 参与管线的关键不是"能调 AI"，是**输出必须结构化**。`schema` 强制 AI
-吐 `字段 类型` 对，引擎解析成结构化结果，下游用 `@步骤.字段` 引用——
-格式崩了引擎不会放行，不会污染下游：
+同一角色配置阶梯（本地小模型 → 云端大模型），失败自动升档：
 
-```
-  .proc("summarize", llm(prompt="把 {topic} 摘要", schema="title str, score int"))
-  .proc("gate")
-    .plan(g -> run("echo pass").when(@summarize.score >= 80))
-```
+```toml
+[models.light]
+model = "qwen3.8:9b"
+[models.high]
+model = "glm-4.7"
 
-### 第 4 级：多模型档位 —— 一个 proc 多个 impl
-
-同一个步骤写多个实现（本地小模型 / 云端大模型 / 纯脚本兜底），引擎按
-**历史成功率**自动选——谁老成功用谁，失败自动降档换下一个：
-
-```
-  .proc("gen")
-    .plan(
-      local  -> llm(prompt="...", agent="qwen_local"),
-      cloud  -> llm(prompt="...", agent="glm_cloud"),
-      stub   -> run("./fallback.sh")
-    )
+[agents.analyst]
+system  = "……"
+tiers   = "light,high"
 ```
 
-跑得越久，选择越准（执行历史全部落库）。
+换模型改配置，不改管线。
 
-### 第 5 级：脚本即 API —— `script attach`
+### 脚本契约（script attach）
 
-把任意语言的脚本注册成带**契约**的步骤：脚本头部声明输入输出，引擎负责
-校验和调用。你的脚本不用改一行重试/降级逻辑——那是引擎的事：
+任意语言脚本注册成带契约的步骤——头部注释声明参数/输出/副作用，引擎校验调用：
 
 ```bash
 ductile script attach my_tool.py
-ductile script show my_tool     # 看契约卡（AI 读这个，不读你的源码）
-ductile script doctor           # 检查所有契约的文件还在不在
+ductile script show my_tool      # 契约卡：AI 读这个，不读你的源码
+ductile script doctor            # 检查契约文件是否还在
 ```
 
-### 第 6 级：拓扑复用 —— `hyper`
+调用方 `script(my_tool, text="{topic}")`，传参走环境变量，输出走结构化协议。纯函数+幂等+并发安全的脚本自动获得 CSE/并行资格。
 
-多条管线长得很像？把公共结构提炼成 `.hyper` 拓扑文件，`ductile hyper build`
-一条命令生成新管线。写新管线前 `ductile hyper similar` 先查有没有现成拓扑可抄。
+### 拓扑复用（hyper）
 
-### 第 7 级：自动探索 —— `explore`
+公共结构提炼成 `.hyper` 文件（vertex + hedge），一条命令生成新管线；写新图前 `hyper similar` 查重。
 
-不知道某条管线在陌生环境里行不行？让引擎自己出题、自己探、自己判：
+### 自动探索（explore）
 
 ```bash
-ductile explore 管线.pipeline "要验证的能力"     # 出题→沙箱探针→确定性裁判
-ductile explore --report <报告id>                 # 回看冻结的探索报告
+ductile explore 管线.pipeline "要验证的能力"    # 出题→沙箱跑→确定性裁判
+ductile explore --report <报告id>              # 回看冻结报告
 ```
 
-发现的问题自动固化成 incidents（结构化问题单），修复后关闭，引擎记录全过程。
+发现的问题固化成结构化问题单（incidents），修复后关闭。
 
-### 第 8 级：认知回传 —— canary / incident / l4
+### 认知回传（canary / incident / l4）
 
-- `ductile canary`：把"已知好输入"存档，回归时先跑金丝雀，绿了再跑真的
-- `ductile incident`：问题单生命周期（open → close），矛盾期间自动禁播金丝雀
-- `ductile l4`：端到端 review 记录（谁改的、为什么、结果如何，全部留痕）
+- `canary`：归档"已知好输入"，回归时先跑金丝雀判"是上游投毒还是本地问题"
+- `incident`：问题单生命周期；open 期间自动禁止归档金丝雀（矛盾态保护）
+- `l4`：端到端复核记录，攒够人工标签后从"只记录"升格"会拦截"
+- `archive`：数据库快照（保留 10 份）——危险操作前先拍一份
 
-这一级是"引擎记住自己的经验"：跑过的坑不用再踩第二遍。
+### 运行时热补丁（patch）
+
+不改源文件临时禁用/调整某实现：`ductile patch research search web enabled false`，`patch clear` 一键还原。每条补丁记录出处（人手敲 / 哪个模型开的）。
+
+## 与其他产品的对比
+
+同一任务（非结构化文本 → 结构化字段）在五个框架下的形态，**可跑对照在 [`benches/competitors/`](benches/competitors/)**：
+
+```bash
+python benches/competitors/run_compare.py          # 四家离线草图 + 对比矩阵
+ductile run examples/scripts/unstructured-extract.pipeline   # 同场景 ductile 版
+```
+
+| | LangGraph | AutoGen | CrewAI | Prefect/Airflow | **Ductile** |
+|---|---|---|---|---|---|
+| 范式 | 图状态机 + ReAct | 多 agent 会话 | 角色团队 | 批处理 DAG | 声明式多路径 |
+| 失败换路 | 手写节点逻辑 | 对话轮里涌现 | role 内 try | 手写重试块 | **`.plan(主, 备)` 引擎内置** |
+| 质量门 | 条件边手写 | reviewer agent 商量 | task 回调 | 无 | **judge proc + `.when` 结构化字段路由** |
+| AI 输出安全 | 应用层自理 | 应用层自理 | 应用层自理 | 不涉及 | **`.trust` 引擎闸：上游文本进 shell 必须点名** |
+| 脚本接入 | tool 封装代码 | tool 封装代码 | tool 封装代码 | task 封装代码 | **契约头注释即接口，零封装** |
+| 执行历史 | 框架各表 | 框架各表 | 框架各表 | 元数据库 | **SQLite 单库，历史直接驱动路径选择** |
+| 问题追踪 | 无内建 | 无内建 | 无内建 | 日志层 | **incident/canary/l4 认知层内建** |
+
+**公平性说明**（怕误导，写清楚）：
+
+- 对照脚本是无依赖**离线草图**（stub 数据，毫秒级），演示的是各家的**结构形态**，不是各家真实框架的性能——别拿 latency 数字当横评
+- 上游框架的能力远不止此表（LangGraph 的 checkpoint、Prefect 的调度生态都是 Ductile 没有的）；这张表只回答"**失败换路 + 质量门 + 脚本契约**这三件事在各家手里长什么样"
+- Ductile 的取舍：不做对话编排、不做定时调度生态——把"多路径声明、裁判分离、注入安全"做成引擎语义而非应用层惯例
 
 ## 接入你自己的工具
 
