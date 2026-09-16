@@ -704,6 +704,12 @@ fn print_usage() {
     eprintln!("  script show <name>      Show contract card (LLM reads this, not the script)");
     eprintln!("  script call <name> \"k=v, k=v\"   One-off invoke (debug)");
     eprintln!("  script detach <name>    Unregister");
+    eprintln!();
+    eprintln!("Explore (v0.19 探索环):");
+    eprintln!(
+        "  explore <file> <topic> [--drs]    Curriculum 出题→沙箱探针→确定性裁判→incidents 固化"
+    );
+    eprintln!("  explore x <report-id> --report    只读检索冻结报告");
 }
 
 // ── run ──
