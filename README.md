@@ -118,6 +118,99 @@ Pipeline("fallback_demo", "第一步失败了自动换备用方案")
 
 先 `check` 后 `run` 是好习惯——错误在执行前就被拦下。
 
+## 逐步升级：从"能跑"到"好用"
+
+上面 5 分钟的内容只用了 Ductile 的一成功力。往下每一级都是**一个独立的功能**，
+你可以在任何一级停下来——够用就好；也可以一路往上，把整条工作流变成
+"一个文件 + 一条命令"。
+
+### 第 1 级：条件执行 —— `.when`
+
+某步只在条件满足时才跑（条件是引擎读上游的**结构化字段**，不是字符串比较）：
+
+```
+  .proc("audit")
+    .plan(a -> run("./check.sh").when(@gen.ok == 1))
+```
+
+`@gen.ok` 是 gen 步骤输出的字段。条件不满足 → 这一步自动跳过，下游继续。
+
+### 第 2 级：显式依赖与信任 —— `.needs` / `.trust`
+
+- `.needs(@upstream)`：声明"这一步要参考上游的产出"——喂给 AI 步骤当上下文
+- `.trust(@upstream)`：声明"我允许上游产出进入我的 shell 命令"——**安全闸**，
+  没点名的引用会被引擎在检查期直接拦下（带行号报错），防注入
+
+```
+  .proc("gen", llm(prompt="...", schema="sid int, pass bool"))
+  .proc("build")
+    .plan(r -> run("make @gen.target")).trust(@gen)
+    .needs(@gen)
+```
+
+### 第 3 级：AI 步骤 + 结构化输出 —— `llm` + `schema`
+
+AI 参与管线的关键不是"能调 AI"，是**输出必须结构化**。`schema` 强制 AI
+吐 `字段 类型` 对，引擎解析成结构化结果，下游用 `@步骤.字段` 引用——
+格式崩了引擎不会放行，不会污染下游：
+
+```
+  .proc("summarize", llm(prompt="把 {topic} 摘要", schema="title str, score int"))
+  .proc("gate")
+    .plan(g -> run("echo pass").when(@summarize.score >= 80))
+```
+
+### 第 4 级：多模型档位 —— 一个 proc 多个 impl
+
+同一个步骤写多个实现（本地小模型 / 云端大模型 / 纯脚本兜底），引擎按
+**历史成功率**自动选——谁老成功用谁，失败自动降档换下一个：
+
+```
+  .proc("gen")
+    .plan(
+      local  -> llm(prompt="...", agent="qwen_local"),
+      cloud  -> llm(prompt="...", agent="glm_cloud"),
+      stub   -> run("./fallback.sh")
+    )
+```
+
+跑得越久，选择越准（执行历史全部落库）。
+
+### 第 5 级：脚本即 API —— `script attach`
+
+把任意语言的脚本注册成带**契约**的步骤：脚本头部声明输入输出，引擎负责
+校验和调用。你的脚本不用改一行重试/降级逻辑——那是引擎的事：
+
+```bash
+ductile script attach my_tool.py
+ductile script show my_tool     # 看契约卡（AI 读这个，不读你的源码）
+ductile script doctor           # 检查所有契约的文件还在不在
+```
+
+### 第 6 级：拓扑复用 —— `hyper`
+
+多条管线长得很像？把公共结构提炼成 `.hyper` 拓扑文件，`ductile hyper build`
+一条命令生成新管线。写新管线前 `ductile hyper similar` 先查有没有现成拓扑可抄。
+
+### 第 7 级：自动探索 —— `explore`
+
+不知道某条管线在陌生环境里行不行？让引擎自己出题、自己探、自己判：
+
+```bash
+ductile explore 管线.pipeline "要验证的能力"     # 出题→沙箱探针→确定性裁判
+ductile explore --report <报告id>                 # 回看冻结的探索报告
+```
+
+发现的问题自动固化成 incidents（结构化问题单），修复后关闭，引擎记录全过程。
+
+### 第 8 级：认知回传 —— canary / incident / l4
+
+- `ductile canary`：把"已知好输入"存档，回归时先跑金丝雀，绿了再跑真的
+- `ductile incident`：问题单生命周期（open → close），矛盾期间自动禁播金丝雀
+- `ductile l4`：端到端 review 记录（谁改的、为什么、结果如何，全部留痕）
+
+这一级是"引擎记住自己的经验"：跑过的坑不用再踩第二遍。
+
 ## 接入你自己的工具
 
 Ductile 不要求你重写工具。任何语言的脚本，只要在输出里多打印几行"标准格式"（我们叫协议），就能被当作一个步骤编排进来：
@@ -165,7 +258,7 @@ print("##DSL_END")
 - [SPEC.md](SPEC.md) —— 完整说明书（也可直接喂给 AI 助手让它帮你写管线）
 - [examples/](examples/) —— 官方示例，每个都能直接跑
 - [docs/](docs/) —— 各专题文档
-- 测试：`cargo test --lib`（471 项全过）
+- 测试：`cargo test --lib`（476 项全过）
 
 ## License
 

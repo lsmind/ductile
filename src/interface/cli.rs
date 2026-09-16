@@ -744,7 +744,7 @@ fn print_usage() {
     eprintln!(
         "  explore <file> <topic> [--drs]    Curriculum 出题→沙箱探针→确定性裁判→incidents 固化"
     );
-    eprintln!("  explore x <report-id> --report    只读检索冻结报告");
+    eprintln!("  explore --report <id>       只读检索冻结报告");
     eprintln!();
     eprintln!("Maintenance (v0.19 审计五件):");
     eprintln!("  archive                 Snapshot db (wal_checkpoint + copy, keep=10)");
