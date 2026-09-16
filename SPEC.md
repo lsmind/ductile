@@ -506,19 +506,20 @@ src/
 ## 12b. TUI 操作台（v0.20）
 
 ```bash
-ductile tui [path.pipeline]   # 可选路径 = BLUEPRINT/ISOMORPH 视图的目标
+ductile tui               # 全交互——库选择器选管线
+ductile tui <path>        # 可选：直连某管线预载（未注册文件也能看蓝图）
 ```
 
-四视图（`1-4`/`h l Tab` 切换，`j k` 光标，`r` 刷新，`q` 退出）：
+四视图（`1-4`/`h l Tab` 切换，`j k` 光标，`Enter` 选中，`/` 过滤，`r` 刷新，`q` 退出）：
 
 | 视图 | 内容 | 数据源 |
 |---|---|---|
 | STATUS | 库计数（pipelines/procs/runs/scripts）+ l4 阶段/一致率 + incidents open + degraded 列表 + canary 通过率 | `db_stats` + `L1_feedback` 只读查询 |
 | DATA | runs 浏览器（proc/impl/status/延迟/token/时间）+ incidents 表 | `recent_runs_limit` + `list_incidents_conn` |
-| BLUEPRINT | DSL→DAG 分层节点图：deliver 金框◆，四类边 `─→`needs `⋱when` `⚑trust` `⤳each`，层内等距布局 + 边清单 | `parse_pipeline_file` 静态解析 |
-| ISOMORPH | similar 报告 + structure_key 对照（**惰性加载**——进视图才扫全库注册表） | `similar_json` + `struct_sig_from_pipeline` |
+| BLUEPRINT | **左侧库侧栏**（db 注册表全量 + 死路径 ✗ 标记 + `/` 过滤 + Enter 选中）+ 右侧 DSL→DAG 分层节点图：deliver 金框◆，四类边 `─→`needs `⋱when` `⚑trust` `⤳each` | `registered_graph_files` + `parse_pipeline_file` |
+| ISOMORPH | 同侧栏选中目标 + similar 报告 + structure_key 对照（**惰性加载**——选中才扫全库注册表） | `similar_json` + `struct_sig_from_pipeline` |
 
-纯读侧：TUI 不写库不跑管线。similar 的 stderr dead-entry 噪声被惰性加载隔离（不进 ISOMORPH 不触发扫描）。
+**db 单源**：蓝图/同构的目标一律从 db 注册表选择（v0.19.1 立的原则——管线库全在库里，不在文件系统里翻）。CLI 路径参数只是预载捷径。纯读侧：TUI 不写库不跑管线。
 
 ## 13. LLM 管线配方（实战沉淀）
 
