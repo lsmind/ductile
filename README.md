@@ -201,6 +201,8 @@ ductile script doctor            # 检查契约文件是否还在
 
 公共结构提炼成 `.hyper` 文件（vertex + hedge），一条命令生成新管线；写新图前 `hyper similar` 查重。
 
+`similar` 的语料是 db 注册表（`ductile import` 收的 `.pipeline`/`.hyper` 都入册）加上显式目录参数——import 过的管线无论放在哪个目录都能被查到；结构键每次从文件现算，注册表里的死路径会跳过并标注。
+
 ### 自动探索（explore）
 
 ```bash

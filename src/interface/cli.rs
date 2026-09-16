@@ -1113,7 +1113,10 @@ fn cmd_hyper(args: &[String]) -> Result<i32, String> {
             };
             println!("Query: {} ({})", qname, query_path);
             println!("Structure key: {}", qsig.structure_key());
-            println!("Scan: {:?}", scan);
+            println!(
+                "Scan: {:?} (+ db registry: pipelines.source_file ∪ hyper_graphs)",
+                scan
+            );
             println!("(Match key = role+edges+gates; tags are soft rank only)\n");
             let hits = hyper::find_similar(&qsig, &qname, &scan)?;
             let mut shown = 0;
@@ -1441,7 +1444,11 @@ fn cmd_import(paths: &[String]) -> Result<i32, String> {
             if let Ok(entries) = std::fs::read_dir(path) {
                 for e in entries.filter_map(|e| e.ok()) {
                     let fp = e.path();
-                    if fp.extension().map(|e| e == "pipeline").unwrap_or(false) {
+                    let ext_ok = fp
+                        .extension()
+                        .map(|e| e == "pipeline" || e == "hyper")
+                        .unwrap_or(false);
+                    if ext_ok {
                         all_files.push(fp.to_string_lossy().to_string());
                     }
                 }
@@ -1451,14 +1458,55 @@ fn cmd_import(paths: &[String]) -> Result<i32, String> {
         }
     }
     if all_files.is_empty() {
-        println!("No .pipeline files found.");
+        println!("No .pipeline/.hyper files found.");
         return Ok(0);
     }
+    // v0.19.1：目录导入模式（无 .pipeline 逐个 import 时）顺带注册
+    // hyper_graphs——similar 语料统一进 db。单文件 import 仍走
+    // import_pipeline_file（run/check 已自动 import pipeline 语义不变）。
+    let dir_mode = paths.iter().any(|p| std::path::Path::new(p).is_dir());
+    let conn = if dir_mode { Some(db::open()) } else { None };
     let mut ok = 0;
     let mut errs = 0;
     for f in &all_files {
+        if f.ends_with(".hyper") {
+            match &conn {
+                Some(c) => match db::import_graph_file(c, f) {
+                    Ok((name, _kind)) => {
+                        println!("  ✓ {} ({})", name, f);
+                        ok += 1;
+                    }
+                    Err(e) => {
+                        println!("  ✗ {} ({})", e, f);
+                        errs += 1;
+                    }
+                },
+                None => {
+                    // 单文件模式传 .hyper：也注册（命令语义就是"收进库"）
+                    let c = db::open();
+                    match db::import_graph_file(&c, f) {
+                        Ok((name, _kind)) => {
+                            println!("  ✓ {} ({})", name, f);
+                            ok += 1;
+                        }
+                        Err(e) => {
+                            println!("  ✗ {} ({})", e, f);
+                            errs += 1;
+                        }
+                    }
+                }
+            }
+            continue;
+        }
         match db::import_pipeline_file(f) {
             Ok(name) => {
+                // pipeline 也注册进 hyper_graphs（similar 语料）
+                if let Some(c) = &conn {
+                    let _ = db::import_graph_file(c, f);
+                } else {
+                    let c = db::open();
+                    let _ = db::import_graph_file(&c, f);
+                }
                 println!("  ✓ {} ({})", name, f);
                 ok += 1;
             }
@@ -1468,7 +1516,7 @@ fn cmd_import(paths: &[String]) -> Result<i32, String> {
             }
         }
     }
-    println!("\nImported {} pipelines ({} errors)", ok, errs);
+    println!("\nImported {} graphs ({} errors)", ok, errs);
     Ok(0)
 }
 

@@ -345,6 +345,60 @@ pub(crate) fn find_matching_paren(s: &str) -> Option<usize> {
     None
 }
 
+/// v0.19.1 行尾 proc 级修饰符切分：`.proc("use", run(...)).trust(@fetch)`
+/// 的 `.trust(...)` 挂在 `.proc(` 自身闭括号之后。此前候选提取用
+/// `strip_suffix(')')` 剥掉的是 `.trust` 的闭括号，候选尾部残留
+/// `.trust(@fetch` ——内联糖要么不激活要么红。修法：引号外扫描定位
+/// `.proc(` 自身的配平闭括号（与 join 判据同语义），行内其后文本 =
+/// proc 级修饰符尾巴，逐个剥出喂给既有独立行处理器（.trust/.when/
+/// .deliver/.needs/.pick/.desc/.constraint/.foreach 同构处理）。
+/// 返回 (head 到 .proc 闭括号为止, 尾部修饰符原文)。
+pub(crate) fn split_proc_tail_modifiers(line: &str) -> (String, String) {
+    let proc_open = match line.find(".proc(") {
+        Some(p) => p + ".proc(".len(),
+        None => match line.find(".proc (") {
+            Some(p) => p + ".proc (".len(),
+            None => return (line.to_string(), String::new()),
+        },
+    };
+    // 引号外配平扫描（byte 索引）。多字节 UTF-8 续字节不会误匹配
+    // '"'(0x22)/'('(0x28)/')'(0x29)，安全。不处理转义引号——.proc 名
+    // 与动词实参里的转义形态由 join 阶段保证配平，此处只需找到
+    // `.proc(` 自身的闭括号。
+    let bytes = line.as_bytes();
+    let mut in_str = false;
+    // depth 从 1 起：`.proc(` 自身算一个已开的括号——从 0 起会配平到
+    // 第一个动词调用的闭括号（`.proc("gen", run("echo G"))` 错切在
+    // `run(...)` 的 `)` 上，tail 残留 `")"` 被当未知修饰符报红）。
+    let mut depth = 1i32;
+    let mut b = proc_open;
+    let mut close: Option<usize> = None;
+    while b < bytes.len() {
+        if bytes[b] == b'"' {
+            in_str = !in_str;
+        } else if !in_str {
+            if bytes[b] == b'(' {
+                depth += 1;
+            } else if bytes[b] == b')' {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(b);
+                    break;
+                }
+            }
+        }
+        b += 1;
+    }
+    match close {
+        Some(c) => {
+            let head = &line[..c + 1]; // 含 .proc( 自身闭括号
+            let tail = line[c + 1..].trim().to_string();
+            (head.to_string(), tail)
+        }
+        None => (line.to_string(), String::new()),
+    }
+}
+
 /// v0.18.14 跨行动词调用的配平判据：引号外的括号深度（引号内不计——
 /// prompt 文本常含括号）。in_string 状态遇转义跳两字符。
 pub(crate) fn paren_depth_outside_quotes(s: &str) -> i32 {
@@ -426,6 +480,63 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
     let line: &str = &joined_line;
     let _line_num = idx + 1;
 
+    // v0.19.1 行尾 proc 级修饰符：`.proc("use", run(...)).trust(@fetch)`。
+    // split 出 head（到 .proc 自身闭括号）+ tail（其后修饰符串）。tail 分两类：
+    //  - impl 级（.tags/.retry/.ensure/.cost/.disabled/.stub）：移进 .proc(...)
+    //    括号内重建（`.proc(x, run(...).tags(#g))` 是既有合法形态，语义相同），
+    //    走内联糖的 extract_cost_and_modifiers——selftest.pipeline 的
+    //    `run(...)).tags(#gate)` 就是这类。
+    //  - proc 级（.trust/.when/.deliver/.needs/.pick/.constraint/.foreach/
+    //    .desc/.plan）：拆段进 proc 体循环前处理——与独立行同一条分支路径，
+    //    不做第二套解析语义（防两套闸：内联认/独立行不认）。未知段
+    //    fail-closed（静默丢 = 修饰符静默失效，历史教训：.when 独立行
+    //    就是被 Unknown-line 分支吞掉的）。
+    let (head_line, tail_mods) = split_proc_tail_modifiers(&joined_line);
+    let mut tail_segments: Vec<String> = Vec::new();
+    if !tail_mods.is_empty() {
+        let mut rest = tail_mods.as_str();
+        loop {
+            let rest_trim = rest.trim_start();
+            if rest_trim.is_empty() {
+                break;
+            }
+            match find_matching_paren(rest_trim) {
+                Some(close) => {
+                    tail_segments.push(rest_trim[..=close].to_string());
+                    rest = &rest_trim[close + 1..];
+                }
+                None => {
+                    // 无括号修饰符（.disabled/.stub）或残段：整段收，
+                    // 分流逻辑在下面 partition。
+                    tail_segments.push(rest_trim.to_string());
+                    break;
+                }
+            }
+        }
+    }
+    const IMPL_LEVEL: [&str; 6] = [
+        ".tags(",
+        ".retry(",
+        ".ensure(",
+        ".cost(",
+        ".disabled",
+        ".stub",
+    ];
+    let (impl_mods, proc_mods): (Vec<String>, Vec<String>) = tail_segments
+        .into_iter()
+        .partition(|s| IMPL_LEVEL.iter().any(|m| s.trim_start().starts_with(m)));
+    let cand_line = if impl_mods.is_empty() {
+        head_line.clone()
+    } else {
+        let mut inner = head_line.clone();
+        inner.pop(); // 剥 .proc 自身闭括号
+        for m in &impl_mods {
+            inner.push_str(m);
+        }
+        inner.push(')');
+        inner
+    };
+
     // .proc("name") — just the name, no level/scope
     let name = extract_quoted(line).unwrap_or_default();
 
@@ -438,9 +549,11 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
     if find_arrow(line).is_none() {
         // 找带引号的完整形态（"name"），跳过闭引号后再剥「, 」——
         // 只跳 name 长度会停在闭引号上，候选头部残留 `", run(...)`。
+        // v0.19.1：候选源用 cand_line（head + impl 级尾巴回填）——旧行为
+        // strip_suffix(')') 在行尾带 .trust(...) 等修饰符时会剥错括号。
         let quoted_name = format!("\"{}\"", name);
-        if let Some(p) = line.find(&quoted_name) {
-            let mut c = line[p + quoted_name.len()..]
+        if let Some(p) = cand_line.find(&quoted_name) {
+            let mut c = cand_line[p + quoted_name.len()..]
                 .trim_start()
                 .trim_start_matches(',')
                 .trim_start();
@@ -470,8 +583,284 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
     let mut description = String::new();
     let mut proc_when: Option<String> = None;
     let mut contract: Option<crate::core::ast::Contract> = None;
+    // 行尾 .constraint(...) 段的收集器（tail 循环在 contract 声明前运行不了
+    // ——借用序：先攒 Vec，循环后并入 contract）
+    let mut tail_constraint_outputs: Vec<String> = Vec::new();
+    let mut tail_constraint_invariants: Vec<String> = Vec::new();
 
     // Parse proc body: .plan(...) .pick .check(...) .foreach(...) .deliver(...) .desc(...)
+    // v0.19.1：行尾修饰符段先于文件行处理（同一条分支路径，无第二语义）。
+    // 段处理不推进 idx；错误定位用 .proc 起始行。
+    for seg in &proc_mods {
+        let raw: &str = seg;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if trimmed.starts_with(".desc(") || trimmed.starts_with(".desc (") {
+            description = extract_quoted(trimmed).unwrap_or_default();
+            continue;
+        }
+        // .plan(...) 行尾形态：`.proc("load").plan(p -> read(...))` ——
+        // 既有单行链式形态（check_catches_missing_fallback 等测试在用）。
+        // 复用 parse_plan_block 需要行数组；此处直接抽 inner 走
+        // parse_plan_inner（若存在）——否则简化为手工解析 verbs。
+        if trimmed.starts_with(".plan(") || trimmed.starts_with(".plan (") {
+            let after = &trimmed[6..];
+            let close = find_matching_paren(after).ok_or_else(|| ParseError {
+                line: start_idx + 1,
+                col: 1,
+                msg: "unbalanced parens in .plan(...)".into(),
+                line_text: lines[start_idx].to_string(),
+            })?;
+            let inner = &after[1..close];
+            // 单 impl 形态 `p -> verb(...)`：剥掉 impl 名与箭头；无箭头（裸
+            // verb 调用）原样保留。多 impl 逗号切分走 split_impl_entries
+            //（与 .plan 块同语义），每条独立剥修饰符。
+            for entry in split_impl_entries(inner) {
+                let entry = entry.trim();
+                if entry.is_empty() {
+                    continue;
+                }
+                let body = match find_arrow(entry) {
+                    Some(pos) => entry[pos..]
+                        .trim_start_matches('-')
+                        .trim_start_matches('>')
+                        .trim(),
+                    None => entry,
+                };
+                let (body_text, _cost, retry, ensure, when, enabled, stub, tags, desc) =
+                    extract_cost_and_modifiers(body, &name);
+                let func = crate::textargs::detect_func(&body_text);
+                let mut tags = tags;
+                if tags.is_empty() && !func.is_empty() {
+                    tags.insert(func.clone());
+                }
+                let mut refs = extract_refs(&body_text);
+                if let Some(w) = &when {
+                    for r in extract_refs(w) {
+                        if !refs.contains(&r) {
+                            refs.push(r);
+                        }
+                    }
+                }
+                let imp = Impl {
+                    name: func,
+                    tags,
+                    cost: _cost,
+                    enabled,
+                    when: when.or(proc_when.clone()),
+                    refs,
+                    body_text,
+                    stub,
+                    retry,
+                    ensure,
+                    description: desc,
+                };
+                plan.push(imp);
+            }
+            continue;
+        }
+        if trimmed.starts_with(".pick") {
+            if let Some(by_start) = trimmed.find("by=") {
+                let after = &trimmed[by_start + 3..];
+                let by_val: String = after
+                    .chars()
+                    .skip_while(|c| *c == '"' || *c == ' ')
+                    .take_while(|c| *c != '"' && *c != ')' && *c != ',')
+                    .collect::<String>();
+                if !by_val.is_empty() {
+                    pick_by = by_val;
+                }
+            }
+            continue;
+        }
+        if trimmed.starts_with(".constraint(") || trimmed.starts_with(".constraint (") {
+            let after = trimmed
+                .find(".constraint(")
+                .map(|p| &trimmed[p + ".constraint(".len()..])
+                .unwrap_or_else(|| {
+                    let p = trimmed.find(".constraint (").unwrap();
+                    &trimmed[p + ".constraint (".len()..]
+                });
+            let close = find_matching_paren(&format!("({}", after))
+                .map(|i| i.saturating_sub(1))
+                .ok_or_else(|| ParseError {
+                    line: start_idx + 1,
+                    col: 1,
+                    msg: "unbalanced parens in .constraint(...)".into(),
+                    line_text: lines[start_idx].to_string(),
+                })?;
+            let inner = &after[..close];
+            for (k, v) in split_kv_args(inner) {
+                match k.as_str() {
+                    "outputs" => {
+                        for f in v.split(',') {
+                            let f = f.trim();
+                            if !f.is_empty() {
+                                // 局部 borrow 冲突：constraint_fields 在下方声明前
+                                // 不可用——此处直接收集到 Vec 再并（见下方声明序）。
+                                tail_constraint_outputs.push(f.to_string());
+                            }
+                        }
+                    }
+                    "invariants" => {
+                        let v = v.trim();
+                        if !v.is_empty() {
+                            tail_constraint_invariants.push(v.to_string());
+                        }
+                    }
+                    _ => {
+                        return Err(ParseError {
+                            line: start_idx + 1,
+                            col: 1,
+                            msg: format!(
+                                "unknown .constraint() key {:?} — expected outputs= or invariants=",
+                                k
+                            ),
+                            line_text: lines[start_idx].to_string(),
+                        });
+                    }
+                }
+            }
+            continue;
+        }
+        if trimmed.starts_with(".foreach(") || trimmed.starts_with(".foreach (") {
+            let (src, var) = parse_foreach_line(trimmed)?;
+            foreach_src = Some(src);
+            foreach_var = var;
+            continue;
+        }
+        if trimmed.starts_with(".needs(") || trimmed.starts_with(".needs (") {
+            let after = &trimmed[6..];
+            let close = find_matching_paren(after).ok_or_else(|| ParseError {
+                line: start_idx + 1,
+                col: 1,
+                msg: "unbalanced parens in .needs(...)".into(),
+                line_text: lines[start_idx].to_string(),
+            })?;
+            let inner = &after[1..close];
+            if inner.trim().is_empty() {
+                return Err(ParseError {
+                    line: start_idx + 1,
+                    col: 1,
+                    msg: ".needs() requires at least one @ref".into(),
+                    line_text: lines[start_idx].to_string(),
+                });
+            }
+            for part in inner.split(',') {
+                let raw_ref = part.trim();
+                if !raw_ref.starts_with('@') || raw_ref.len() < 2 {
+                    return Err(ParseError {
+                        line: start_idx + 1,
+                        col: 1,
+                        msg: ".needs() ref must be @name (bare words not allowed)".into(),
+                        line_text: lines[start_idx].to_string(),
+                    });
+                }
+                let r = raw_ref[1..].to_string();
+                if !needs.contains(&r) {
+                    needs.push(r);
+                }
+            }
+            continue;
+        }
+        if trimmed.starts_with(".trust(") || trimmed.starts_with(".trust (") {
+            let after = &trimmed[6..];
+            let close = find_matching_paren(after).ok_or_else(|| ParseError {
+                line: start_idx + 1,
+                col: 1,
+                msg: "unbalanced parens in .trust(...)".into(),
+                line_text: lines[start_idx].to_string(),
+            })?;
+            let inner = &after[1..close];
+            if inner.trim().is_empty() {
+                return Err(ParseError {
+                    line: start_idx + 1,
+                    col: 1,
+                    msg: ".trust() requires at least one @ref".into(),
+                    line_text: lines[start_idx].to_string(),
+                });
+            }
+            for part in inner.split(',') {
+                let raw_ref = part.trim();
+                if !raw_ref.starts_with('@') || raw_ref.len() < 2 {
+                    return Err(ParseError {
+                        line: start_idx + 1,
+                        col: 1,
+                        msg: ".trust() ref must be @name (bare words not allowed)".into(),
+                        line_text: lines[start_idx].to_string(),
+                    });
+                }
+                let r = raw_ref[1..].to_string();
+                if !trust_refs.contains(&r) {
+                    trust_refs.push(r);
+                }
+            }
+            continue;
+        }
+        if trimmed.starts_with(".when(") {
+            let after = &trimmed[5..];
+            let close = find_matching_paren(after).ok_or_else(|| ParseError {
+                line: start_idx + 1,
+                col: 1,
+                msg: "unbalanced parens in block .when(...)".into(),
+                line_text: lines[start_idx].to_string(),
+            })?;
+            let inner = after[1..close].trim().to_string();
+            if inner.is_empty() {
+                return Err(ParseError {
+                    line: start_idx + 1,
+                    col: 1,
+                    msg: "block .when() requires a condition".into(),
+                    line_text: lines[start_idx].to_string(),
+                });
+            }
+            proc_when = Some(inner);
+            continue;
+        }
+        if trimmed.starts_with(".deliver(") || trimmed.starts_with(".deliver (") {
+            is_deliver = true;
+            let inner = trimmed
+                .trim_start_matches(".deliver(")
+                .trim_start_matches(".deliver (")
+                .trim_end_matches(')')
+                .trim();
+            for r in extract_refs(inner) {
+                if !deliver_refs.contains(&r) {
+                    deliver_refs.push(r);
+                }
+            }
+            continue;
+        }
+        // 未知段：fail-closed，静默丢 = 修饰符静默失效（历史教训：
+        // .when 独立行就是被 Unknown-line 分支吞掉的）。
+        return Err(ParseError {
+            line: start_idx + 1,
+            col: 1,
+            msg: format!(
+                "unknown proc-level modifier after .proc(...): {:?} — expected .trust/.when/\
+                 .deliver/.needs/.pick/.desc/.constraint/.foreach",
+                trimmed
+            ),
+            line_text: lines[start_idx].to_string(),
+        });
+    }
+    if !tail_constraint_outputs.is_empty() || !tail_constraint_invariants.is_empty() {
+        match contract.as_mut() {
+            Some(existing) => {
+                existing.outputs.extend(tail_constraint_outputs);
+                existing.invariants.extend(tail_constraint_invariants);
+            }
+            None => {
+                contract = Some(crate::core::ast::Contract {
+                    outputs: tail_constraint_outputs,
+                    invariants: tail_constraint_invariants,
+                });
+            }
+        }
+    }
+
     while idx < lines.len() {
         let raw = lines[idx];
         let trimmed = raw.trim();
@@ -1632,6 +2021,37 @@ mod tests {
             .unwrap_err()
             .msg
             .contains("must be @name"));
+        // 5) v0.19.1 内联形态：`.proc("rep", run("echo @gen")).trust(@gen)`
+        //    旧行为：strip_suffix(')') 剥错括号 → ParseError（纸面语法）。
+        //    新行为：.trust 段从 .proc 行尾剥出，与独立行同语义。
+        let inline = "Pipeline(\"t\")\n.proc(\"gen\", run(\"echo seed\"))\n.proc(\"rep\", run(\"echo @gen\")).trust(@gen)\n";
+        let pl = parse_pipeline(inline).unwrap();
+        assert_eq!(
+            pl.procs[1].trust_refs,
+            vec!["gen".to_string()],
+            "inline .trust must populate trust_refs"
+        );
+        // 6) 内联 .trust 缺席 → 静态闸照拦（内联糖不绕闸）
+        let inline_bad = "Pipeline(\"t\")\n.proc(\"gen\", run(\"echo seed\"))\n.proc(\"rep\", run(\"echo @gen\"))\n";
+        let err = parse_pipeline(inline_bad).unwrap_err();
+        assert!(
+            err.msg.contains("requires explicit trust"),
+            "inline sugar must not bypass trust gate, got: {}",
+            err.msg
+        );
+        // 7) 内联 .deliver 尾巴（既有形态不回归）
+        let inline_deliver =
+            "Pipeline(\"t\")\n.proc(\"a\", run(\"echo A\"))\n.proc(\"d\").deliver(@a)\n";
+        let pl = parse_pipeline(inline_deliver).unwrap();
+        let d = pl.procs.iter().find(|p| p.name == "d").unwrap();
+        assert!(d.deliver);
+        assert_eq!(d.deliver_refs, vec!["a".to_string()]);
+        // 8) 行尾未知修饰符 → fail-closed（防静默丢）
+        let junk = "Pipeline(\"t\")\n.proc(\"a\", run(\"echo A\")).bogus(@x)\n";
+        assert!(parse_pipeline(junk)
+            .unwrap_err()
+            .msg
+            .contains("unknown proc-level modifier"));
     }
 
     #[test]

@@ -7,7 +7,7 @@ build-backend = "maturin"
 # maturin build --release -o dist + twine (token: ~/.config/ductile/pypi-token.sh).
 [project]
 name = "ductile"
-version = "0.19.0"
+version = "0.19.1"
 description = "A declarative pipeline DSL with e-graph multi-path selection"
 license = "MIT"
 requires-python = ">=3.8"

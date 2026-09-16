@@ -1781,14 +1781,32 @@ pub fn find_similar(
     _query_name: &str,
     roots: &[String],
 ) -> Result<Vec<SimilarHit>, String> {
-    let mut hits = Vec::new();
-    let mut files = Vec::new();
+    // v0.19.1 db 单源：语料 = db 注册表（pipelines.source_file +
+    // hyper_graphs.path）∪ 显式目录扫描（追加，不替代）。死路径跳过
+    // 并 stderr 标注（doctor 的 DEAD 语义：注册表说有、磁盘说没有 =
+    // 要修的状态，不炸整条 similar）。键值一律从文件现算——文件改了
+    // 键自动跟，无"库里的键过期"态。
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(conn) = crate::db::open_try() {
+        for (_name, path) in crate::db::registered_graph_files(&conn) {
+            let p = std::path::PathBuf::from(&path);
+            if p.is_file() {
+                files.push(p);
+            } else {
+                eprintln!(
+                    "[similar] dead registry entry: {} (re-import or `ductile script doctor`)",
+                    path
+                );
+            }
+        }
+    }
     for root in roots {
         collect_graph_files(Path::new(root), &mut files)?;
     }
     files.sort();
     files.dedup();
 
+    let mut hits = Vec::new();
     for path in files {
         let path_str = path.to_string_lossy().to_string();
         if path.extension().and_then(|e| e.to_str()) == Some("hyper") {

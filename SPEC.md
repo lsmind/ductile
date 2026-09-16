@@ -1,4 +1,4 @@
-# Ductile DSL — 规格文档（v0.19）
+# Ductile DSL — 规格文档（v0.19.1）
 
 > 面向 AI agent / LLM 调用者与人类维护者。读完应能独立完成安装、管线编写、执行、调试、调优。
 > 本文只描述**当前状态**；历史沿革见 git log，不在此堆叠。
@@ -130,12 +130,13 @@ Pipeline("name", "desc", cwd="...", env=["K=V", ...])
 
 ### 1.6 @ref 进 shell 的铁律（.trust 闸）
 
-`run()`/`sh()` 命令体里引用 `@proc` / `@proc.field`，必须在该 proc 声明 `.trust(@proc)`：
+`run()`/`sh()` 命令体里引用 `@proc` / `@proc.field`，必须在该 proc 声明 `.trust(@proc)`（独立行或 `.proc(...)` 行尾内联均可，语义相同）：
 
 - **parser 静态闸**：check 期扫描 run/sh 体，命中真实 proc 名且未点名 → ParseError（带行号）
 - **executor 运行时兜底**：resolve 后残留的 `@name`（动态拼接形态）同判
 - 豁免：`@self`、`@localhost`（主机名/邮箱形态）
 - 合法的结构化消费通道（不走 shell）：`.when(@proc.field OP v)`、契约 invariants、`write(content=@ref)` 落盘后 `cat`
+- 行尾未知修饰符（`.proc(...).bogus(...)`）→ ParseError fail-closed，不静默丢
 
 > LLM 输出含单引号会炸 shell 引号结构——这是物理闸存在的根因，不是风格建议。
 
@@ -205,6 +206,8 @@ HyperGraph("name")
 
 `hyper check` 语义：stage 名**精确等于** proc 名；chain 边要求下游 body 含 `@ref`；gate 要求 `.when(@judge.…)`.
 写图前 `hyper similar` 查重，写节点前 `hyper nodes`。
+
+`hyper similar` 语料（v0.19.1 起）= **db 注册表**（`pipelines.source_file` ∪ `hyper_graphs` 表，`ductile import` 收 `.hyper`/`.pipeline` 都入册）∪ 显式目录参数（追加不替代）。结构键一律从文件现算——文件改了键自动跟，注册表死路径跳过并 stderr 标注。
 
 ### 2.4 探索环（explore）
 

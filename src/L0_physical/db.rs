@@ -390,6 +390,13 @@ pub const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS pipelines (
             source      TEXT DEFAULT 'v26',
             imported_at TEXT DEFAULT '',
             UNIQUE(text)
+        );
+        CREATE TABLE IF NOT EXISTS hyper_graphs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL,
+            path        TEXT UNIQUE NOT NULL,
+            kind        TEXT NOT NULL DEFAULT 'hyper',
+            imported_at TEXT DEFAULT ''
         );";
 
 pub fn init_db() {
@@ -531,6 +538,71 @@ pub fn import_pipeline_conn(conn: &Connection, pl: &Pipeline, source_file: &str)
 pub fn import_pipeline(pl: &Pipeline, source_file: &str) {
     let conn = open();
     import_pipeline_conn(&conn, pl, source_file)
+}
+
+// ── hyper graph registry（v0.19.1：similar 语料统一进 db）──
+
+/// 注册 .hyper/.pipeline 图文件到 hyper_graphs 表（name 冲突按 path upsert）。
+/// 键值（structure_key 等）**不落库**——similar 时从文件现算，db 只当
+/// 注册表（文件改了键自动跟，不存在"库里的键过期"这一态）。
+pub fn import_graph_file(conn: &Connection, path: &str) -> Result<(String, &'static str), String> {
+    let (name, kind) = if path.ends_with(".hyper") {
+        let h = crate::hyper::parse_hyper_file(path).map_err(|e| e.to_string())?;
+        (h.name, "hyper")
+    } else if path.ends_with(".pipeline") {
+        let pl = crate::parser::parse_pipeline_file(path).map_err(|e| format!("{}", e))?;
+        (pl.name, "pipeline")
+    } else {
+        return Err(format!("{}: expected .hyper or .pipeline", path));
+    };
+    conn.execute(
+        "INSERT INTO hyper_graphs (name, path, kind, imported_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(path) DO UPDATE SET
+           name=excluded.name,
+           kind=excluded.kind,
+           imported_at=excluded.imported_at",
+        params![name, path, kind, now_ts()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok((name, kind))
+}
+
+/// similar 的 db 语料：全部已注册图（pipelines 表 source_file + hyper_graphs
+/// 表 path），去重、按路径排序。死路径**不剔除**——similar 调用方跳过并
+/// 标注（doctor 的 DEAD 语义一致：注册表说有、磁盘说没有 = 要修的状态）。
+pub fn registered_graph_files(conn: &Connection) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut stmt =
+        match conn.prepare("SELECT name, source_file FROM pipelines WHERE source_file != ''") {
+            Ok(s) => s,
+            Err(_) => return out,
+        };
+    if let Ok(rows) = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0).unwrap_or_default(),
+            row.get::<_, String>(1).unwrap_or_default(),
+        ))
+    }) {
+        for r in rows.flatten() {
+            out.push(r);
+        }
+    }
+    if let Ok(mut stmt) = conn.prepare("SELECT name, path FROM hyper_graphs") {
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0).unwrap_or_default(),
+                row.get::<_, String>(1).unwrap_or_default(),
+            ))
+        }) {
+            for r in rows.flatten() {
+                out.push(r);
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 pub fn import_pipeline_file(path: &str) -> Result<String, String> {
@@ -1469,6 +1541,69 @@ pub fn script_list() -> Vec<ScriptCard> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// v0.19.1 hyper_graphs 注册表：(1) DDL 建表 (2) import_graph_file 往返
+    /// (3) 同名不同路径共存（hyper build 的管线与母图同名——天然键是路径
+    /// 不是名字）(4) registered_graph_files 汇总 pipelines+hyper_graphs。
+    /// 内存库，不碰真库（规范 #8/#9）。
+    #[test]
+    fn hyper_graphs_registry_roundtrip() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_DDL).unwrap();
+
+        // 写两个管线进 pipelines 表（registered_graph_files 的另一半语料）
+        conn.execute(
+            "INSERT INTO pipelines (name, description, source_file, imported_at)
+             VALUES ('pl_a', '', '/tmp/does_not_exist_a.pipeline', '')",
+            [],
+        )
+        .unwrap();
+
+        let tmp_hyper = std::env::temp_dir().join("hg_test_a.hyper");
+        std::fs::write(
+            &tmp_hyper,
+            "Hyper(\"hg_a\")\n  .stage(\"s\", role=source, tags=#read)\n",
+        )
+        .unwrap();
+        let (name, kind) =
+            import_graph_file(&conn, tmp_hyper.to_str().unwrap()).expect("import hyper");
+        assert_eq!(name, "hg_a");
+        assert_eq!(kind, "hyper");
+
+        // 同名管线（hyper build 同名场景）：路径不同必须共存
+        let tmp_pl = std::env::temp_dir().join("hg_test_a.pipeline");
+        std::fs::write(
+            &tmp_pl,
+            "Pipeline(\"hg_a\")\n  .proc(\"s\", read(from=\"x\"))\n  .proc(\"d\")\n    .deliver(@s)\n",
+        )
+        .unwrap();
+        let (name2, kind2) =
+            import_graph_file(&conn, tmp_pl.to_str().unwrap()).expect("import pipeline");
+        assert_eq!(name2, "hg_a");
+        assert_eq!(kind2, "pipeline");
+
+        // 同路径重复 import = upsert（不重复行）
+        import_graph_file(&conn, tmp_pl.to_str().unwrap()).unwrap();
+
+        let all = registered_graph_files(&conn);
+        let n: usize = all.iter().filter(|(n, _)| n == "hg_a").count();
+        assert_eq!(n, 2, "same-name different-path must coexist: {:?}", all);
+        // pipelines 表的死路径语料也在册（死活由调用方判）
+        assert!(
+            all.iter()
+                .any(|(_, p)| p == "/tmp/does_not_exist_a.pipeline"),
+            "pipelines.source_file must be part of corpus: {:?}",
+            all
+        );
+        let n_pl: usize = all
+            .iter()
+            .filter(|(_, p)| p.ends_with(&tmp_pl.to_string_lossy().to_string()))
+            .count();
+        assert_eq!(n_pl, 1, "same-path re-import must upsert not duplicate");
+
+        std::fs::remove_file(&tmp_hyper).ok();
+        std::fs::remove_file(&tmp_pl).ok();
+    }
 
     #[test]
     fn db_init_and_stats() {
