@@ -1,0 +1,28 @@
+#!/usr/bin/env -S ductile run
+// dbcleanup.pipeline — 真库卫生清账（P3）。
+// 前置：archive 快照已拍（keep=10 回滚可用）。
+// 四步：
+//   triage_all  — 全量 open incidents 走 triage 判别（nocanary/green/red/ambiguous）
+//   close_stale — nocanary 类统一 close（历史探针噪声，无金丝雀可判别=无从修复）
+//   clear_degraded — 清死管线的降级旗
+//   doctor      — 死契约诊断（只读报告，不删）
+Pipeline("dbcleanup", "真库清账：incidents triage/close + degraded + doctor 报告", cwd="/home/beef/projects/ductile")
+  .proc("snapshot", run("DUCTILE_DATA=$HOME/.local/share/ductile ductile archive 2>&1 | tail -1").tags(#gate))
+    .desc("清账前先拍快照（archive keep=10）")
+  .proc("triage_all", run("ids=$(sqlite3 $HOME/.local/share/ductile/ductile.db 'SELECT id FROM incidents WHERE status=\"open\"' | tr '\\n' ' '); n=0; for i in $ids; do DUCTILE_DATA=$HOME/.local/share/ductile ductile incident triage $i >/dev/null 2>&1 && n=$((n+1)); done; echo \"triaged: $n/$(( $(echo $ids | wc -w) ))\"").tags(#clean))
+    .desc("45 条 open 全部 triage（canary 判别）")
+    .when(@snapshot.err != "1")
+    .trust(@snapshot)
+  .proc("close_nocanary", run("bash /home/beef/projects/ductile/scripts/close_stale_incidents.sh").tags(#clean))
+    .desc("残留 open 统一 close（带出处说明）")
+    .when(@triage_all.err != "1")
+    .trust(@triage_all)
+  .proc("clear_degraded", run("n=0; for p in $(DUCTILE_DATA=/home/beef/.local/share/ductile /home/beef/projects/ductile/target/release/ductile degraded 2>/dev/null | awk '{print $2}'); do DUCTILE_DATA=/home/beef/.local/share/ductile /home/beef/projects/ductile/target/release/ductile degraded clear $p >/dev/null 2>&1 && n=$((n+1)); done; echo \"cleared degraded: $n\"; DUCTILE_DATA=/home/beef/.local/share/ductile /home/beef/projects/ductile/target/release/ductile degraded 2>&1 | wc -l").tags(#clean))
+    .desc("清降级旗（死管线残留）")
+    .when(@close_nocanary.err != "1")
+    .trust(@close_nocanary)
+  .proc("report", run("bash /home/beef/projects/ductile/scripts/db_state_report.sh").tags(#report))
+    .desc("清后状态 + 死契约只读报告")
+    .trust(@clear_degraded)
+  .proc("deliver")
+    .deliver(@report)
