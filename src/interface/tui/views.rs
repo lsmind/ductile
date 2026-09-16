@@ -163,6 +163,36 @@ fn refs_in_when(cond: &str) -> Vec<String> {
 }
 
 pub fn load_blueprint(path: &str) -> Option<Blueprint> {
+    // .hyper：走 HyperSpec 的 DAG 投影（stages：after/gated_by/deliver 齐备）
+    if path.ends_with(".hyper") {
+        let h = hyper::parse_hyper_file(path).ok()?;
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        for s in &h.stages {
+            nodes.push(BlueprintNode {
+                name: s.name.clone(),
+                layer: 0,
+                verbs: vec![s.role.as_str().to_string()],
+                deliver: h.deliver.as_deref() == Some(s.name.as_str()),
+            });
+            for a in &s.after {
+                edges.push(BlueprintEdge {
+                    from: a.clone(),
+                    to: s.name.clone(),
+                    kind: EdgeKind::Needs,
+                });
+            }
+            if let Some(j) = &s.gated_by {
+                edges.push(BlueprintEdge {
+                    from: j.clone(),
+                    to: s.name.clone(),
+                    kind: EdgeKind::When,
+                });
+            }
+        }
+        return Some(finalize_blueprint(h.name, nodes, edges));
+    }
+
     let pl = parser::parse_pipeline_file(path).ok()?;
     let mut nodes: Vec<BlueprintNode> = Vec::new();
     let mut edges: Vec<BlueprintEdge> = Vec::new();
@@ -219,22 +249,31 @@ pub fn load_blueprint(path: &str) -> Option<Blueprint> {
         }
     }
 
+    Some(finalize_blueprint(pl.name, nodes, edges))
+}
+
+/// 去重 + 拓扑分层（.pipeline 与 .hyper 两条装载路径共用）。
+fn finalize_blueprint(
+    name: String,
+    mut nodes: Vec<BlueprintNode>,
+    mut edges: Vec<BlueprintEdge>,
+) -> Blueprint {
     // 去重（同一对 (from,to,kind) 只留一条）
     edges.dedup_by(|a, b| a.from == b.from && a.to == b.to && a.kind == b.kind);
 
     // 层计算：layer(n) = 1 + max(layer(上游))，无上游 = 0
     let mut layer_of: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    for _ in 0..pl.procs.len() + 1 {
+    for _ in 0..nodes.len() + 1 {
         let mut changed = false;
-        for p in &pl.procs {
-            let ups: Vec<&BlueprintEdge> = edges.iter().filter(|e| e.to == p.name).collect();
+        for n in &nodes {
+            let ups: Vec<&BlueprintEdge> = edges.iter().filter(|e| e.to == n.name).collect();
             let max_up = ups
                 .iter()
                 .map(|e| *layer_of.get(&e.from).unwrap_or(&0))
                 .max();
             let want = max_up.map(|m| m + 1).unwrap_or(0);
-            if layer_of.get(&p.name) != Some(&want) {
-                layer_of.insert(p.name.clone(), want);
+            if layer_of.get(&n.name) != Some(&want) {
+                layer_of.insert(n.name.clone(), want);
                 changed = true;
             }
         }
@@ -245,11 +284,7 @@ pub fn load_blueprint(path: &str) -> Option<Blueprint> {
     for n in &mut nodes {
         n.layer = *layer_of.get(&n.name).unwrap_or(&0);
     }
-    Some(Blueprint {
-        name: pl.name,
-        nodes,
-        edges,
-    })
+    Blueprint { name, nodes, edges }
 }
 
 pub fn load_iso(path: &str) -> Vec<String> {
