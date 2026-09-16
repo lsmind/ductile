@@ -573,7 +573,7 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
     idx += 1 + consumed_extra;
 
     let mut plan: Vec<Impl> = Vec::new();
-    let mut checks: Vec<Check> = Vec::new();
+    let checks: Vec<Check> = Vec::new();
     let mut is_deliver = false;
     let mut deliver_refs: Vec<String> = Vec::new();
     let mut foreach_src: Option<String> = None;
@@ -1524,10 +1524,10 @@ fn extract_cost_and_modifiers(
     BTreeSet<String>,
     String,
 ) {
-    let mut cost = Cost::default();
+    let cost = Cost::default();
     let mut body = text.trim().to_string();
     let mut retry = 0;
-    let mut ensure = Vec::new();
+    let ensure = Vec::new();
     let mut when = None;
     let mut enabled = true;
     let mut stub = false;

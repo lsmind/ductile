@@ -163,14 +163,14 @@ pub fn grow(days: u32, top_import: usize) -> Result<GrowthReport, String> {
 
     let bits_occ: f64 = freq
         .iter()
-        .map(|(&id, &c)| {
+        .map(|(&_id, &c)| {
             let occ_u = -((c / n_total).log2());
             c * occ_u
         })
         .sum();
     let bits_tp = bits_occ + dict_bits;
 
-    let mut conn = db_open()?;
+    let conn = db_open()?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS scaffolds (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

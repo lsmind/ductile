@@ -415,7 +415,7 @@ pub fn harvest_full_counts(
             }
         }
     }
-    for (c, sid) in seen_sess.keys() {
+    for (c, _sid) in seen_sess.keys() {
         if let Some(e) = counts.get_mut(c) {
             e.sessions += 1;
         }
@@ -426,7 +426,7 @@ pub fn harvest_full_counts(
 // ── Minimal exact JSON extraction (v0.9.2): tool_calls 是合法 JSON ──
 
 #[derive(Debug, PartialEq)]
-enum Jv {
+pub(crate) enum Jv {
     S(String),
     A(Vec<Jv>),
     O(Vec<(String, Jv)>),

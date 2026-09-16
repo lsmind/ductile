@@ -15,7 +15,6 @@ pub use crate::steps::known_functions;
 use crate::steps::PipelineCtx;
 use crate::steps::{is_probe_stub, step_registry};
 use std::collections::{BTreeMap, BTreeSet};
-use std::process::Command;
 use std::time::Instant;
 
 pub use crate::core::dslresult::{
@@ -165,7 +164,7 @@ pub fn exec_pipeline(
             .unwrap_or(false);
 
     if egraph_mode {
-        let mut eg = egraph::build_egraph(&pl);
+        let eg = egraph::build_egraph(&pl);
         let plan = egraph::extract_plan(&pl, &eg);
         eprintln!(
             "  [egraph] {} classes ({} procs) | fusion: {} | aliases: {}",
@@ -187,7 +186,7 @@ pub fn exec_pipeline(
             }
         );
         let mut results: BTreeMap<String, Value> = BTreeMap::new();
-        let mut alias_set: BTreeSet<String> = plan.aliases.keys().cloned().collect();
+        let alias_set: BTreeSet<String> = plan.aliases.keys().cloned().collect();
         for rep in &plan.order {
             let Some(proc) = pl.procs.iter().find(|p| &p.name == rep) else {
                 continue;

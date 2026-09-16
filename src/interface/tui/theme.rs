@@ -10,5 +10,3 @@ pub const CYAN: Color = Color::Rgb(86, 226, 228); // 青——成功/ok
 pub const RED: Color = Color::Rgb(255, 120, 120); // 红——错误/incident open
 pub const DIM: Color = Color::Rgb(95, 105, 135); // 暗灰——次要文本
 pub const TEXT: Color = Color::Rgb(200, 210, 230); // 正文
-
-pub const TITLE_GLYPH: &str = "◆";

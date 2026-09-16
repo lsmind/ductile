@@ -3,10 +3,17 @@
 //! Core library: parse, typecheck, execute .pipeline files.
 //! Python bindings via pyo3.
 
+// 分层模块名（L0_physical…L4_structure）是认知分层架构的骨架命名，
+// 大写下标=层号语义（SPEC §2），非 snake_case 疏漏——显式豁免。
+#[allow(non_snake_case)]
 pub mod L0_physical;
+#[allow(non_snake_case)]
 pub mod L1_feedback;
+#[allow(non_snake_case)]
 pub mod L2_orchestration;
+#[allow(non_snake_case)]
 pub mod L3_dsl;
+#[allow(non_snake_case)]
 pub mod L4_structure;
 pub mod core;
 pub mod interface;

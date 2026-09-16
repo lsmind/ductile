@@ -56,7 +56,6 @@ pub struct App {
     pub runs: Vec<views::RunRowUi>,
     pub incidents: Vec<views::IncidentUi>,
     pub selected_run: usize,
-    pub selected_incident: usize,
     pub blueprint: Option<views::Blueprint>,
     pub iso_lines: Vec<String>,
     /// iso 是否已加载过（防止空结果反复触发惰性重扫）。
@@ -100,7 +99,6 @@ impl App {
             runs,
             incidents,
             selected_run: 0,
-            selected_incident: 0,
             blueprint: None,
             iso_lines: Vec::new(),
             iso_loaded: false,
@@ -193,10 +191,10 @@ impl App {
                     }
                     self.lib_filtering = false;
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    // 过滤态 j/k 仍给列表（Char('j')/'k' 已被上面 Char 分支吃掉——
-                    // 过滤态想移动光标用方向键）
-                    if code == KeyCode::Up && self.lib_cursor > 0 {
+                // 注：过滤态按 j/k 会进过滤词（上面 Char 分支先吃掉），
+                // 想移动光标用方向键
+                KeyCode::Up => {
+                    if self.lib_cursor > 0 {
                         self.lib_cursor -= 1;
                     }
                 }

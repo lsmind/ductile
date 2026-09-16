@@ -884,7 +884,7 @@ fn cmd_graph(path: &str) -> Result<i32, String> {
         }
         Ok(pl) => pl,
     };
-    let mut eg = build_egraph(&pl);
+    let eg = build_egraph(&pl);
     let groups = parallel_groups(&eg);
     let cp = critical_path(&eg);
     let plan = extract_plan(&pl, &eg);

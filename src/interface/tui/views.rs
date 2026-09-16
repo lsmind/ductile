@@ -7,7 +7,7 @@ use crate::L1_feedback::{incident, l4};
 use crate::L3_dsl::parser;
 use crate::L4_structure::{harvest, hyper};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 
 // ── 数据装载 ──
 
@@ -685,14 +685,22 @@ fn draw_blueprint(app: &mut App, f: &mut Frame, area: Rect) {
         }
     }
 
-    // 底部：边列表（TUI 里画斜线不现实，边以 ─→ 文本呈现）
+    // 底部：边列表（TUI 里画斜线不现实，边按类型符号呈现）
     let edge_area = rows[max_layer + 1];
     let mut edge_lines: Vec<Line> = vec![Line::from(Span::styled(
-        format!(" {} 条依赖边（@ref → 消费 proc）", bp.edges.len()),
+        format!(
+            " {} 条边（needs ─→ / when ⋱ / trust ⚑ / each ⤳）",
+            bp.edges.len()
+        ),
         Style::default().fg(BLUE),
     ))];
     for e in bp.edges.iter().take(60) {
-        edge_lines.push(Line::from(format!("  {} ─→ {}", e.from, e.to)));
+        edge_lines.push(Line::from(format!(
+            "  {} {} {}",
+            e.from,
+            e.kind.glyph(),
+            e.to
+        )));
     }
     f.render_widget(
         Paragraph::new(edge_lines)
