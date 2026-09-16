@@ -66,6 +66,13 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         "compose" if args.len() >= 5 => cmd_compose(&args[2], &args[3], &args[4..]),
         "db-stats" => cmd_db_stats(),
 
+        // v0.20 TUI 操作台（四视图：状态/日志库/蓝图/同构；纯读侧）
+        "tui" => {
+            let path = args.get(2).cloned();
+            crate::interface::tui::run_tui(path)?;
+            Ok(0)
+        }
+
         // Discovery
         "discover" if args.len() >= 3 => cmd_discover(Some(&args[2])),
         "discover" => cmd_discover(None),
@@ -717,6 +724,9 @@ fn print_usage() {
     eprintln!("  fts \"query\"            BM25 full-text search (relevance ranked)");
     eprintln!("  compose <name> <desc> <#tag1> <#tag2>...  Assemble from library");
     eprintln!("  db-stats               Show database statistics");
+    eprintln!();
+    eprintln!("Console:");
+    eprintln!("  tui [file.pipeline]    Interactive TUI (status/data/blueprint/isomorph)");
     eprintln!();
     eprintln!("Discovery:");
     eprintln!("  discover [file]        Show isomorphic proc groups");
