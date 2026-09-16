@@ -257,7 +257,6 @@ print("##DSL_END")
 
 - [SPEC.md](SPEC.md) —— 完整说明书（也可直接喂给 AI 助手让它帮你写管线）
 - [examples/](examples/) —— 官方示例，每个都能直接跑
-- [docs/](docs/) —— 各专题文档
 - 测试：`cargo test --lib`（476 项全过）
 
 ## License

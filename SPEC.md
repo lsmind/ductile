@@ -1,7 +1,7 @@
 # Ductile DSL — 规格文档（v0.19）
 
 > 面向 AI agent / LLM 调用者与人类维护者。读完应能独立完成安装、管线编写、执行、调试、调优。
-> 本文只描述**当前状态**；历史沿革与版本地质见 git log 与 `docs/`，不在此堆叠。
+> 本文只描述**当前状态**；历史沿革见 git log，不在此堆叠。
 
 ---
 
@@ -238,7 +238,7 @@ ductile explore --report <id>        # 只读检索冻结报告
 
 ### 2.7 工程周期（本仓库）
 
-`./devcycle.pipeline "start: …"` → 改代码 → `./devcycle.pipeline "feat: …"`；提交走 `./ship.pipeline "msg"`（test 门禁→add→commit→push→verify）；自测走 `./selftest.pipeline`。详见 `docs/DEVCYCLE.md`。
+`./devcycle.pipeline "start: …"` → 改代码 → `./devcycle.pipeline "feat: …"`；提交走 `./ship.pipeline "msg"`（test 门禁→add→commit→push→verify）；自测走 `./selftest.pipeline`。
 
 ---
 
