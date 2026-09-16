@@ -44,8 +44,14 @@ impl Tab {
 
 pub struct App {
     pub tab: Tab,
-    /// 蓝图/同构视图的目标 .pipeline 路径（CLI 传入或 DATA 视图选中）。
-    pub path: Option<String>,
+    /// 当前选中管线的（name, source_file）——一律来自 db 注册表选择。
+    pub sel: Option<(String, String)>,
+    /// 库选择器列表（db 注册表全量）+ 光标。
+    pub library: Vec<(String, String)>,
+    pub lib_cursor: usize,
+    /// 库选择器过滤词（/ 进入输入，Enter 选中）。
+    pub lib_filter: String,
+    pub lib_filtering: bool,
     pub status: views::StatusSnapshot,
     pub runs: Vec<views::RunRowUi>,
     pub incidents: Vec<views::IncidentUi>,
@@ -61,14 +67,35 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(path: Option<String>) -> Result<Self, String> {
+    pub fn new(direct_path: Option<String>) -> Result<Self, String> {
+        let conn = db::open();
         let counts = db::db_stats();
         let status = views::load_status();
         let runs = views::load_runs(200);
         let incidents = views::load_incidents();
+        let library = db::registered_graph_files(&conn);
+        // CLI 直连路径：在注册表里找同路径的条目对齐；找不到就以
+        // (文件名, 路径) 直接选中（未注册文件也能看蓝图）。
+        let sel = direct_path.map(|p| {
+            let name = library
+                .iter()
+                .find(|(_, sf)| sf == &p)
+                .map(|(n, _)| n.clone())
+                .unwrap_or_else(|| {
+                    std::path::Path::new(&p)
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| p.clone())
+                });
+            (name, p)
+        });
         let mut app = App {
             tab: Tab::Status,
-            path: path.clone(),
+            sel,
+            library,
+            lib_cursor: 0,
+            lib_filter: String::new(),
+            lib_filtering: false,
             status,
             runs,
             incidents,
@@ -80,20 +107,31 @@ impl App {
             quit: false,
             counts,
         };
-        // 蓝图即时加载（本地 parse，便宜）；similar 同构惰性——
-        // 扫全库注册表要几百 ms 且向 stderr 吐 dead-entry 噪声，
-        // 进 ISOMORPH 视图才加载（首次 draw_iso 触发）。
-        if let Some(p) = &path {
-            app.blueprint = views::load_blueprint(p);
+        // 有直连目标才预载蓝图；similar 同构保持惰性（扫全库贵且 noisy）。
+        if let Some((_, sf)) = &app.sel {
+            app.blueprint = views::load_blueprint(sf);
         }
         Ok(app)
     }
 
-    pub fn load_blueprint(&mut self, path: &str) {
-        self.blueprint = views::load_blueprint(path);
+    pub fn load_pipeline(&mut self, name: &str, source_file: &str) {
+        self.blueprint = views::load_blueprint(source_file);
         self.iso_loaded = false; // 换目标后允许重扫 similar
         self.iso_lines.clear();
-        self.path = Some(path.to_string());
+        self.sel = Some((name.to_string(), source_file.to_string()));
+    }
+
+    /// 过滤后的库列表（filter 空则全量）。
+    pub fn library_filtered(&self) -> Vec<(String, String)> {
+        if self.lib_filter.is_empty() {
+            return self.library.clone();
+        }
+        let f = self.lib_filter.to_lowercase();
+        self.library
+            .iter()
+            .filter(|(n, sf)| n.to_lowercase().contains(&f) || sf.to_lowercase().contains(&f))
+            .cloned()
+            .collect()
     }
 
     pub fn run(&mut self) -> Result<(), String> {
@@ -136,6 +174,42 @@ impl App {
     }
 
     fn on_key(&mut self, code: KeyCode) {
+        // 过滤输入模式：字符进过滤词，Enter/Esc 退出输入态（Enter 时若光标在列表上则选中）
+        if self.lib_filtering {
+            match code {
+                KeyCode::Char(c) => self.lib_filter.push(c),
+                KeyCode::Backspace => {
+                    self.lib_cursor = 0;
+                    self.lib_filter.pop();
+                }
+                KeyCode::Esc => {
+                    self.lib_filtering = false;
+                    self.lib_filter.clear();
+                }
+                KeyCode::Enter => {
+                    let lib = self.library_filtered();
+                    if let Some((name, sf)) = lib.get(self.lib_cursor).cloned() {
+                        self.load_pipeline(&name, &sf);
+                    }
+                    self.lib_filtering = false;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    // 过滤态 j/k 仍给列表（Char('j')/'k' 已被上面 Char 分支吃掉——
+                    // 过滤态想移动光标用方向键）
+                    if code == KeyCode::Up && self.lib_cursor > 0 {
+                        self.lib_cursor -= 1;
+                    }
+                }
+                KeyCode::Down => {
+                    let n = self.library_filtered().len();
+                    if self.lib_cursor + 1 < n {
+                        self.lib_cursor += 1;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Tab | KeyCode::Char('l') | KeyCode::Right => self.tab = self.tab.next(),
@@ -144,6 +218,19 @@ impl App {
             KeyCode::Char('2') => self.tab = Tab::Data,
             KeyCode::Char('3') => self.tab = Tab::Blueprint,
             KeyCode::Char('4') => self.tab = Tab::Isomorph,
+            KeyCode::Char('/') => {
+                // 进入过滤输入（只在 BLUEPRINT/ISOMORPH 有意义）
+                self.lib_filtering = true;
+            }
+            KeyCode::Enter => {
+                // 库选择器：回车加载光标处管线（BLUEPRINT/ISOMORPH 视图）
+                if matches!(self.tab, Tab::Blueprint | Tab::Isomorph) {
+                    let lib = self.library_filtered();
+                    if let Some((name, sf)) = lib.get(self.lib_cursor).cloned() {
+                        self.load_pipeline(&name, &sf);
+                    }
+                }
+            }
             KeyCode::Up | KeyCode::Char('k') => self.cursor_up(),
             KeyCode::Down | KeyCode::Char('j') => self.cursor_down(),
             KeyCode::Char('r') => self.refresh(),
@@ -158,13 +245,12 @@ impl App {
                     self.selected_run -= 1
                 }
             }
-            Tab::Isomorph => {
-                // 同构视图滚屏（沿 runs 光标复用 selected_run 计数）
-                if self.selected_run > 0 {
-                    self.selected_run -= 1
+            Tab::Blueprint | Tab::Isomorph => {
+                if self.lib_cursor > 0 {
+                    self.lib_cursor -= 1
                 }
             }
-            _ => {}
+            Tab::Status => {}
         }
     }
 
@@ -175,20 +261,26 @@ impl App {
                     self.selected_run += 1
                 }
             }
-            Tab::Isomorph => {
-                self.selected_run += 1;
+            Tab::Blueprint | Tab::Isomorph => {
+                let n = self.library_filtered().len();
+                if self.lib_cursor + 1 < n {
+                    self.lib_cursor += 1;
+                }
             }
-            _ => {}
+            Tab::Status => {}
         }
     }
 
     fn refresh(&mut self) {
+        let conn = db::open();
         self.counts = db::db_stats();
+        self.library = db::registered_graph_files(&conn);
+        drop(conn);
         self.status = views::load_status();
         self.runs = views::load_runs(200);
         self.incidents = views::load_incidents();
-        if let Some(p) = self.path.clone() {
-            self.load_blueprint(&p);
+        if let Some((name, sf)) = self.sel.clone() {
+            self.load_pipeline(&name, &sf);
         }
     }
 }

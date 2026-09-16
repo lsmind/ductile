@@ -332,7 +332,11 @@ pub fn draw(app: &mut App, f: &mut Frame) {
         Span::styled(" 1-4", Style::default().fg(GOLD)),
         Span::styled("切换视图  ", Style::default().fg(DIM)),
         Span::styled("j/k", Style::default().fg(GOLD)),
-        Span::styled("上下  ", Style::default().fg(DIM)),
+        Span::styled("光标  ", Style::default().fg(DIM)),
+        Span::styled("Enter", Style::default().fg(GOLD)),
+        Span::styled("加载选中  ", Style::default().fg(DIM)),
+        Span::styled("/", Style::default().fg(GOLD)),
+        Span::styled("过滤库  ", Style::default().fg(DIM)),
         Span::styled("r", Style::default().fg(GOLD)),
         Span::styled("刷新  ", Style::default().fg(DIM)),
         Span::styled("q", Style::default().fg(GOLD)),
@@ -529,19 +533,65 @@ fn draw_data(app: &mut App, f: &mut Frame, area: Rect) {
     f.render_widget(List::new(inc_items).block(panel("incidents")), rows[1]);
 }
 
+/// 库选择器侧栏：db 注册表列表 + 光标高亮 + 过滤态提示。
+/// 返回值 = 剩余区域（蓝图/同构主面板渲染处）。
+fn draw_library(app: &App, f: &mut Frame, area: Rect) -> Rect {
+    let outer = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+        .split(area);
+
+    let lib = app.library_filtered();
+    let items: Vec<ListItem> = if lib.is_empty() {
+        vec![ListItem::new(Span::styled(
+            "（db 注册表为空——ductile import <dir>）",
+            Style::default().fg(DIM),
+        ))]
+    } else {
+        lib.iter()
+            .enumerate()
+            .map(|(i, (name, sf))| {
+                let sel = i == app.lib_cursor;
+                let style = if sel {
+                    Style::default().bg(BLUE).fg(BG).bold()
+                } else {
+                    Style::default().fg(TEXT)
+                };
+                let dead = !std::path::Path::new(sf).exists();
+                let mark = if dead { "✗ " } else { "  " };
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{mark}"), Style::default().fg(RED)),
+                    Span::styled(name.clone(), style),
+                ]))
+            })
+            .collect()
+    };
+    let title = if app.lib_filtering {
+        format!("库 ({}项) 过滤: {}", lib.len(), app.lib_filter)
+    } else {
+        format!("库 ({}项) /过滤 Enter选", lib.len())
+    };
+    let list = List::new(items)
+        .block(panel(title))
+        .highlight_style(Style::default().bg(BLUE).fg(BG));
+    f.render_widget(list, outer[0]);
+    outer[1]
+}
+
 fn draw_blueprint(app: &mut App, f: &mut Frame, area: Rect) {
+    let main = draw_library(app, f, area);
     let Some(bp) = &app.blueprint else {
-        let msg = if app.path.is_none() {
-            "未指定管线。用法：ductile tui <path.pipeline>\n（BLUEPRINT/ISOMORPH 视图需要目标文件）"
+        let msg = if app.sel.is_none() {
+            "未选管线——左侧库列表 j/k 移动，Enter 加载蓝图\n（或启动时 ductile tui <path.pipeline> 直连）"
         } else {
-            "解析失败——路径不存在或 DSL 语法错误"
+            "解析失败——源文件路径失效或 DSL 语法错误（左侧 ✗ = 死路径）"
         };
         f.render_widget(
             Paragraph::new(msg)
                 .block(panel("蓝图"))
                 .style(Style::default().fg(DIM))
                 .wrap(Wrap { trim: false }),
-            area,
+            main,
         );
         return;
     };
@@ -556,7 +606,7 @@ fn draw_blueprint(app: &mut App, f: &mut Frame, area: Rect) {
                 .chain(std::iter::once(Constraint::Min(0)))
                 .collect::<Vec<_>>(),
         )
-        .split(area);
+        .split(main);
 
     let by_layer: std::collections::BTreeMap<usize, Vec<&BlueprintNode>> = {
         let mut m = std::collections::BTreeMap::new();
@@ -618,15 +668,16 @@ fn draw_blueprint(app: &mut App, f: &mut Frame, area: Rect) {
 }
 
 fn draw_iso(app: &mut App, f: &mut Frame, area: Rect) {
-    // 惰性加载：首次进视图才扫 similar（全库注册表扫描贵且 noisy）
-    if app.iso_lines.is_empty() && app.path.is_some() && !app.iso_loaded {
-        let p = app.path.clone().unwrap();
-        app.iso_lines = super::views::load_iso(&p);
+    let main = draw_library(app, f, area);
+    // 惰性加载：首次选中目标才扫 similar（全库注册表扫描贵且 noisy）
+    if app.iso_lines.is_empty() && app.sel.is_some() && !app.iso_loaded {
+        let (_, sf) = app.sel.clone().unwrap();
+        app.iso_lines = super::views::load_iso(&sf);
         app.iso_loaded = true;
     }
     if app.iso_lines.is_empty() {
-        let msg = if app.path.is_none() {
-            "未指定管线。用法：ductile tui <path.pipeline>"
+        let msg = if app.sel.is_none() {
+            "未选管线——左侧库列表 j/k 移动，Enter 选中后自动加载同构对照"
         } else {
             "无同构数据"
         };
@@ -634,7 +685,7 @@ fn draw_iso(app: &mut App, f: &mut Frame, area: Rect) {
             Paragraph::new(msg)
                 .block(panel("同构"))
                 .style(Style::default().fg(DIM)),
-            area,
+            main,
         );
         return;
     }
@@ -652,6 +703,6 @@ fn draw_iso(app: &mut App, f: &mut Frame, area: Rect) {
         .collect();
     f.render_widget(
         List::new(items).block(panel("同构对照 · similar + structure_key")),
-        area,
+        main,
     );
 }
