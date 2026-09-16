@@ -11,6 +11,10 @@
 # effects: none
 # timeout: 10
 # mcsm: F(1)-O(3)-P(3)-T(4)
+# mcsm_note_f: op SQLite 库 + 本仓库文件系统
+# mcsm_note_o: op 记录行（stages/evidence 表）
+# mcsm_note_p: stdout 的 stage=/evidence= 行 + 退出码
+# mcsm_note_t: op 分期交付（stage 推进/证据归档）
 import os
 import sqlite3
 import json

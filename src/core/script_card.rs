@@ -23,6 +23,11 @@ pub struct ScriptCard {
     /// v0.18.11 MCSM/FOPT 认知坐标：F(f)-O(o)-P(p)-T(t)，各维 1-4
     /// （建表/冲突/抽象/实践）。空串 = 未标注。解析见 script::parse_mcsm。
     pub mcsm: String,
+    /// v0.19.x FOPT 强制实例级注解：mcsm 声明时必须伴随四维具体指称
+    /// （F/O/P/T 各一行 `# mcsm_note_f: 文件系统`），说明该维度在当前环境下
+    /// **具体是什么**（不是通用维度名"场域"——那等于没说）。空串 = mcsm 未声明。
+    /// 解析校验见 script::parse_contract。
+    pub mcsm_note: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

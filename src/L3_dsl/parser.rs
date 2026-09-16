@@ -65,6 +65,7 @@ pub fn parse_pipeline(input: &str) -> Result<Pipeline, ParseError> {
     idx += 1;
 
     let mut procs = Vec::new();
+    let mut proc_lines: Vec<usize> = Vec::new();
     while idx < lines.len() {
         // Skip blanks/comments
         while idx < lines.len() && is_skippable(lines[idx]) {
@@ -75,18 +76,72 @@ pub fn parse_pipeline(input: &str) -> Result<Pipeline, ParseError> {
         }
 
         let line = lines[idx];
+        let line_idx_start = idx;
         let trimmed = line.trim();
 
-        // .proc line
+        // .proc line（proc_lines 记录起始行号，deliver 校验 post-pass 报错定位用）
         if trimmed.starts_with(".proc(") || trimmed.starts_with(".proc (") {
             let (proc, consumed) = parse_proc(&lines, idx)?;
             idx = consumed;
             procs.push(proc);
+            proc_lines.push(line_idx_start);
             continue;
         }
 
         // Unknown line — skip
         idx += 1;
+    }
+
+    // v0.18.15 deliver fail-closed（X6 实锤 bug）：顶层独行 `.deliver(@x)` 会被
+    // parser 归给前一个 proc——三种病态形态静默 success（executor 跳过哨兵、
+    // deliver_summary 取交集永远空）。此处静态拒绝，运行时 executor 另有兜底：
+    // 1) 自指：proc 自己 deliver 自己 → 永远被跳过，主产出不可能产出
+    // 2) 幽灵引用：@x 不存在 → deliver_summary 永远空
+    // 3) 空引用：deliver proc 无任何引用 → 哨兵形同虚设
+    for (i, p) in procs.iter().enumerate() {
+        if !p.deliver {
+            continue;
+        }
+        let line_no = proc_lines.get(i).copied().unwrap_or(0) + 1;
+        let line_text = lines.get(line_no.saturating_sub(1)).copied().unwrap_or("");
+        if p.deliver_refs.is_empty() {
+            return Err(ParseError {
+                line: line_no,
+                col: 1,
+                msg: format!(
+                    "deliver proc '{}' has no references — a sentinel delivering \
+nothing is a no-op; use .proc(\"deliver\").deliver(@target)",
+                    p.name
+                ),
+                line_text: line_text.to_string(),
+            });
+        }
+        for r in &p.deliver_refs {
+            if *r == p.name {
+                return Err(ParseError {
+                    line: line_no,
+                    col: 1,
+                    msg: format!(
+                        "deliver self-reference: proc '{}' .deliver(@{}) — \
+top-level lone .deliver(@x) attaches to the previous proc (itself); \
+use a dedicated sentinel .proc(\"deliver\").deliver(@{})",
+                        p.name, r, r
+                    ),
+                    line_text: line_text.to_string(),
+                });
+            }
+            if !procs.iter().any(|q| q.name == *r) {
+                return Err(ParseError {
+                    line: line_no,
+                    col: 1,
+                    msg: format!(
+                        "deliver references unknown proc '@{}' (sentinel of '{}')",
+                        r, p.name
+                    ),
+                    line_text: line_text.to_string(),
+                });
+            }
+        }
     }
 
     Ok(Pipeline {
@@ -1416,6 +1471,43 @@ mod tests {
         assert_eq!(pl.name, "lower");
     }
 
+    // ── deliver fail-closed (X6 bug): 自指 + 幽灵引用 ──
+    #[test]
+    fn parse_deliver_self_reference_fails() {
+        // X6 实锤形态：顶层独行 .deliver(@b) 被 parser 归给前一个 proc b 自己
+        // → b 自我哨兵化被跳过 → 静默 success。必须 ParseError。
+        let input = "Pipeline(\"t\")\n.proc(\"a\", run(\"echo A\"))\n.proc(\"b\", run(\"echo B\"))\n.deliver(@b)\n";
+        let err = parse_pipeline(input).unwrap_err();
+        assert!(
+            err.msg.contains("self-reference"),
+            "self-ref deliver must be ParseError, got: {}",
+            err.msg
+        );
+    }
+
+    #[test]
+    fn parse_deliver_ghost_reference_fails() {
+        // deliver 引用不存在的 proc = 幽灵哨兵，deliver_summary 永远空 → 静默 success
+        let input = "Pipeline(\"t\")\n.proc(\"a\", run(\"echo A\"))\n.proc(\"deliver\")\n.deliver(@ghost)\n";
+        let err = parse_pipeline(input).unwrap_err();
+        assert!(
+            err.msg.contains("unknown proc"),
+            "ghost deliver ref must be ParseError, got: {}",
+            err.msg
+        );
+    }
+
+    #[test]
+    fn parse_deliver_sentinel_form_ok() {
+        // 生产规范形态：专门哨兵 proc 引用别人，必须继续合法
+        let input =
+            "Pipeline(\"t\")\n.proc(\"a\", run(\"echo A\"))\n.proc(\"deliver\")\n.deliver(@a)\n";
+        let pl = parse_pipeline(input).unwrap();
+        let d = pl.procs.iter().find(|p| p.name == "deliver").unwrap();
+        assert!(d.deliver);
+        assert_eq!(d.deliver_refs, vec!["a".to_string()]);
+    }
+
     // ── Empty input ──
     #[test]
     fn parse_empty_input_errors() {
@@ -1644,13 +1736,22 @@ mod tests {
     // ── Deliver ──
     #[test]
     fn parse_deliver() {
+        // v0.18.15：deliver 引用必须指向存在的 proc（幽灵引用 fail-closed）。
+        // 原装置只构造 output 单 proc 却引用 @search——按新规这是幽灵引用；
+        // 补齐 search proc 还原 demo.pipeline 的真实形态。
         let input = r#"Pipeline("t")
+
+.proc("search")
+  .plan(
+    run -> run("echo s").tags(#file)
+  )
 
 .proc("output")
   .deliver(media=[@search])
 "#;
         let pl = parse_pipeline(input).unwrap();
-        assert!(pl.procs[0].deliver);
+        assert!(pl.procs[1].deliver);
+        assert_eq!(pl.procs[1].deliver_refs, vec!["search".to_string()]);
     }
 
     // ── Foreach ──

@@ -642,6 +642,7 @@ mod tests {
             timeout_secs: 10,
             retries: 0,
             mcsm: String::new(),
+            mcsm_note: String::new(),
         }
     }
 

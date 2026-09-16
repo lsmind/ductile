@@ -263,6 +263,13 @@ pub fn exec_pipeline(
         if results.values().any(errflow::is_error_value) {
             eprintln!("  [pipeline] bypass failures tolerated — critical chain intact");
         }
+        // deliver fail-closed：主产出缺席 → 红（X6 bug 修复，与默认路径同语义）
+        if let Some(msg) = deliver_absent(&pl, &results) {
+            return ExecResult::Failed {
+                error: msg,
+                partial: results,
+            };
+        }
         return ExecResult::Success(results);
     }
 
@@ -460,6 +467,13 @@ pub fn exec_pipeline(
         // 旁路失败容忍：主链完好 → Success（旁路 Left 仍在 results 里可查）
         if results.values().any(errflow::is_error_value) {
             eprintln!("  [pipeline] bypass failures tolerated — critical chain intact");
+        }
+        // deliver fail-closed：主产出缺席 → 红（X6 bug 修复，与 egraph 路径同语义）
+        if let Some(msg) = deliver_absent(&pl, &results) {
+            return ExecResult::Failed {
+                error: msg,
+                partial: results,
+            };
         }
         // v0.15 L4 复核：Success 也记录（log-only 攒标签数据面）
         if let Some(l4_err) = l4_finalize(&pl, &results, None, l4_review_success) {
@@ -985,6 +999,24 @@ fn run_impl_steps(
 
 // ── When condition ──
 
+/// v0.18.15 deliver fail-closed（X6 运行时兜底）：deliver 引用的目标缺席
+/// results（被跳过/自指/链式哨兵/热补丁变异）= 主产出没产出，禁止静默 success。
+/// parser 静态校验是第一道闸；此处兜底任何运行期形态。返回 Some(错误消息) 即红。
+fn deliver_absent(pl: &Pipeline, results: &BTreeMap<String, Value>) -> Option<String> {
+    for d in pl.procs.iter().filter(|p| p.deliver) {
+        for r in &d.deliver_refs {
+            if !results.contains_key(r) {
+                return Some(format!(
+                    "deliver target '@{}' absent from results (sentinel '{}' delivered \
+nothing) — pipeline cannot report success without its main output",
+                    r, d.name
+                ));
+            }
+        }
+    }
+    None
+}
+
 fn is_eligible(
     params: &BTreeMap<String, String>,
     results: &BTreeMap<String, Value>,
@@ -1142,6 +1174,161 @@ mod tests {
         let params = BTreeMap::new();
         let results = BTreeMap::new();
         assert!(eval_when(&params, &results, ""));
+    }
+
+    // ── deliver fail-closed (X6 bug): 目标缺席 = 红 ──
+    fn mk_proc_x6(name: &str) -> Proc {
+        Proc {
+            name: name.into(),
+            plan: vec![Impl {
+                name: "stub_impl".into(),
+                tags: std::collections::BTreeSet::new(),
+                cost: Cost::default(),
+                enabled: true,
+                when: None,
+                refs: vec![],
+                body_text: "read(\"x\")".into(),
+                stub: true,
+                retry: 0,
+                ensure: vec![],
+                description: String::new(),
+            }],
+            checks: vec![],
+            contract: Default::default(),
+            deliver: false,
+            needs: vec![],
+            constraint_fields: vec![],
+            deliver_refs: vec![],
+            foreach: None,
+            foreach_var: String::new(),
+            pick_by: "cost".into(),
+            description: String::new(),
+        }
+    }
+
+    #[test]
+    fn exec_deliver_self_reference_fails() {
+        // X6 复现：b 被误标 deliver=true（parser 自指归因）→ 跳过执行 → 静默 success
+        // executor 兜底：deliver 目标缺席 results → Failed
+        let mut b = mk_proc_x6("b");
+        b.deliver = true;
+        b.deliver_refs = vec!["b".into()];
+        let pl = Pipeline {
+            name: "x6_self".into(),
+            weights: Weights::default(),
+            cwd: None,
+            env: vec![],
+            description: String::new(),
+            procs: vec![mk_proc_x6("a"), b],
+        };
+        let params = BTreeMap::new();
+        match exec_pipeline("test", &params, &pl, None) {
+            ExecResult::Failed { error, .. } => assert!(
+                error.contains("deliver"),
+                "self-ref deliver must fail with deliver msg, got: {}",
+                error
+            ),
+            ExecResult::Success(map) => panic!(
+                "X6 bug alive: silent success with deliver target absent, results: {:?}",
+                map.keys()
+            ),
+        }
+    }
+
+    #[test]
+    fn exec_deliver_chained_sentinel_fails_egraph() {
+        // egraph 提取路径的运行时兜底：链式哨兵（d1 引用 d2，d2 自己也是哨兵）。
+        // parser 静态校验只查引用存在性——d2 存在所以放行；运行时 d2 被
+        // proc.deliver 跳过永不在 results → deliver_absent 兜底判红。
+        // 真哨兵形态 = 空 plan（无 impl，不进 egraph class）。
+        let mk_sentinel = |name: &str, refs: Vec<&str>| Proc {
+            name: name.into(),
+            plan: vec![], // 哨兵无 impl
+            checks: vec![],
+            contract: Default::default(),
+            deliver: true,
+            needs: vec![],
+            constraint_fields: vec![],
+            deliver_refs: refs.into_iter().map(String::from).collect(),
+            foreach: None,
+            foreach_var: String::new(),
+            pick_by: "egraph".into(),
+            description: String::new(),
+        };
+        let pl = Pipeline {
+            name: "x6_chain_eg".into(),
+            weights: Weights::default(),
+            cwd: None,
+            env: vec![],
+            description: String::new(),
+            procs: vec![
+                mk_proc_x6("a"),
+                mk_sentinel("d2", vec!["a"]),
+                mk_sentinel("d1", vec!["d2"]),
+            ],
+        };
+        let params = BTreeMap::new();
+        match exec_pipeline("test", &params, &pl, None) {
+            ExecResult::Failed { error, .. } => assert!(
+                error.contains("@d2") && error.contains("deliver"),
+                "egraph path: chained sentinel must fail via deliver_absent, got: {}",
+                error
+            ),
+            ExecResult::Success(map) => panic!(
+                "egraph path: X6 bug alive (chained sentinel silent success), results: {:?}",
+                map.keys()
+            ),
+        }
+    }
+
+    #[test]
+    fn exec_deliver_target_when_dead_fails() {
+        // deliver 目标真实存在但 when 判死（results 缺席）→ 必须 Failed
+        let mut g = mk_proc_x6("gate");
+        g.plan[0].when = Some("mode == \"deep\"".into());
+        let mut d = mk_proc_x6("deliver");
+        d.deliver = true;
+        d.deliver_refs = vec!["gate".into()];
+        let pl = Pipeline {
+            name: "x6_whendead".into(),
+            weights: Weights::default(),
+            cwd: None,
+            env: vec![],
+            description: String::new(),
+            procs: vec![g, d],
+        };
+        let params = BTreeMap::new(); // mode 缺席 → when false → gate 全 impl 判死
+                                      // 既有 fail-closed 链已覆盖：when 判死 → "All paths failed" Left 落库 →
+                                      // gate 在 deliver 闭包（关键）→ fatal_left 红。本测试钉住该行为。
+        match exec_pipeline("test", &params, &pl, None) {
+            ExecResult::Failed { error, .. } => assert!(
+                error.contains("gate"),
+                "when-dead deliver target must fail via fatal_left, got: {}",
+                error
+            ),
+            ExecResult::Success(_) => panic!("when-dead deliver target must not succeed"),
+        }
+    }
+
+    #[test]
+    fn exec_deliver_target_present_succeeds() {
+        // 回归护栏：deliver 目标在场 → 照常 Success（现有 selftest/ship 形态）
+        let mut d = mk_proc_x6("deliver");
+        d.deliver = true;
+        d.deliver_refs = vec!["a".into()];
+        let pl = Pipeline {
+            name: "x6_ok".into(),
+            weights: Weights::default(),
+            cwd: None,
+            env: vec![],
+            description: String::new(),
+            procs: vec![mk_proc_x6("a"), d],
+        };
+        let params = BTreeMap::new();
+        match exec_pipeline("test", &params, &pl, None) {
+            ExecResult::Success(map) => assert!(map.contains_key("a")),
+            ExecResult::Failed { error, .. } => panic!("normal deliver must succeed: {}", error),
+        }
     }
 
     // ── exec_pipeline with stub ──

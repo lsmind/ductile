@@ -895,6 +895,10 @@ key2=value2
 # effects: none                    ← none | fs | net | system
 # timeout: 10                      ← 秒；# retries: N 可选
 # mcsm: F(2)-O(1)-P(3)-T(2)        ← 可选：FOPT 认知坐标（fail-closed 校验，见 docs/MCSM.md）
+# mcsm_note_f: 文件系统+PATH工具    ← mcsm 声明时必填：四维实例级注解（当前环境下具体是什么）
+# mcsm_note_o: script契约卡         ← 裸通用名（"场域/本体"）拒收——必须写具体指称
+# mcsm_note_p: ##DSL_RESULT块
+# mcsm_note_t: 单次变换交付
 ```
 
 **语义标注的编排意义**（喂给引擎做自动并行/CSE 决策）：

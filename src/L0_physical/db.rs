@@ -153,6 +153,18 @@ pub fn migrate(conn: &Connection) {
         conn.execute_batch("ALTER TABLE scripts ADD COLUMN mcsm TEXT NOT NULL DEFAULT '';")
             .ok();
     }
+    // v0.19.x：mcsm_note 列（FOPT 强制实例级注解）。
+    let has_note = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('scripts') WHERE name='mcsm_note'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    if has_note == 0 {
+        conn.execute_batch("ALTER TABLE scripts ADD COLUMN mcsm_note TEXT NOT NULL DEFAULT '';")
+            .ok();
+    }
     // v0.18.6 P1-2：l4_reviews 补 label_source（human / blind:regcheck3）。
     // 老数据默认 human（历史语义：人打的标签）。
     let has_lsrc = conn
@@ -293,6 +305,7 @@ pub const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS pipelines (
             timeout_secs INTEGER NOT NULL DEFAULT 300,
             retries     INTEGER NOT NULL DEFAULT 0,
             mcsm        TEXT NOT NULL DEFAULT '',
+            mcsm_note   TEXT NOT NULL DEFAULT '',
             attached_at TEXT DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS canaries (
@@ -1334,13 +1347,13 @@ use crate::L0_physical::time::now_ts;
 pub fn script_attach_conn(conn: &Connection, card: &ScriptCard) -> Result<(), String> {
     conn.execute(
         "INSERT INTO scripts (name, path, lang, desc, params, output, pure, idempotent,
-                              concurrency, effects, timeout_secs, retries, mcsm)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+                              concurrency, effects, timeout_secs, retries, mcsm, mcsm_note)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
          ON CONFLICT(name) DO UPDATE SET
             path=excluded.path, lang=excluded.lang, desc=excluded.desc,
             params=excluded.params, output=excluded.output, pure=excluded.pure,
             idempotent=excluded.idempotent, concurrency=excluded.concurrency,
-            mcsm=excluded.mcsm,
+            mcsm=excluded.mcsm, mcsm_note=excluded.mcsm_note,
             effects=excluded.effects, timeout_secs=excluded.timeout_secs,
             retries=excluded.retries, attached_at=datetime('now')",
         rusqlite::params![
@@ -1357,6 +1370,7 @@ pub fn script_attach_conn(conn: &Connection, card: &ScriptCard) -> Result<(), St
             card.timeout_secs as i64,
             card.retries as i64,
             card.mcsm,
+            card.mcsm_note,
         ],
     )
     .map_err(|e| format!("script_attach failed: {}", e))?;
@@ -1382,7 +1396,7 @@ pub fn script_detach(name: &str) -> bool {
 pub fn script_get_conn(conn: &Connection, name: &str) -> Option<ScriptCard> {
     conn.query_row(
         "SELECT name, path, lang, desc, params, output, pure, idempotent,
-                concurrency, effects, timeout_secs, retries, mcsm
+                concurrency, effects, timeout_secs, retries, mcsm, mcsm_note
          FROM scripts WHERE name = ?1",
         [name],
         |r| {
@@ -1401,6 +1415,7 @@ pub fn script_get_conn(conn: &Connection, name: &str) -> Option<ScriptCard> {
                 timeout_secs: r.get::<_, i64>(10)? as u64,
                 retries: r.get::<_, i64>(11)? as usize,
                 mcsm: r.get(12)?,
+                mcsm_note: r.get(13)?,
             })
         },
     )
@@ -1416,7 +1431,7 @@ pub fn script_list_conn(conn: &Connection) -> Vec<ScriptCard> {
     let mut stmt = conn
         .prepare(
             "SELECT name, path, lang, desc, params, output, pure, idempotent,
-                    concurrency, effects, timeout_secs, retries, mcsm
+                    concurrency, effects, timeout_secs, retries, mcsm, mcsm_note
              FROM scripts ORDER BY name",
         )
         .expect("script_list failed");
@@ -1437,6 +1452,7 @@ pub fn script_list_conn(conn: &Connection) -> Vec<ScriptCard> {
                 timeout_secs: r.get::<_, i64>(10)? as u64,
                 retries: r.get::<_, i64>(11)? as usize,
                 mcsm: r.get(12)?,
+                mcsm_note: r.get(13)?,
             })
         })
         .expect("script_list query failed");
@@ -1654,6 +1670,7 @@ mod conn_tests {
             timeout_secs: 60,
             retries: 1,
             mcsm: String::new(),
+            mcsm_note: String::new(),
         };
         assert!(script_attach_conn(&conn, &card).is_ok());
         let got = script_get_conn(&conn, "word_stats").unwrap();

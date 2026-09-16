@@ -230,9 +230,27 @@ pub fn parse_contract(source: &str, path: &str) -> Result<ScriptCard, String> {
         .unwrap_or(0);
     // v0.18.11 MCSM/FOPT：可选键 mcsm —— F(n)-O(n)-P(n)-T(n) 认知坐标。
     // 声明了就校验（fail-closed：坐标垃圾拒绝入库），没声明默认空。
+    // v0.19.x 强制实例级注解：mcsm 必须伴随 mcsm_note_{f,o,p,t} 四行，
+    // 每维写明该维度在当前环境下的**具体指称**（如 F=文件系统、T=op 分期交付）。
+    // 裸通用名（"场域/本体/现象/目的"）= 等于没说，拒收。
     let mcsm = match kv.get("mcsm") {
-        Some(raw) => normalize_mcsm(raw, path)?,
+        Some(raw) => {
+            let normalized = normalize_mcsm(raw, path)?;
+            validate_mcsm_notes(&kv, path)?;
+            normalized
+        }
         None => String::new(),
+    };
+    let mcsm_note = if mcsm.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "F={} | O={} | P={} | T={}",
+            kv.get("mcsm_note_f").cloned().unwrap_or_default(),
+            kv.get("mcsm_note_o").cloned().unwrap_or_default(),
+            kv.get("mcsm_note_p").cloned().unwrap_or_default(),
+            kv.get("mcsm_note_t").cloned().unwrap_or_default()
+        )
     };
 
     Ok(ScriptCard {
@@ -249,6 +267,7 @@ pub fn parse_contract(source: &str, path: &str) -> Result<ScriptCard, String> {
         timeout_secs,
         retries,
         mcsm,
+        mcsm_note,
     })
 }
 
@@ -289,6 +308,73 @@ pub fn normalize_mcsm(raw: &str, path: &str) -> Result<String, String> {
         out.push_str(p);
     }
     Ok(out)
+}
+
+/// v0.19.x FOPT 强制实例级注解校验：mcsm 声明时，mcsm_note_{f,o,p,t} 四行
+/// 必须齐全且非空。裸通用名（场域/本体/现象/目的的英文/中文变体）拒收——
+/// 用户裁决：要具体说明"场域在当前环境下是什么，如文件系统"，注通用名等于没注。
+fn validate_mcsm_notes(kv: &BTreeMap<String, String>, path: &str) -> Result<(), String> {
+    let dims = [
+        ("f", "F(场域)"),
+        ("o", "O(本体)"),
+        ("p", "P(现象)"),
+        ("t", "T(目的)"),
+    ];
+    // 裸通用名黑名单：中英变体（不区分大小写）
+    let generic = [
+        "场域",
+        "field",
+        "本体",
+        "ontology",
+        "现象",
+        "phenomenon",
+        "目的",
+        "teleology",
+        "purpose",
+        "goal",
+        "存在论",
+        "ontology维",
+        "dimension",
+    ];
+    let mut missing = Vec::new();
+    let mut generic_hits = Vec::new();
+    for (k, label) in dims {
+        let key = format!("mcsm_note_{}", k);
+        match kv.get(&key) {
+            None => missing.push(label),
+            Some(v) => {
+                let t = v.trim().to_lowercase();
+                if t.is_empty() {
+                    missing.push(label);
+                } else if generic
+                    .iter()
+                    .any(|g| t == *g || t.starts_with(&format!("{}:", g)))
+                {
+                    generic_hits.push(format!("{}='{}'", label, v.trim()));
+                }
+            }
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "{}: mcsm declared but missing instance-level notes: {} — \
+each dimension needs `# mcsm_note_{{f,o,p,t}}: <具体指称>` saying WHAT it concretely is \
+in this environment (e.g. F=文件系统, O=script契约卡, P=##DSL_RESULT协议, T=op分期交付), \
+not the generic dimension name (docs/MCSM.md)",
+            path,
+            missing.join(", ")
+        ));
+    }
+    if !generic_hits.is_empty() {
+        return Err(format!(
+            "{}: generic dimension names are not instance notes: {} — \
+say what the dimension CONCRETELY is in this environment (e.g. F=文件系统), \
+not the abstract label (docs/MCSM.md)",
+            path,
+            generic_hits.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 /// 从 `script(name, k=v, ...)` body 提取 (name, [(k, v), ...])。
@@ -379,14 +465,20 @@ mod tests {
             timeout_secs: 10,
             retries: 0,
             mcsm: mcsm.into(),
+            mcsm_note: String::new(),
         }
     }
 
-
     #[test]
     fn inject_conflict_rewrites_first_dim() {
-        assert_eq!(inject_conflict("F(1)-O(3)-P(3)-T(4)"), "F(2)-O(3)-P(3)-T(4)");
-        assert_eq!(inject_conflict("F(4)-O(1)-P(1)-T(1)"), "F(2)-O(1)-P(1)-T(1)");
+        assert_eq!(
+            inject_conflict("F(1)-O(3)-P(3)-T(4)"),
+            "F(2)-O(3)-P(3)-T(4)"
+        );
+        assert_eq!(
+            inject_conflict("F(4)-O(1)-P(1)-T(1)"),
+            "F(2)-O(1)-P(1)-T(1)"
+        );
         // 非法形态原样返回（防御）
         assert_eq!(inject_conflict("garbage"), "garbage");
     }
@@ -441,9 +533,10 @@ print("hi")
     #[test]
     fn mcsm_field_parsed_and_normalized() {
         // v0.18.11：mcsm 契约键 — F-O-P-T 认知坐标进卡
+        // v0.19.x：必须带实例级 mcsm_note 注解（裸坐标不再合法）
         let src = GOOD.replace(
             "# timeout: 60",
-            "# timeout: 60\n# mcsm: F(2)-o(1)-P(3)-t(4)",
+            "# timeout: 60\n# mcsm: F(2)-o(1)-P(3)-t(4)\n# mcsm_note_f: 文件系统+PATH工具\n# mcsm_note_o: script契约卡\n# mcsm_note_p: ##DSL_RESULT块\n# mcsm_note_t: 单次变换交付",
         );
         let card = parse_contract(&src, "/tmp/x.py").unwrap();
         assert_eq!(card.mcsm, "F(2)-O(1)-P(3)-T(4)", "小写规范化大写");
@@ -456,10 +549,57 @@ print("hi")
         ] {
             let src = GOOD.replace(
                 "# timeout: 60",
-                format!("# timeout: 60\n# mcsm: {bad}").as_str(),
+                format!(
+                    "# timeout: 60\n# mcsm: {bad}\n# mcsm_note_f: 文件系统\n# mcsm_note_o: 契约卡\n# mcsm_note_p: DSL_RESULT\n# mcsm_note_t: 交付"
+                )
+                .as_str(),
             );
             assert!(parse_contract(&src, "/tmp/x.py").is_err(), "应拒绝: {bad}");
         }
+    }
+
+    #[test]
+    fn mcsm_without_note_rejected() {
+        // v0.19.x 强制实例级注解：mcsm 声明了但 mcsm_note_* 缺席 → 拒收
+        let src = GOOD.replace(
+            "# timeout: 60",
+            "# timeout: 60\n# mcsm: F(2)-O(1)-P(3)-T(4)",
+        );
+        let err = parse_contract(&src, "/tmp/x.py").unwrap_err();
+        assert!(err.contains("mcsm_note"), "缺注解必须红: {}", err);
+        assert!(err.contains("F(场域)"), "错误信息列出缺的维度: {}", err);
+    }
+
+    #[test]
+    fn mcsm_note_generic_name_rejected() {
+        // 裸通用名 = 等于没说，拒收（用户裁决：要说 F 在当前环境具体是什么，
+        // 如"文件系统"，不是复读维度名"场域"）
+        let src = GOOD.replace(
+            "# timeout: 60",
+            "# timeout: 60\n# mcsm: F(2)-O(1)-P(3)-T(4)\n# mcsm_note_f: 场域\n# mcsm_note_o: 本体\n# mcsm_note_p: 现象\n# mcsm_note_t: 目的",
+        );
+        let err = parse_contract(&src, "/tmp/x.py").unwrap_err();
+        assert!(err.contains("generic"), "裸通用名必须红: {}", err);
+    }
+
+    #[test]
+    fn mcsm_note_concrete_instance_accepted() {
+        // 实例级注解：写明当前环境下的具体指称 → 通过
+        let src = GOOD.replace(
+            "# timeout: 60",
+            "# timeout: 60\n# mcsm: F(2)-O(1)-P(3)-T(4)\n# mcsm_note_f: 文件系统+PATH里的命令行工具\n# mcsm_note_o: script契约卡(SQLite scripts表)\n# mcsm_note_p: ##DSL_RESULT结构化输出块\n# mcsm_note_t: op分期交付的审计产物",
+        );
+        let card = parse_contract(&src, "/tmp/x.py").unwrap();
+        assert!(card.mcsm_note.contains("文件系统"), "{}", card.mcsm_note);
+        assert!(card.mcsm_note.contains("script契约卡"));
+    }
+
+    #[test]
+    fn mcsm_absent_note_also_absent_ok() {
+        // mcsm 未声明 → note 也空（FOPT 仍是可选接口，不强制交税）
+        let card = parse_contract(GOOD, "/tmp/x.py").unwrap();
+        assert_eq!(card.mcsm, "");
+        assert_eq!(card.mcsm_note, "");
     }
 
     #[test]
