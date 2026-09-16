@@ -501,7 +501,7 @@ src/
 - 所有 API 是 `*_core`（纯 Rust）+ pyo3 `#[pyfunction]` 薄壳；**bin/test 必须调 `*_core`**（pyo3 符号拉进 bin 链接图会炸 rust-lld）
 - 语义：创作错误 → Err/异常；执行失败 → `Ok({"ok":false,"error":…})`（失败是数据）
 - LangChain：`ductile.langchain_tools()`（python/ 混合包）——6 内省/执行工具 + 每脚本契约一个类型化工具
-- PyPI 发布：`maturin build --release -o dist` + twine（token 见 `~/.config/ductile/pypi-token.sh`）
+- PyPI 发布：`./publish.pipeline`（六步 fail-closed 闸：版本三源一致 → 工作树干净 → 测试绿 → maturin 构建 → twine 上传 → PyPI JSON API 回读验证；token 环境变量注入不进日志）。git 提交走 `./ship.pipeline`，两者分离——ship 管 git，publish 管分发
 
 ## 12b. TUI 操作台（v0.20）
 

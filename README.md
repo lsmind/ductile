@@ -203,6 +203,21 @@ ductile script doctor            # 检查契约文件是否还在
 
 `similar` 的语料是 db 注册表（`ductile import` 收的 `.pipeline`/`.hyper` 都入册）加上显式目录参数——import 过的管线无论放在哪个目录都能被查到；结构键每次从文件现算，注册表里的死路径会跳过并标注。
 
+### TUI 操作台（v0.20）
+
+```bash
+ductile tui
+```
+
+终端里的四视图操作台（蓝金暗色）：
+
+- **STATUS**——库计数、认知层旗标（l4 阶段/incidents/降级管线/canary 通过率）
+- **DATA**——最近执行记录浏览器 + 问题单列表
+- **BLUEPRINT**——左侧从 db 注册表选管线（`/` 过滤、死路径标 ✗），右侧渲染成节点蓝图：deliver 节点金框，依赖/门禁/信任/循环四种边分开画
+- **ISOMORPH**——选中管线后加载 `hyper similar` 报告 + structure_key，判断"这个新图是不是重复造轮子"
+
+纯读侧：不写库、不执行管线。键位 `1-4` 切视图、`j k` 光标、`Enter` 选中、`q` 退出。
+
 ### 自动探索（explore）
 
 ```bash
