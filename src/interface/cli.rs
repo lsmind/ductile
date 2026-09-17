@@ -67,6 +67,8 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         "db-stats" => cmd_db_stats(),
         // v0.20 Replay-RSI P1：账本发现树重建（Dream-RSI 式）
         "tree" => crate::L4_structure::replay::cmd_tree(&args[2..]),
+        // v0.20 Replay-RSI P3：tentative patch 重放门（永不退化条款）
+        "replay" if args.len() >= 3 => crate::L4_structure::replay::cmd_replay(&args[2..]),
 
         // v0.20 TUI 操作台（四视图：状态/日志库/蓝图/同构；纯读侧）
         "tui" => {
@@ -2229,6 +2231,50 @@ fn cmd_version_diff(path: &str, v1: &str, v2: &str) -> Result<i32, String> {
 /// 或 → reverted（证伪/回滚，保留审计痕迹）。id 可用 `patch list` 查。
 fn cmd_patch_transition(id: &str, to: &str) -> Result<i32, String> {
     let id: i64 = id.parse().map_err(|_| format!("bad patch id: {id}"))?;
+    // v0.20 Replay-RSI：tentative → confirmed 的重放门（永不退化条款）。
+    // 带效果声明的 patch 必须重放分严格更优才放行——制度保证，不靠自觉。
+    // 无声明（纯 guide 文本）→ 人审通道，门不拦（REPLAY-HUMAN）。
+    if to == "confirmed" {
+        let conn = db::open_try()?;
+        let status: String = conn
+            .query_row("SELECT status FROM patches WHERE id=?1", [id], |r| r.get(0))
+            .unwrap_or_default();
+        if status == "tentative" {
+            let value: String = conn
+                .query_row("SELECT value FROM patches WHERE id=?1", [id], |r| r.get(0))
+                .map_err(|_| format!("patch #{id} not found"))?;
+            match crate::L4_structure::replay::replay_verdict(&value, 0.02, 0.01) {
+                Ok(crate::L4_structure::replay::ReplayVerdict::Reject {
+                    v_pi0,
+                    v_new,
+                    n_sessions,
+                }) => {
+                    println!(
+                        "✗ replay gate REJECTED patch #{id}: V(pi0)={v_pi0:+.4} >= V(new)={v_new:+.4} over {n_sessions} sessions"
+                    );
+                    println!("  confirm blocked — patch stays tentative (revert it or change the effect)");
+                    return Ok(3);
+                }
+                Ok(crate::L4_structure::replay::ReplayVerdict::Confirm {
+                    v_pi0,
+                    v_new,
+                    n_sessions,
+                }) => {
+                    println!(
+                        "✓ replay gate passed: V(pi0)={v_pi0:+.4} < V(new)={v_new:+.4} over {n_sessions} sessions"
+                    );
+                }
+                Ok(crate::L4_structure::replay::ReplayVerdict::HumanReview { reason }) => {
+                    println!("· replay gate: human review ({reason})");
+                }
+                Err(e) => {
+                    // 重放不可算（无 session 数据等）→ fail-closed：不拦人工 confirm，
+                    // 但明示门未评估（与 contract 缺席不阻断同款语义）。
+                    println!("· replay gate unevaluated: {e}");
+                }
+            }
+        }
+    }
     let conn = db::open_try()?;
     db::transition_patch_conn(&conn, id, to)?;
     println!("✓ patch #{} → {}", id, to);
