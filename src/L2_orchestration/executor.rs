@@ -748,6 +748,7 @@ fn exec_proc_inner(
                 append_run_rd(
                     &proc.name,
                     &impl_.name,
+                    &pl.name,
                     pid,
                     Status::Ok,
                     None,
@@ -765,6 +766,7 @@ fn exec_proc_inner(
                 append_run(
                     &proc.name,
                     &impl_.name,
+                    &pl.name,
                     pid,
                     Status::Fail,
                     Some(&short_hash(&err)),
@@ -871,6 +873,7 @@ fn exec_foreach_proc(
                     append_run(
                         &proc.name,
                         &impl_.name,
+                        &pl.name,
                         pid,
                         Status::Ok,
                         None,
@@ -886,6 +889,7 @@ fn exec_foreach_proc(
                     append_run(
                         &proc.name,
                         &impl_.name,
+                        &pl.name,
                         pid,
                         Status::Fail,
                         Some(&short_hash(&err)),
@@ -1042,6 +1046,7 @@ fn eval_when(
 fn append_run(
     proc_name: &str,
     impl_name: &str,
+    pipeline: &str,
     pid: char,
     status: Status,
     _err_hash: Option<&str>,
@@ -1049,16 +1054,19 @@ fn append_run(
     latency_ms: i64,
 ) {
     append_run_rd(
-        proc_name, impl_name, pid, status, _err_hash, _err_at, "", latency_ms,
+        proc_name, impl_name, pipeline, pid, status, _err_hash, _err_at, "", latency_ms,
     );
 }
 
 /// RD-aware append_run: rate_tokens 从 impl 输出文本估算（len/4 ≈ token 数）。
 /// 惩罚域/失真域分家（反双重计费）：失败由 fail-rate 惩罚独占计费（e^(7r)），
 /// est_loss 只在有结构化证据（v1 字段覆盖度）时非零；无证据 = 0.0。
+/// v0.20 前置：管线名穿参（原硬编码空串）。runs.pipeline 由此填实——
+/// replay-tree（Dream-RSI 式发现树重建）的树身份地基。
 fn append_run_rd(
     proc_name: &str,
     impl_name: &str,
+    pipeline: &str,
     pid: char,
     status: Status,
     _err_hash: Option<&str>,
@@ -1081,7 +1089,7 @@ fn append_run_rd(
     db::record_run_rd(
         proc_name,
         impl_name,
-        "",
+        pipeline,
         status_str,
         latency_ms,
         _err_hash,
