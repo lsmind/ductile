@@ -178,6 +178,24 @@ pub fn migrate(conn: &Connection) {
         conn.execute_batch("ALTER TABLE l4_reviews ADD COLUMN label_source TEXT DEFAULT 'human';")
             .ok();
     }
+    // v0.20 Replay-RSI P1：runs 补 session/score 列（账本重放地基）。
+    // session = 一次管线执行的树身份（executor run 入口生成，全节点共享）；
+    // score  = 节点质量分（可空；judge/探针回填，失败也带分入树——
+    //           repairable vs hard-unrecoverable 的区分对上 errflow 分类）。
+    let has_sess = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name='session'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    if has_sess == 0 {
+        conn.execute_batch(
+            "ALTER TABLE runs ADD COLUMN session TEXT DEFAULT '';
+             ALTER TABLE runs ADD COLUMN score REAL;",
+        )
+        .ok();
+    }
     // v0.18.6 P0-刀2：incidents 补 triage/triage_at（判别自动化落点）。
     // 老库同款 pragma 幂等迁移。
     let has_triage = conn
@@ -259,9 +277,12 @@ pub const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS pipelines (
             recorded_at TEXT DEFAULT '',
             rate_tokens INTEGER DEFAULT 0,
             est_loss    REAL DEFAULT 0.0,
-            negotiation TEXT DEFAULT ''
+            negotiation TEXT DEFAULT '',
+            session     TEXT DEFAULT '',
+            score       REAL
         );
         CREATE INDEX IF NOT EXISTS idx_runs_proc ON runs(proc_name);
+        CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session);
         CREATE TABLE IF NOT EXISTS compositions (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             name        TEXT NOT NULL,
@@ -705,6 +726,40 @@ pub fn record_run(
 
 /// RD-aware run record: rate_tokens = impl 输出 token 数（rate 的操作代理），
 /// est_loss = 失真代理（v0: 下游 check 失败=1.0, 通过=0.0; 由 executor 填）。
+// ── v0.20 Replay-RSI：run-session 树身份中继 ──────────────────
+// exec_pipeline 入口生成（pipeline 名 + 时间戳 + 递增序号），全节点落库共享。
+// thread_local（与 PipelineCtx 同款模式）：不进全局 env（并行测试竞态），
+// 不穿签名（StepFn 面太广）。递归 exec_pipeline 各自新 session。
+use std::cell::RefCell;
+thread_local! {
+    static RUN_SESSION: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// 当前 run 的树身份；无 ctx（单测/旁路写入）返回空串（旧行为）。
+pub fn run_session() -> String {
+    RUN_SESSION.with(|c| c.borrow().clone())
+}
+
+/// exec_pipeline 入口调用；返回 guard，Drop 恢复空串（递归安全）。
+pub struct RunSessionGuard;
+impl Drop for RunSessionGuard {
+    fn drop(&mut self) {
+        RUN_SESSION.with(|c| c.borrow_mut().clear());
+    }
+}
+pub fn set_run_session(pipeline: &str) -> RunSessionGuard {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let sess = format!("{}_{}_{}", pipeline, now_ts_compact(), n);
+    RUN_SESSION.with(|c| *c.borrow_mut() = sess);
+    RunSessionGuard
+}
+
+fn now_ts_compact() -> String {
+    now_ts().chars().filter(|c| c.is_ascii_alphanumeric()).collect()
+}
+
 pub fn record_run_rd_conn(
     conn: &Connection,
     proc_name: &str,
@@ -719,9 +774,12 @@ pub fn record_run_rd_conn(
     negotiation: Option<&str>,
 ) {
     let ts = now_ts();
+    // v0.20 Replay-RSI：session 列填实——run_session() 从 thread_local 取当前
+    // run 的树身份（exec_pipeline 入口生成）。旧行为兼容：无 ctx = ''。
+    let session = run_session();
     conn.execute(
-        "INSERT INTO runs (proc_name, impl_name, pipeline, status, latency_ms, err_hash, err_at, recorded_at, rate_tokens, est_loss, negotiation)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        "INSERT INTO runs (proc_name, impl_name, pipeline, status, latency_ms, err_hash, err_at, recorded_at, rate_tokens, est_loss, negotiation, session)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             proc_name,
             impl_name,
@@ -734,6 +792,7 @@ pub fn record_run_rd_conn(
             rate_tokens,
             est_loss,
             negotiation.unwrap_or(""),
+            session,
         ],
     )
     .ok();

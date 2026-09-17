@@ -137,6 +137,9 @@ pub fn exec_pipeline(
     //（StepFn 签名动一发牵全身）。cwd 经 bash 一次性规范化（$VAR/$(...) 可用），
     // 失败即整流退出——cwd 错了后面每条命令都是错误目录，fail-closed。
     let _ctx_guard = PipelineCtx::set(pl);
+    // v0.20 Replay-RSI：本次执行的树身份（全节点 runs.session 共享）。
+    // guard Drop 清理——递归 exec_pipeline 各自新 session。
+    let _sess_guard = crate::db::set_run_session(&pl.name);
     if let Some(poison) = _ctx_guard.as_ref().and_then(|g| g.poison()) {
         return ExecResult::Failed {
             error: poison.to_string(),

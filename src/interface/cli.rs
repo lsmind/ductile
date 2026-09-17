@@ -65,6 +65,8 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         "fts" if args.len() >= 3 => cmd_fts(&args[2]),
         "compose" if args.len() >= 5 => cmd_compose(&args[2], &args[3], &args[4..]),
         "db-stats" => cmd_db_stats(),
+        // v0.20 Replay-RSI P1：账本发现树重建（Dream-RSI 式）
+        "tree" => crate::L4_structure::replay::cmd_tree(&args[2..]),
 
         // v0.20 TUI 操作台（四视图：状态/日志库/蓝图/同构；纯读侧）
         "tui" => {
