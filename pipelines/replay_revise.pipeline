@@ -1,0 +1,19 @@
+// replay_revise.pipeline — v0.20 Replay-RSI P4：证据→LLM 提议 replay_effect 声明→stage→重放门
+// 与 op-revise 同构，但改写对象从 guide 文本升级为「可判定的效果声明」：
+// LLM 只产 skip_procs=/extra_work= 声明，评分与裁决全在确定性层（重放门）。
+// 用法：DUCTILE_DATA=/tmp/xxx ductile run pipelines/replay_revise.pipeline "<pipeline名>"
+Pipeline("replay_revise", "重放证据驱动的效果声明提议环（P4）", cwd="/home/beef/projects/ductile")
+  .proc("ev", script(op_replay_evidence, pipeline="{topic}"))
+    .desc("收集 per-proc 失败聚合证据（纯读）")
+  .proc("propose", llm(op_reviser,
+      prompt="以下是管线账本 runs 的 per-proc 聚合证据：\n@ev.evidence_txt\n\n规则：\n1. 只允许提议「重放效果声明」，格式必须是单独一行：replay_effect: skip_procs=a,b,c 或 replay_effect: extra_work=N\n2. skip_procs 只准列 verdict=never_ok 的 proc（从未成功过的旁路节点；关键链节点跳过会毁掉下游，绝不提议）\n3. 无 never_ok 证据或证据不足 → 输出 value=NO-OP, rationale=无失败证据\n4. rationale 必须引用具体 proc 名和它的 attempts/fails 数字\n输出 JSON：value=效果声明行（或 NO-OP）, rationale=一句话理由",
+      schema="value,rationale", timeout=120))
+    .desc("LLM 读证据产 replay_effect 声明；无证据→NO-OP")
+  .proc("stage", script(op_stage, agent="{topic}", field="when", value="{propose.value}", rationale="{propose.rationale}"))
+    .when(@propose.value != "NO-OP" && @propose.value != "")
+    .desc("声明落 patches（tentative，origin=llm）")
+  .proc("gate", run("ductile replay {stage.patch_id} 2>&1 || true"))
+    .when(@stage.staged == 1)
+    .desc("重放门裁决（exit 0=Confirm候选 3=Reject 2=人审）")
+  .proc("deliver")
+    .deliver(@gate)
