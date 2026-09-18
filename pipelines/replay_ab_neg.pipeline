@@ -1,0 +1,13 @@
+// replay_ab_neg.pipeline — A/B 实验负例：坏声明必须被重放门物理拦截
+// stage 一个「跳过两个 stable 好节点」的声明 → confirm → 门必须 REJECT（exit 3，patch 留 tentative）
+Pipeline("replay_ab_neg", "A/B 负例：skip 好节点必须被门拦截", cwd="/home/beef/projects/ductile")
+  .proc("b0", script(op_ab_worker, arm="A", rounds="2", base="90", tag="b0"))
+    .desc("2 轮基线语料（同 replay_ab）")
+  .proc("neg", script(op_ab_neg))
+    .needs(@b0)
+    .desc("stage 坏声明：skip consult_intake+triage_rule（恒 Ok 核心节点）")
+  .proc("confirm", run("ductile patch confirm {neg.patch_id}; echo EXIT=$?"))
+    .needs(@neg)
+    .desc("重放门裁决：期望 REJECT exit 3，patch 留 tentative")
+  .proc("deliver")
+    .deliver(@confirm)

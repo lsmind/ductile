@@ -1,0 +1,76 @@
+// replay_ab.pipeline — Dream-RSI A/B 实验：armA（固定策略）vs armB（replay 进化）
+// 场景：医美机构私域转化 SOP（新域）。底层=op_ab_worker（臂感知）。
+// armA：R 轮全展开，从不 skip；armB：每 k 轮跑一次进化环
+//   ev(per-proc 证据)→propose(LLM 只产 skip_procs 声明)→stage(tentative patch)
+//   →confirm(ductile patch confirm，重放门焊在内：Reject→exit 3 物理拦截)
+// 两臂共享同一底层、同 RNG 种子族、同 LLM（qwen3.8:27b）——唯一变量=轮间策略进化。
+// armA 也有同额 LLM 调用（noeffectA），只分析不修改——公平对照。
+// 用法：DUCTILE_DATA=/tmp/ab_lib ductile run pipelines/replay_ab.pipeline "6"
+Pipeline("replay_ab", "Dream-RSI A/B：固定策略 vs replay 进化（医美私域 SOP）", cwd="/home/beef/projects/ductile")
+  // ——— 阶段 0：初始部署史（两臂共享的 b0 基线）———
+  .proc("b0", script(op_ab_worker, arm="A", rounds="2", base="90", tag="b0"))
+    .desc("初始部署史：2 轮全展开落库（tag=b0，报告排除）")
+  // ——— 阶段 1：armA 固定策略 R 轮 ———
+  .proc("armA1", script(op_ab_worker, arm="A", rounds="2", base="0"))
+    .needs(@b0)
+    .desc("armA 固定策略 rounds 0-1")
+  .proc("armA2", script(op_ab_worker, arm="A", rounds="2", base="2"))
+    .needs(@armA1)
+    .desc("armA 固定策略 rounds 2-3")
+  .proc("armA3", script(op_ab_worker, arm="A", rounds="2", base="4"))
+    .needs(@armA2)
+    .desc("armA 固定策略 rounds 4-5")
+  // ——— armA 公平对照：同额 LLM 预算，无效果 ———
+  .proc("evA", script(op_replay_evidence, pipeline="sop_ab"))
+    .needs(@armA3)
+    .desc("armA 轮末证据收集（纯读）")
+  .proc("noeffectA", llm(op_reviser,
+      prompt="以下是管线账本 runs 的 per-proc 聚合证据：\n@evA.evidence_txt\n\n这是固定策略对照组。你的任务不是提议任何修改。请分析证据并输出 value=NO-OP, rationale=一句话总结固定策略臂观察到的失败模式。",
+      schema="value,rationale", timeout=120))
+    .needs(@evA)
+    .desc("armA 无效果对照：同额 LLM 调用，只分析不修改")
+  // ——— 阶段 2：armB replay 进化 R 轮，每 k=2 轮进化 ———
+  .proc("armB1", script(op_ab_worker, arm="B", rounds="2", base="0"))
+    .needs(@b0)
+    .desc("armB rounds 0-1（尚无 confirmed skip，全展开）")
+  .proc("evB1", script(op_replay_evidence, pipeline="sop_ab"))
+    .needs(@armB1)
+    .desc("armB 轮间证据收集")
+  .proc("proposeB1", llm(op_reviser,
+      prompt="以下是管线账本 runs 的 per-proc 联合证据：\n@evB1.evidence_txt\n\n规则：\n1. 只允许提议「重放效果声明」，格式必须是单独一行：replay_effect: skip_procs=a,b,c\n2. skip_procs 只准列 verdict=never_ok 的 proc（从未成功过的旁路节点）\n3. 无 never_ok 证据 → value=NO-OP\n4. rationale 必须引用具体 proc 名和它的 attempts/fails 数字\n输出 JSON：value, rationale",
+      schema="value,rationale", timeout=120))
+    .needs(@evB1)
+    .desc("LLM 读证据产 skip_procs 像声明")
+  .proc("stageB1", script(op_stage, agent="op_reviser", field="when", value="{proposeB1.value}", rationale="{proposeB1.rationale}"))
+    .when(@proposeB1.value != "NO-OP" && @proposeB1.value != "")
+    .desc("声明落 patches（tentative，origin=llm）")
+  .proc("confirmB1", run("ductile patch confirm {stageB1.patch_id} 2>&1 || true"))
+    .when(@stageB1.staged == 1)
+    .desc("重放门裁决（焊在 confirm 里：Reject→exit 3 物理拦截）")
+  .proc("armB2", script(op_ab_worker, arm="B", rounds="2", base="2"))
+    .needs(@confirmB1)
+    .desc("armB rounds 2-3（此时已跳过 confirmed never_ok）")
+  .proc("evB2", script(op_replay_evidence, pipeline="sop_ab"))
+    .needs(@armB2)
+    .desc("armB 第二次轮间证据收集")
+  .proc("proposeB2", llm(op_reviser,
+      prompt="以下是管线账本 runs 的 per-proc 聚合证据：\n@evB2.evidence_txt\n\n规则：\n1. 只允许提议「重放效果声明」，格式必须是单独一行：replay_effect: skip_procs=a,b,c\n2. skip_procs 只准列 verdict=never_ok 的 proc（从未成功过的旁路节点）\n3. 无 never_ok 证据 → value=NO-OP\n4. rationale 必须引用具体 proc 名和它的 attempts/fails 数字\n输出 JSON：value, rationale",
+      schema="value,rationale", timeout=120))
+    .needs(@evB2)
+    .desc("LLM 第二次产 skip_procs 声明")
+  .proc("stageB2", script(op_stage, agent="op_reviser_r2", field="when", value="{proposeB2.value}", rationale="{proposeB2.rationale}"))
+    .when(@proposeB2.value != "NO-OP" && @proposeB2.value != "")
+    .desc("第二次声明落 patches")
+  .proc("confirmB2", run("ductile patch confirm {stageB2.patch_id} 2>&1 || true"))
+    .when(@stageB2.staged == 1)
+    .desc("第二次重放门裁决")
+  .proc("armB3", script(op_ab_worker, arm="B", rounds="2", base="4"))
+    .needs(@confirmB2)
+    .desc("armB rounds 4-5")
+  // ——— 阶段 3：终报 ———
+  .proc("report", script(op_ab_report, rounds="6", k_every="2"))
+    .needs(@armA3)
+    .needs(@armB3)
+    .desc("A/B 终报：Δ(B−A)、probes 节省、门裁决")
+  .proc("deliver")
+    .deliver(@report)
