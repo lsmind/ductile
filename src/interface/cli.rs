@@ -2264,6 +2264,11 @@ fn cmd_patch_transition(id: &str, to: &str) -> Result<i32, String> {
                         "✓ replay gate passed: V(pi0)={v_pi0:+.4} < V(new)={v_new:+.4} over {n_sessions} sessions"
                     );
                 }
+                Ok(crate::L4_structure::replay::ReplayVerdict::RejectContract { reason }) => {
+                    println!("✗ replay gate CONTRACT-REJECTED patch #{id}: {reason}");
+                    println!("  confirm blocked — patch stays tentative (revert it or change the effect)");
+                    return Ok(3);
+                }
                 Ok(crate::L4_structure::replay::ReplayVerdict::HumanReview { reason }) => {
                     println!("· replay gate: human review ({reason})");
                 }

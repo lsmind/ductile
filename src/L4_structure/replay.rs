@@ -311,8 +311,54 @@ pub fn parse_effect(value: &str) -> PatchEffect {
     PatchEffect::NoEffect
 }
 
+/// v0.20.1 skip 合同（Eq.1 max 语义缺口的制度修补）。
+///
+/// A/B 负例实证（2026-09-18）：`skip_procs=consult_intake,triage_rule`（两个
+/// 恒 Ok 节点）门放行且 V 反升 0.89→0.9167——best=max 只看最高分，算术层
+/// 看不见冗余好节点的损失（剩一个 1.0 节点时跳谁 N 罚都减）。
+/// 论文 Eq.1 的重放轨迹是树上的连贯展开（前缀截断/批重组），本就不容
+/// 「保留后文、删掉中段」的樱桃式过滤——所以合法性焊在结构层：
+///
+/// **skip_procs 只准修剪死重探针：被 skip 的 proc 在任何 session 都无
+/// 正分（score>0）历史。任一正分 → 结构性 Reject，不交给算术。**
+///
+/// 逃生通道：真想下线「曾经好过」的节点 → 无效果声明的 guide patch 走
+/// 人审（HumanReview），或修好它。制度保证，不靠 LLM 自觉。
+/// 附带收益：flaky 节点（曾成功过）从此结构性不可 skip——关掉 A/B
+/// 诚实账里的 flaky 白嫖偏置。
+pub fn skip_contract_violation(
+    skip: &[String],
+    history: &BTreeMap<String, Vec<(String, f64)>>,
+) -> Option<String> {
+    let offenders: Vec<String> = skip
+        .iter()
+        .filter_map(|p| {
+            let best = history
+                .values()
+                .flat_map(|nodes| nodes.iter().filter(|(n, _)| n == p).map(|(_, s)| *s))
+                .fold(0.0_f64, f64::max);
+            if best > 0.0 {
+                Some(format!("{p}(best={best:.2})"))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if offenders.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "skip contract violated: {} — positive history; skip_procs only legal for \
+             dead-weight probes (all-zero scores). Retire them via a no-effect guide \
+             patch (human review) instead",
+            offenders.join(", ")
+        ))
+    }
+}
+
 /// 全历史重放对比：每 session 建 pi0/pi_new 两条轨迹，Eq.1 均分。
-fn replay_compare(effect: &PatchEffect, beta1: f64, beta2: f64) -> Result<(f64, f64, usize), String> {
+/// 数据加载抽离——skip 合同与算术对比共用一次读库。
+fn load_session_scores() -> Result<BTreeMap<String, Vec<(String, f64)>>, String> {
     let conn = db::open();
     let mut stmt = conn
         .prepare(
@@ -325,6 +371,8 @@ fn replay_compare(effect: &PatchEffect, beta1: f64, beta2: f64) -> Result<(f64, 
         .map_err(|e| e.to_string())?
         .filter_map(|x| x.ok())
         .collect();
+    drop(stmt);
+    drop(conn);
 
     let mut by_session: BTreeMap<String, Vec<(String, f64)>> = BTreeMap::new();
     for (sess, proc, sc, st) in rows {
@@ -334,10 +382,18 @@ fn replay_compare(effect: &PatchEffect, beta1: f64, beta2: f64) -> Result<(f64, 
     if by_session.is_empty() {
         return Err("no sessions in ledger — replay gate needs runs with session (v0.20+)".into());
     }
+    Ok(by_session)
+}
 
+fn replay_compare_on(
+    by_session: &BTreeMap<String, Vec<(String, f64)>>,
+    effect: &PatchEffect,
+    beta1: f64,
+    beta2: f64,
+) -> (f64, f64, usize) {
     let mut sum0 = 0.0;
     let mut sum_new = 0.0;
-    for (_sess, nodes) in &by_session {
+    for (_sess, nodes) in by_session {
         let pi0 = ReplayTrace::serial(nodes.iter().map(|(_, s)| *s).collect());
         sum0 += replay_score(&pi0, beta1, beta2);
         let new_scores: Vec<f64> = match effect {
@@ -358,12 +414,15 @@ fn replay_compare(effect: &PatchEffect, beta1: f64, beta2: f64) -> Result<(f64, 
         sum_new += replay_score(&pinew, beta1, beta2);
     }
     let n = by_session.len();
-    Ok((sum0 / n as f64, sum_new / n as f64, n))
+    (sum0 / n as f64, sum_new / n as f64, n)
 }
 
 pub enum ReplayVerdict {
     Confirm { v_pi0: f64, v_new: f64, n_sessions: usize },
     Reject { v_pi0: f64, v_new: f64, n_sessions: usize },
+    /// v0.20.1 skip 合同违约：结构性 Reject，算术根本不算。
+    /// v_pi0/v_new 填 0 占位——合同的裁决不依赖分数。
+    RejectContract { reason: String },
     HumanReview { reason: String },
 }
 
@@ -373,8 +432,22 @@ pub fn replay_verdict(patch_value: &str, beta1: f64, beta2: f64) -> Result<Repla
         PatchEffect::NoEffect => Ok(ReplayVerdict::HumanReview {
             reason: "no replay_effect declaration — guide-text patches go to human review".into(),
         }),
-        _ => {
-            let (v_pi0, v_new, n) = replay_compare(&effect, beta1, beta2)?;
+        PatchEffect::SkipProcs(ref skip) => {
+            let history = load_session_scores()?;
+            // v0.20.1 skip 合同先行：正分历史 = 结构性 Reject，不进算术
+            if let Some(reason) = skip_contract_violation(&skip, &history) {
+                return Ok(ReplayVerdict::RejectContract { reason });
+            }
+            let (v_pi0, v_new, n) = replay_compare_on(&history, &effect, beta1, beta2);
+            if v_new > v_pi0 {
+                Ok(ReplayVerdict::Confirm { v_pi0, v_new, n_sessions: n })
+            } else {
+                Ok(ReplayVerdict::Reject { v_pi0, v_new, n_sessions: n })
+            }
+        }
+        PatchEffect::ExtraWork(_) => {
+            let history = load_session_scores()?;
+            let (v_pi0, v_new, n) = replay_compare_on(&history, &effect, beta1, beta2);
             if v_new > v_pi0 {
                 Ok(ReplayVerdict::Confirm { v_pi0, v_new, n_sessions: n })
             } else {
@@ -425,6 +498,12 @@ pub fn cmd_replay(args: &[String]) -> Result<i32, String> {
             );
             Ok(3)
         }
+        ReplayVerdict::RejectContract { reason } => {
+            println!(
+                "REPLAY-REJECT-CONTRACT patch#{id} [{field}]  {reason}"
+            );
+            Ok(3)
+        }
         ReplayVerdict::HumanReview { reason } => {
             println!("REPLAY-HUMAN patch#{id} [{field}]  {reason}");
             Ok(2)
@@ -448,6 +527,31 @@ mod replay_gate_tests {
         );
         assert_eq!(parse_effect("纯 guide 改动无声明"), PatchEffect::NoEffect);
         assert_eq!(parse_effect("replay_effect: extra_work=bad"), PatchEffect::NoEffect);
+    }
+
+    #[test]
+    fn skip_contract_blocks_positive_history() {
+        let mut hist = BTreeMap::new();
+        hist.insert(
+            "s1".to_string(),
+            vec![
+                ("consult_intake".to_string(), 1.0),
+                ("bad_probe".to_string(), 0.0),
+            ],
+        );
+        // 恒 Ok 节点 → 违约（A/B 负例的精确重放）
+        let v = skip_contract_violation(&["consult_intake".into()], &hist);
+        assert!(v.is_some(), "positive-history proc must violate contract");
+        assert!(v.unwrap().contains("consult_intake"));
+        // 全零死重探针 → 合法（这是 skip_procs 的唯一正当用途）
+        assert!(skip_contract_violation(&["bad_probe".into()], &hist).is_none());
+        // flaky（曾正分，哪怕只在部分 session）→ 违约（白嫖洞关闭）
+        let mut hist2 = BTreeMap::new();
+        hist2.insert("s1".to_string(), vec![("flaky_push".to_string(), 1.0)]);
+        hist2.insert("s2".to_string(), vec![("flaky_push".to_string(), 0.0)]);
+        assert!(skip_contract_violation(&["flaky_push".into()], &hist2).is_some());
+        // 历史里不存在的 proc → 合同不管（算术层：无变化 → REJECT，保守）
+        assert!(skip_contract_violation(&["ghost".into()], &hist).is_none());
     }
 
     #[test]
