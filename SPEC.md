@@ -585,6 +585,8 @@ resolver 的 system 写死两类推断纪律：限制性推断（须原话明确
 |---|---|
 | Parse error | 括号/逗号/`->`；字符串字面量内的括号已跳过 |
 | `bad .when(@x) … fail-closed` | 裸 @proc 缺 `.field`，check 期拦截 |
+| `no eligible impl … missing judge fields` | 全 impl 被 `.when` 门死且引用字段落空——查上游是否吐了该字段（##DSL_RESULT 块），非 impl 崩溃 |
+| `no eligible impl … all conditions evaluated false` | 引用在场但条件判假（阈值路由）——检查阈值与上游实际值 |
 | `shell injection of @x requires explicit trust` | 补 `.trust(@x)` |
 | All paths failed | 检查 bridge 路径 / 桥劫持（§5） |
 | 路径总不被选中 | penalty 惩罚，`ductile patch list` |

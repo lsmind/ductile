@@ -111,6 +111,9 @@ const PAT_CONTRACT: &[&str] = &[
                           // "param '" 较宽，但 contract 在判定链首位且与 not in contract/missing required
                           // 同现——引擎真实输出是 "param 'x' not in contract of 'y'"，
                           // 外部脚本错误几乎不会以 "param '" 开头形态出现。见 contract_param_quote_pattern 测试。
+    "no eligible impl", // v0.20.1 when-gate 死路：全 impl 被 .when 门死（路由死≠路径失败）——
+                        // 裁判字段缺席/条件判假是 DSL 创作错误，fail-fast；此前伪装
+                        // "All paths failed" 落 crash 兜底，排障方向跑偏。
 ];
 
 const PAT_TIMEOUT: &[&str] = &["timed out", "timeouterror", "timeout expired"];
@@ -651,6 +654,15 @@ mod tests {
     use super::*;
 
     // ── 分类：引擎原生错误串（源码逐条摘录） ──
+
+    #[test]
+    fn classify_no_eligible_impl_is_contract() {
+        // v0.20.1 when-gate 死路：路由死≠路径失败，归 contract（Escalate fail-fast）
+        assert_eq!(
+            classify("no eligible impl: proc 'slim' gated off by .when — missing judge fields: @load.content"),
+            ErrCode::Contract
+        );
+    }
 
     #[test]
     fn engine_run_timeout() {

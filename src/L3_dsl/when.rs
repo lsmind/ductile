@@ -343,9 +343,88 @@ pub fn eval_cond_str(
     }
 }
 
+/// v0.20.1 when-gate 死路根因收集：条件里引用的 `@proc.field` 中，上游结果里
+/// **解析不到值**的引用清单（含 @self.field 形态，executor 侧自指判定用）。
+/// 用途：所有 impl 被 `.when` 门死时，错误消息不再笼统报 "All paths failed"，
+/// 而是列出「哪个引用落空了」——门死 ≠ 路径失败，两者根因和修法完全不同
+/// （门死=路由/字段缺席，查上游产出；路径失败=impl 真崩，查 bridge/脚本）。
+/// 与 eval 同走 parse_when（同文法同 AST），保证收集器与求值器不漂移。
+/// 空条件/坏条件 → 空清单（坏条件由 eval_cond_str 负责提示）。
+pub fn missing_refs_in(
+    cond: &str,
+    params: &BTreeMap<String, String>,
+    results: &BTreeMap<String, Value>,
+) -> Vec<String> {
+    let parsed = match parse_when(cond) {
+        Ok(Some(c)) => c,
+        _ => return Vec::new(),
+    };
+    let mut refs = Vec::new();
+    collect_missing(&parsed, &CondCtx { params, results }, &mut refs);
+    refs
+}
+
+fn collect_missing(c: &Cond, ctx: &CondCtx, out: &mut Vec<String>) {
+    match c {
+        Cond::And(l, r) => {
+            collect_missing(l, ctx, out);
+            collect_missing(r, ctx, out);
+        }
+        Cond::Exists(op) => {
+            if let Operand::ResultField { proc, field } = op {
+                if result_field(ctx.results, proc, field).is_none() {
+                    push_ref(out, proc, field);
+                }
+            }
+        }
+        Cond::Cmp(lhs, _, rhs) => {
+            for op in [lhs, rhs] {
+                if let Operand::ResultField { proc, field } = op.as_ref() {
+                    if result_field(ctx.results, proc, field).is_none() {
+                        push_ref(out, proc, field);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn push_ref(out: &mut Vec<String>, proc: &str, field: &str) {
+    let r = format!("@{}.{}", proc, field);
+    if !out.contains(&r) {
+        out.push(r);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v0_20_1_missing_refs_in_collects_absent_fields() {
+        // 上游 load 存在但无 content 字段（read 动词典型形态：字段随文件内容解析）
+        let mut results = BTreeMap::new();
+        results.insert(
+            "load".to_string(),
+            Value::Text("§§FIELDS§§ok=1§§count=15§§RAW§§...".to_string()),
+        );
+        let params = BTreeMap::new();
+        // 门引用 @load.content → 落空，应被收集
+        let missing = missing_refs_in("@load.content", &params, &results);
+        assert_eq!(missing, vec!["@load.content".to_string()]);
+        // 门引用 @load.count → 在场，不收集
+        assert!(missing_refs_in("@load.count != \"0\"", &params, &results).is_empty());
+        // 上游 proc 整个缺席 → 也算落空
+        let missing2 = missing_refs_in("@ghost.score >= 80", &params, &results);
+        assert_eq!(missing2, vec!["@ghost.score".to_string()]);
+        // 引用在场但数值比较判假 → 空清单（executor 侧走 "refs present" 分支）
+        let mut r2 = BTreeMap::new();
+        r2.insert(
+            "gate".to_string(),
+            Value::Text("§§FIELDS§§score=95§§RAW§§".to_string()),
+        );
+        assert!(missing_refs_in("@gate.score < 90", &params, &r2).is_empty());
+    }
 
     #[test]
     fn v0_18_14_and_conjunction_semantics() {

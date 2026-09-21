@@ -728,6 +728,32 @@ fn exec_proc_inner(
     );
 
     let mut raw_err: Option<String> = None;
+    // v0.20.1 when-gate 死路归层：零 eligible = 所有 impl 被 .when 门死，不是路径失败。
+    // 旧态：raw_err=None 落 "All paths failed" 兜底串 → errflow 归 crash → 排障往 bridge/
+    // 脚本方向跑偏（实际是路由死/字段缺席）。新态：产结构化 no-eligible 消息，列出落空的
+    // 引用（when.rs missing_refs_in 与求值器同 AST），分类归 contract（路由错=创作错误，
+    // fail-fast，Escalate 不重试——重试门还是死的）。
+    if eligible.is_empty() && !proc.plan.is_empty() {
+        let missing: Vec<String> = proc
+            .plan
+            .iter()
+            .filter_map(|i| i.when.as_deref())
+            .flat_map(|cond| crate::when::missing_refs_in(cond, params, results))
+            .collect();
+        let missing_detail = if missing.is_empty() {
+            // 引用都在场但条件判假（如阈值比较）——同样是路由死，不是崩溃
+            "all conditions evaluated false (refs present)".to_string()
+        } else {
+            format!(
+                "missing judge fields: {} — check upstream output (##DSL_RESULT block / encoded fields)",
+                missing.join(", ")
+            )
+        };
+        return Err(format!(
+            "no eligible impl: proc '{}' gated off by .when — {}",
+            proc.name, missing_detail
+        ));
+    }
     for (rank, impl_) in ranked.iter().enumerate() {
         let pid = (b'A' + rank as u8) as char;
         if impl_.stub {
@@ -835,6 +861,28 @@ fn exec_foreach_proc(
         &proc.pick_by,
         &proc.name,
     );
+    // v0.20.1 when-gate 死路归层（foreach 同修）：零 eligible = 全 impl 被 .when 门死。
+    // 旧态落 "All paths failed for foreach item" → crash 分类，与普通路径失败混淆。
+    if eligible.is_empty() && !proc.plan.is_empty() {
+        let missing: Vec<String> = proc
+            .plan
+            .iter()
+            .filter_map(|i| i.when.as_deref())
+            .flat_map(|cond| crate::when::missing_refs_in(cond, params, results))
+            .collect();
+        let missing_detail = if missing.is_empty() {
+            "all conditions evaluated false (refs present)".to_string()
+        } else {
+            format!(
+                "missing judge fields: {} — check upstream output (##DSL_RESULT block / encoded fields)",
+                missing.join(", ")
+            )
+        };
+        return Err(format!(
+            "no eligible impl: proc '{}' (foreach) gated off by .when — {}",
+            proc.name, missing_detail
+        ));
+    }
 
     for item in &items {
         let clean_item = item.split('|').next().unwrap_or(item).trim().to_string();
