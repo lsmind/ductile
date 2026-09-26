@@ -2139,6 +2139,11 @@ fn exec_run(
     // Spawn + deadline: kill the whole process group on timeout so orphaned
     // children (e.g. `foo &`) don't outlive the pipeline.
     use std::process::Stdio;
+    // v0.21 资源治理③：进程组围栏。此前此处声称组杀但从未设组长——
+    // bash -c 子进程继承 ductile 的组，kill -9 -pid 打的是不存在的组，
+    // 孤孙子进程漏杀。现在 spawn 前自立组长，kill(-pgid) 真正生效。
+    #[cfg(unix)]
+    command.process_group(0);
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2371,6 +2376,16 @@ pub fn exec_script_call(
     let interp = crate::script::lang_interpreter(&card.lang)?;
     let mut command = Command::new(interp);
     command.arg(&card.path);
+    // v0.21 资源治理①：引擎边界 env 卫生——必须在注入前剥掉继承的外层
+    // DUCTILE_ARG_*（Command 的 env 变异按调用顺序应用，后置会误伤正当参数）。
+    // 场景：script 步内嵌套 ductile run，外层参数 env 泄给内层脚本——
+    // 子进程读到与自身无关的分发信号（planetes fork 炸弹事故根因之一）。
+    // 参数的唯一正当通道是下方按契约注入的 env；继承链残留一律视为污染。
+    for (k, _) in std::env::vars() {
+        if k.starts_with("DUCTILE_ARG_") {
+            command.env_remove(&k);
+        }
+    }
     for (k, v) in &call_args {
         // v0.18.4：搬运处卫生——param 经 @ref/resolve_vars 后可能带序列化
         // 引号（反馈单#2：脚本侧 int('"16"') 炸 import，九臂全灭而管线绿灯）。
@@ -2393,18 +2408,39 @@ pub fn exec_script_call(
     let timeout_secs = card.timeout_secs.max(1);
 
     eprintln!(
-        "    -> script: {} (lang={}, timeout={}s, retries={})",
-        name, card.lang, timeout_secs, card.retries
+        "    -> script: {} (lang={}, timeout={}s, retries={}, concurrency={})",
+        name, card.lang, timeout_secs, card.retries,
+        card.concurrency.as_str()
     );
+
+    // v0.21 资源治理②：契约互斥强制。concurrency 契约此前只是展示字段，
+    // 无任何执行点强制——两条管线可并发跑 exclusive 脚本（GPU 类）把机器
+    // 打死。现在：serial = 同名脚本跨管线互斥（flock 按脚本名），exclusive
+    // = 全机互斥（flock 单例锁）。safe = 无锁。争用即报结构化错误
+    // fail-closed——GPU 类脚本宁可停也不排队等六小时（排队语义交给
+    // 调度层 .when 重试，不是引擎锁）。
+    // 串行键含脚本绝对路径：不同项目同名脚本互不误撞。
+    let _lock_guard =
+        crate::L0_physical::locks::acquire_concurrency_lock(&card.path, &card.concurrency)?;
 
     use std::process::Stdio;
     let mut last_err = String::new();
     for attempt in 0..=card.retries {
+        // v0.21 资源治理③：进程组围栏——子进程自立组长（setsid 语义），
+        // 超时/失败时 kill(-pgid) 组杀孙进程。此前裸 child.kill() 只杀直接
+        // 子进程，孙进程成孤儿（H3 生成脚本 subprocess 起 python 孙进程、
+        // 超时后存活继续抢 GPU 实锤）。Windows 无 process_group，仅杀主进程。
+        #[cfg(unix)]
+        command.process_group(0);
         let mut child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("script '{}' launch failed: {}", name, e))?;
+        // v0.21 资源治理③：进程组围栏——子进程自立组长，超时/失败组杀。
+        // 此前裸 child.kill() 只杀直接子进程，孙进程成孤儿（H3 生成脚本
+        // subprocess 起 python 孙进程超时后存活继续抢 GPU 实锤）。
+        let pgid = child.id() as i32;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
         let status;
         loop {
@@ -2417,8 +2453,11 @@ pub fn exec_script_call(
                     if std::time::Instant::now() >= deadline {
                         let _ = child.kill();
                         let _ = child.wait();
+                        if pgid > 0 {
+                            libc_kill_group(pgid);
+                        }
                         return Err(format!(
-                            "script '{}' timed out after {}s",
+                            "script '{}' timed out after {}s (process group killed)",
                             name, timeout_secs
                         ));
                     }

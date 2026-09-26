@@ -1,4 +1,4 @@
-# Ductile DSL — 规格文档（v0.20.0）
+# Ductile DSL — 规格文档（v0.21.0）
 
 > 面向 AI agent / LLM 调用者与人类维护者。读完应能独立完成安装、管线编写、执行、调试、调优。
 > 本文只描述**当前状态**；历史沿革见 git log，不在此堆叠。
@@ -391,7 +391,7 @@ key1=value1
 # output: words(int), lines(int)
 # pure: true                # 副作用标注（cse_safe 判定用）
 # idempotent: true
-# concurrency: safe         # safe | exclusive
+# concurrency: safe         # safe | serial | exclusive
 # effects: none             # none | fs | net | system
 # timeout: 10               # 秒；# retries: N 可选
 # mcsm: F(2)-O(1)-P(3)-T(2)          # 可选 FOPT 坐标
@@ -399,6 +399,19 @@ key1=value1
 ```
 
 `pure && idempotent && concurrency=safe` → `cse_safe=true`（可 CSE/并行）；副作用脚本不可熔合不可并行。
+
+### 7.1b 资源治理（v0.21）——concurrency 从声明变物理保证
+
+| concurrency | 引擎行为 |
+|---|---|
+| `safe` | 无锁，可并行 |
+| `serial` | 同一脚本（按绝对路径分键）跨管线互斥（flock） |
+| `exclusive` | 全机互斥（flock 单例锁）——GPU/大内存类标注此档 |
+
+- 争用即 **fail-closed 硬错**（`concurrency conflict`），不排队：重试时机归调度层（`.when` 探针 / `.retry`），引擎锁只管互斥
+- 锁 = XDG_RUNTIME_DIR 下的 flock：持锁进程退出（含被 OOM 硬杀）内核自动释放，无陈旧锁死锁
+- 引擎 spawn 脚本前剥掉继承的 `DUCTILE_ARG_*`（参数唯一正当通道是契约注入；嵌套 run 泄入的残留一律视为污染——planetes fork 炸弹事故根因）
+- 脚本进程自立进程组：超时/失败时 `kill(-pgid)` 组杀孙进程，不留孤儿
 
 ### 7.2 DSL 调用与执行语义
 
