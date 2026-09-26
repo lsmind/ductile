@@ -480,6 +480,12 @@ log_only ──(≥8 标签 且 一致率 ≥70%)──▶ enforcing
 
 `[agents.x] negotiate=true` 或 NEGOTIATE=1（默认关）。模型输出 `{"enough":false,"missing":[{"ref":"@x.y","why":…}]}` → 引擎补料重跑（追加式，预算 3 轮 fail-closed）。resolve 支持 @proc.field / @proc 全文 / topic / script:契约卡。日志落 runs.negotiation；中间轮禁播 canary。
 
+> **⚠️ v0.22 验尸报告（用量审计，退役待拍板）**：截至 v0.22 落地，真库
+> `runs.negotiation` 非空行 = **0**、`canary_runs` = **0**、`shelved` = **0**、
+> `patches` = **0**——四处特性零真实使用（canaries 52 条 / l4_reviews 322 条
+> 有存量但 canary 从未真跑）。非立即删除：先在此立字据，v0.23 拍板会据此
+> 决定「补使用场景 / 冻结 / 退役」。在其被真实使用前，不为其新增代码路径。
+
 ## 10. SQLite schema（18 表）
 
 库：`$DUCTILE_DATA/ductile.db`（未设 → `~/.local/share/ductile/ductile.db`）。`DUCTILE_DATA` 同时是隔离探针开关。核心表：

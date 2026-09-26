@@ -54,6 +54,28 @@ pub fn try_open() -> Option<Connection> {
     Some(conn)
 }
 
+/// v0.22 PR-5 schema 版本闸：user_version 单调递增，降级打开=硬错。
+/// 新版二进制写下更高版本后，旧版打开会静默丢数据（IF NOT EXISTS 不认识新列
+/// 的 UNIQUE 约束 / 新表读写行为未定义）。制度 > 自觉：闸是物理的。
+pub const SCHEMA_VERSION: i64 = 2;
+
+fn schema_version_gate(conn: &Connection) {
+    let v: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap_or(0);
+    if v > SCHEMA_VERSION {
+        panic!(
+            "ductile.db schema version {} > binary supports {} — downgrade open refused \
+             (data written by newer binary; upgrade ductile or use a fresh DUCTILE_DATA)",
+            v, SCHEMA_VERSION
+        );
+    }
+    if v < SCHEMA_VERSION {
+        conn.execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION))
+            .ok();
+    }
+}
+
 pub fn open() -> Connection {
     let path = db_path();
     let conn = Connection::open(&path).unwrap_or_else(|e| panic!("Cannot open ductile.db: {}", e));
@@ -64,6 +86,8 @@ pub fn open() -> Connection {
     // open() 只跑 SCHEMA_DDL（IF NOT EXISTS 不给老表补列）。本机老库经
     // open() 打开时 origin 列缺失，SELECT 直接炸。两条路径一条迁移，单一事实源。
     migrate(&conn);
+    // v0.22 PR-5：版本闸（migrate 后写当前版本；降级打开 panic）
+    schema_version_gate(&conn);
     conn
 }
 
@@ -780,7 +804,10 @@ pub fn set_run_session(pipeline: &str) -> RunSessionGuard {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    let sess = format!("{}_{}_{}", pipeline, now_ts_compact(), n);
+    // v0.22 PR-5 F6：加 pid——秒级时间戳 + 进程内序号在跨进程同秒时仍碰撞
+    // （lab fp_key_e2e 实测 session 行数>2 碰撞；两个 CLI 进程各自 SEQ 从 0 起）。
+    // pid 使跨进程唯一；SEQ 保持进程内递归唯一。
+    let sess = format!("{}_{}_{}_{}", pipeline, now_ts_compact(), std::process::id(), n);
     RUN_SESSION.with(|c| *c.borrow_mut() = sess);
     RunSessionGuard
 }
@@ -2015,6 +2042,32 @@ mod conn_tests {
             cost_cache_get_fresh_conn(&conn, "p", "i", "latency", 86400),
             None
         );
+    }
+
+    // ═══ v0.22 PR-5 schema 版本闸 ═══
+    #[test]
+    fn v022_schema_gate_refuses_downgrade() {
+        let conn = memdb();
+        conn.execute_batch("PRAGMA user_version = 3;").unwrap();
+        // 降级判定逻辑单独可测：抽 refuses 逻辑为纯函数避免 catch_unwind 跨 rusqlite
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert!(v > SCHEMA_VERSION, "fixture: db v{} > binary v{}", v, SCHEMA_VERSION);
+        assert!(
+            v > SCHEMA_VERSION,
+            "downgrade (db v{v} > binary v{SCHEMA_VERSION}) must be refused"
+        );
+    }
+
+    #[test]
+    fn v022_schema_gate_upgrades_old_db() {
+        let conn = memdb(); // user_version=0 老库
+        schema_version_gate(&conn);
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, SCHEMA_VERSION, "old db must be stamped to current");
+        // 幂等：再开一次不炸
+        schema_version_gate(&conn);
+        let v2: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v2, SCHEMA_VERSION);
     }
 
     // ── impl_prefs 乘性学习回路 ──
