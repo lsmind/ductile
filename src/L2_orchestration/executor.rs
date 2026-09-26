@@ -712,7 +712,7 @@ fn exec_proc_inner(
     pl: &Pipeline,
 ) -> Result<Value, String> {
     // Normal proc: rank impls, try in order
-    let recent_map = load_recent_runs(&proc.name);
+    let recent_map = load_recent_runs_piped(&proc.name, &pl.name);
     let eligible: Vec<&Impl> = proc
         .plan
         .iter()
@@ -847,7 +847,7 @@ fn exec_foreach_proc(
     );
 
     let mut sub_results: Vec<Result<Value, String>> = Vec::new();
-    let recent_map = load_recent_runs(&proc.name);
+    let recent_map = load_recent_runs_piped(&proc.name, &pl.name);
     // v0.11.1：foreach 子 proc 也走 when 裁判过滤（此前整组绕过 is_eligible）。
     let eligible: Vec<&Impl> = proc
         .plan
@@ -1153,8 +1153,11 @@ fn append_run_rd(
     let _ = pid;
 }
 
-fn load_recent_runs(proc_name: &str) -> BTreeMap<String, RecentRuns> {
-    let rows = db::recent_runs(proc_name);
+/// v0.22 PR-1 键改造：读侧按 pipeline 维度隔离。pipeline 名做粗键——
+/// 同名 proc 在别管线的失败不再混入（E1 3.6× 混计）。未来收紧为内容指纹
+/// （复用 tier_journal ctx 的 FNV 零依赖零件）时签名不变。
+fn load_recent_runs_piped(proc_name: &str, pipeline: &str) -> BTreeMap<String, RecentRuns> {
+    let rows = db::recent_runs_pipeline(proc_name, pipeline);
     if rows.is_empty() {
         return BTreeMap::new();
     }
@@ -1176,6 +1179,12 @@ fn load_recent_runs(proc_name: &str) -> BTreeMap<String, RecentRuns> {
         let consec = recent.iter().rev().take_while(|r| r.status != "Ok").count();
         let sum_tokens: i64 = recent.iter().map(|r| r.rate_tokens).sum();
         let sum_loss: f64 = recent.iter().map(|r| r.est_loss).sum();
+        // v0.22 PR-1：窗口内实测延迟均值——pick_by=latency 的排序基准。
+        let latency_avg_ms = if recent.is_empty() {
+            0.0
+        } else {
+            recent.iter().map(|r| r.latency_ms as f64).sum::<f64>() / recent.len() as f64
+        };
         result.insert(
             name.clone(),
             RecentRuns {
@@ -1185,6 +1194,7 @@ fn load_recent_runs(proc_name: &str) -> BTreeMap<String, RecentRuns> {
                 n: recent.len(),
                 sum_tokens,
                 sum_loss,
+                latency_avg_ms,
             },
         );
     }

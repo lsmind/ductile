@@ -258,12 +258,16 @@ apply_patches(pl) → build_egraph(pl) → parallel_groups(eg) → 逐层执行�
 ```
 eligible = plan.filter(when 通过)
 ranked   = eligible.sort_by(score)
-score    = base_cost × (1 + penalty) / pref
+score    = base × (1 + penalty) / pref
 ```
 
-- `base_cost = 0.001×latency + 10×risk + 0.0001×tokens + 1×money`（静态声明通道已退役，全 0）
-- 同 cost 平手由 `(proc, impl)` 字典序 tiebreak 决胜；**真正起作用的排序通道是历史惩罚/ImplPrefs 学习偏好**（`.pick(by=history)` 默认）
+- **base 三通道**（v0.22 声明即契约——声明的位置是「选通道」不是「猜数值」）：
+  - 默认（未声明 cost，`.pick(by=history)`）：`base ≡ 1`——纯学习序，纪律层（penalty/pref）独立生效
+  - `pick(by=latency)`：`base = 窗口 20 次实测延迟均值`（runs.latency_ms）；冷启动无历史回退声明值
+  - 声明 cost：静态基准 `0.001×latency + 10×risk + 0.0001×tokens + 1×money`
+- 同 score 平手：稳定排序保留**声明序**（v0.21 文档误作字典序 tiebreak，F2 勘误）
 - `pref` 乘性学习权重：成功 ×1.1 / 失败 ÷1.5，clamp [0.05, 20]，落 impl_prefs 表
+- **键维度（v0.22 PR-1）**：惩罚窗口按 `(pipeline, proc)` 隔离——同名 proc 在别管线的失败不混入本管线选路（E1 3.6× 混计反例修复）
 
 ### 3.3 滑动窗口惩罚（窗口 20 次）
 

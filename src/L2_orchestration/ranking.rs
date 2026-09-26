@@ -88,10 +88,26 @@ fn rank_impls_pref<'a>(
     proc_name: &str,
 ) -> Vec<&'a Impl> {
     let static_mode = pick_by == "static";
+    // v0.22 PR-1 latency 通道：base = 实测延迟 EMA（runs.latency_ms，每轮在记）。
+    // 无历史（冷启动）回退声明值——声明的位置从「猜数值」变成「选通道」。
+    let latency_mode = pick_by == "latency";
     let mut ranked: Vec<(f64, &'a Impl)> = impls
         .iter()
         .map(|i| {
-            let base = weights.cost_total(&i.cost);
+            // v0.22 PR-1 学习环接线（F1 修复）：未声明 cost（Cost::default()=全0）时
+            // base≡1——纪律层（penalty / 学习权重 w）不再被 0 乘灭。声明的位置从
+            // 「猜数值」(v0.11 已退役的 .cost()) 变成「选通道」：不声明 = 纯学习序；
+            // 声明 cost = 静态基准；pick_by=latency = 实测数据驱动。
+            let base = if latency_mode {
+                match recent.get(&i.name) {
+                    Some(rr) if rr.window > 0 && rr.latency_avg_ms > 0.0 => rr.latency_avg_ms,
+                    _ => weights.cost_total(&i.cost).max(if i.cost == Cost::default() { 1.0 } else { 0.0 }),
+                }
+            } else if i.cost == Cost::default() {
+                1.0
+            } else {
+                weights.cost_total(&i.cost)
+            };
             let penalty = impl_penalty(recent, &i.name);
             let w = if static_mode {
                 1.0
@@ -154,6 +170,7 @@ mod tests {
                 n: 0,
                 sum_tokens: 0,
                 sum_loss: 0.0,
+                latency_avg_ms: 0.0,
             },
         );
         assert_eq!(impl_penalty(&recent, "a"), 0.0); // 0.1 rate = no penalty
@@ -171,6 +188,7 @@ mod tests {
                 n: 0,
                 sum_tokens: 0,
                 sum_loss: 0.0,
+                latency_avg_ms: 0.0,
             },
         );
         assert!(impl_penalty(&recent, "a").is_infinite());
@@ -188,6 +206,7 @@ mod tests {
                 n: 0,
                 sum_tokens: 0,
                 sum_loss: 0.0,
+                latency_avg_ms: 0.0,
             },
         );
         let p = impl_penalty(&recent, "a");
@@ -323,6 +342,7 @@ mod tests {
                 n: 0,
                 sum_tokens: 0,
                 sum_loss: 0.0,
+                latency_avg_ms: 0.0,
             },
         );
         let a = Impl {
@@ -380,3 +400,163 @@ mod tests {
         }
     }
 }
+
+// ═══ v0.22 PR-1 学习环接线（TDD）═══
+// F1 实锤（ductile-algo-lab probe2-6）：默认路径 Cost::default()=全0 →
+// effective = 0×(1+penalty)/w → penalty 乘 0 失效，全并列 0，稳定排序 =
+// 声明序永远赢；penalty=INF 时 0×INF=NaN → 比较回退 Equal。
+// PR-1 接线：未声明 cost 时 base≡1，纪律层（penalty / 学习权重 w）独立生效。
+#[cfg(test)]
+mod v022_tests {
+    use super::*;
+
+    fn mk_nocost(name: &str) -> Impl {
+        // Cost::default() = 全 0（未声明 cost 的默认路径——F1 的现场）
+        Impl {
+            name: name.into(),
+            tags: std::collections::BTreeSet::new(),
+            cost: Cost::default(),
+            enabled: true,
+            when: None,
+            refs: vec![],
+            body_text: String::new(),
+            stub: false,
+            retry: 0,
+            ensure: vec![],
+            description: String::new(),
+        }
+    }
+
+    // F1-负例①：学习权重差必须翻转首选（probe2 的引擎级反例——a=0.05 vs b=1.0
+    // 的 20 倍差在接线前对选择零作用）。
+    #[test]
+    fn f1_wiring_weight_gap_must_flip_first_choice() {
+        let weights = Weights::default();
+        let recent = BTreeMap::new();
+        let mut prefs = ImplPrefs::default();
+        // 直接构造（子模块可访问父模块私有字段）：a 20 败 → clamp 下界 0.05
+        prefs.map.insert(("P".into(), "a".into()), PREF_MIN);
+        let a = mk_nocost("a"); // 声明序在前
+        let b = mk_nocost("b");
+        let impls = vec![&a, &b];
+        let ranked = rank_impls_pref(&weights, &recent, &impls, "history", &prefs, "P");
+        assert_eq!(
+            ranked[0].name, "b",
+            "F1: 未声明 cost 时 base≡1，w=0.05 的败家子必须输给 w=1.0 的新臂"
+        );
+    }
+
+    // v0.22 PR-1：pick_by=latency 通道——实测延迟排序。声明慢（cost.latency 大）
+    // 但实测快（latency_avg_ms 小）的臂必须赢；冷启动（无历史）回退声明值。
+    #[test]
+    fn v022_latency_channel_prefers_measured_over_declared() {
+        let weights = Weights::default();
+        let mut recent = BTreeMap::new();
+        recent.insert(
+            "declared_slow".into(),
+            RecentRuns {
+                window: 10,
+                fails: 0,
+                consec_fail: 0,
+                n: 10,
+                sum_tokens: 0,
+                sum_loss: 0.0,
+                latency_avg_ms: 200.0, // 实测快
+            },
+        );
+        recent.insert(
+            "declared_fast".into(),
+            RecentRuns {
+                window: 10,
+                fails: 0,
+                consec_fail: 0,
+                n: 10,
+                sum_tokens: 0,
+                sum_loss: 0.0,
+                latency_avg_ms: 4000.0, // 实测慢
+            },
+        );
+        let prefs = ImplPrefs::default();
+        let slow = Impl {
+            name: "declared_slow".into(),
+            cost: Cost {
+                latency: 9000, // 声明很慢
+                ..Cost::default()
+            },
+            ..mk_nocost_inner()
+        };
+        let fast = Impl {
+            name: "declared_fast".into(),
+            cost: Cost {
+                latency: 10, // 声明很快
+                ..Cost::default()
+            },
+            ..mk_nocost_inner()
+        };
+        let impls = vec![&fast, &slow];
+        let ranked = rank_impls_pref(&weights, &recent, &impls, "latency", &prefs, "P");
+        assert_eq!(
+            ranked[0].name, "declared_slow",
+            "latency 通道：实测 200ms 必须压过实测 4000ms（声明值只做冷启动回退）"
+        );
+    }
+
+    fn mk_nocost_inner() -> Impl {
+        Impl {
+            name: String::new(),
+            tags: std::collections::BTreeSet::new(),
+            cost: Cost::default(),
+            enabled: true,
+            when: None,
+            refs: vec![],
+            body_text: String::new(),
+            stub: false,
+            retry: 0,
+            ensure: vec![],
+            description: String::new(),
+        }
+    }
+
+    // F1-负例②：penalty=INF 不得经 0×INF=NaN 回退 Equal（probe6——毒臂
+    // 3 连败封禁在第 3 败时仍然首发）。
+    #[test]
+    fn f1_wiring_penalty_inf_must_sink_poison() {
+        let weights = Weights::default();
+        let mut recent = BTreeMap::new();
+        recent.insert(
+            "poison".into(),
+            RecentRuns {
+                window: 5,
+                fails: 5,
+                consec_fail: 5,
+                n: 5,
+                sum_tokens: 0,
+                sum_loss: 0.0,
+                latency_avg_ms: 0.0,
+            },
+        );
+        let a = mk_nocost("poison"); // 声明序在前
+        let b = mk_nocost("fresh");
+        let prefs = ImplPrefs::default();
+        let impls = vec![&a, &b];
+        let ranked = rank_impls_pref(&weights, &recent, &impls, "history", &prefs, "P");
+        assert_ne!(
+            ranked[0].name, "poison",
+            "F1: base≡1 时 1×INF/w = INF（非 NaN），毒臂必须垫底"
+        );
+    }
+
+    // 冷启动守卫：无 cost 无历史 → 等价平面，声明序保留（友好冷启动）。
+    #[test]
+    fn f1_wiring_cold_start_declared_order_preserved() {
+        let weights = Weights::default();
+        let recent = BTreeMap::new();
+        let prefs = ImplPrefs::default();
+        let a = mk_nocost("a");
+        let b = mk_nocost("b");
+        let impls = vec![&a, &b];
+        let ranked = rank_impls_pref(&weights, &recent, &impls, "history", &prefs, "P");
+        assert_eq!(ranked[0].name, "a", "冷启动等价平面：稳定排序保留声明序");
+    }
+}
+

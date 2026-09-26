@@ -908,6 +908,45 @@ pub fn recent_runs_conn(conn: &Connection, proc_name: &str) -> Vec<RunRow> {
     .collect()
 }
 
+/// v0.22 PR-1 键改造：pipeline 维度隔离的 recent_runs——同名 proc 在别的
+/// 管线下的失败不得混入本管线的惩罚窗口（E1 3.6× 混计反例）。空 pipeline =
+/// 兼容旧行为（不过滤，与 v0.21 recent_runs_conn 等价）。
+pub fn recent_runs_pipeline_conn(
+    conn: &Connection,
+    proc_name: &str,
+    pipeline: &str,
+) -> Vec<RunRow> {
+    if pipeline.is_empty() {
+        return recent_runs_conn(conn, proc_name);
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT proc_name, impl_name, status, latency_ms, recorded_at, rate_tokens, est_loss
+             FROM runs WHERE proc_name = ?1 AND pipeline = ?2
+             ORDER BY id DESC LIMIT 20",
+        )
+        .unwrap();
+    stmt.query_map(params![proc_name, pipeline], |row| {
+        Ok(RunRow {
+            proc_name: row.get(0)?,
+            impl_name: row.get(1)?,
+            status: row.get(2)?,
+            latency_ms: row.get(3).unwrap_or(0),
+            recorded_at: row.get(4).unwrap_or_default(),
+            rate_tokens: row.get(5).unwrap_or(0),
+            est_loss: row.get(6).unwrap_or(0.0),
+        })
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
+}
+
+pub fn recent_runs_pipeline(proc_name: &str, pipeline: &str) -> Vec<RunRow> {
+    let conn = open();
+    recent_runs_pipeline_conn(&conn, proc_name, pipeline)
+}
+
 pub fn recent_runs(proc_name: &str) -> Vec<RunRow> {
     let conn = open();
     recent_runs_conn(&conn, proc_name)
@@ -2147,5 +2186,47 @@ mod conn_tests {
         assert_eq!(p, tmp.join("ductile.db"), "db must live under DUCTILE_DATA");
         let fallback = db_path_with(None);
         assert!(fallback.ends_with("ductile.db"));
+    }
+
+    /// v0.22 PR-1 键改造（TDD 负例）：runs 按 pipeline 维度隔离——E1 场景是
+    /// **同名 proc** 在不同管线下的失败混计。pipeB 的 a 全败不得污染 pipeA
+    /// 的同名 a 选路（3.6× 混计反例）。内存库隔离（规范 #8/#9）。
+    #[test]
+    fn recent_runs_pipeline_isolation() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_DDL).unwrap();
+        // 同名 proc "P"、同名 impl "a"：pipeA 全胜，pipeB 全败
+        for _ in 0..5 {
+            record_run_rd_conn(&conn, "P", "a", "pipeA", "Ok", 100, None, None, 0, 0.0, None);
+        }
+        for _ in 0..5 {
+            record_run_rd_conn(&conn, "P", "a", "pipeB", "Fail", 100, None, None, 0, 0.0, None);
+        }
+        // pipeA 视角：只看见自己的 5 胜——pipeB 的 5 败必须不可见
+        let rows = recent_runs_pipeline_conn(&conn, "P", "pipeA");
+        assert_eq!(rows.len(), 5, "pipeA 只看到自己的 runs");
+        assert!(rows.iter().all(|r| r.status == "Ok"), "pipeB 的失败不得混入 pipeA 的惩罚窗口");
+        // 反向同样成立
+        let rows_b = recent_runs_pipeline_conn(&conn, "P", "pipeB");
+        assert_eq!(rows_b.len(), 5);
+        assert!(rows_b.iter().all(|r| r.status == "Fail"));
+        // 未入册管线（冷启动）干净
+        assert!(recent_runs_pipeline_conn(&conn, "P", "pipeNEW").is_empty());
+    }
+
+    /// v0.22 PR-1 latency EMA 通道（TDD 负例）：recent_runs 必须能供实测延迟
+    /// 统计——RunRow 带 latency_ms（已在），EMA 计算（executor/ranking 层）。
+    #[test]
+    fn recent_runs_latency_data_available() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_DDL).unwrap();
+        record_run_rd_conn(&conn, "P", "fast", "pipeA", "Ok", 200, None, None, 0, 0.0, None);
+        record_run_rd_conn(&conn, "P", "slow", "pipeA", "Ok", 4000, None, None, 0, 0.0, None);
+        let rows = recent_runs_conn(&conn, "P");
+        assert_eq!(rows.len(), 2);
+        let fast = rows.iter().find(|r| r.impl_name == "fast").unwrap();
+        let slow = rows.iter().find(|r| r.impl_name == "slow").unwrap();
+        assert_eq!(fast.latency_ms, 200);
+        assert_eq!(slow.latency_ms, 4000);
     }
 }

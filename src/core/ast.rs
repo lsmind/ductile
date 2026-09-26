@@ -263,6 +263,9 @@ pub struct RecentRuns {
     pub n: usize,
     pub sum_tokens: i64,
     pub sum_loss: f64,
+    /// v0.22 PR-1 latency EMA 通道：窗口内实测延迟均值（ms）——pick_by=latency
+    /// 的排序基准。数据来自 runs.latency_ms（append_run_rd 每轮都在记）。
+    pub latency_avg_ms: f64,
 }
 
 pub const WINDOW_SIZE: usize = 20;
