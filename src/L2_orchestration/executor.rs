@@ -724,6 +724,7 @@ fn exec_proc_inner(
         &recent_map,
         &eligible,
         &proc.pick_by,
+        &pl.name,
         &proc.name,
     );
 
@@ -786,7 +787,7 @@ fn exec_proc_inner(
                     latency_ms,
                 );
                 // v0.8 preference learning: 成功 ×1.1（LGuess 乘性更新的奖励半边）
-                db::record_pref(&proc.name, &impl_.name, true);
+                db::record_pref(&pl.name, &proc.name, &impl_.name, true);
                 return Ok(val);
             }
             Err(err) => {
@@ -802,7 +803,7 @@ fn exec_proc_inner(
                     Some(&format!("{}.{}.step", proc.name, impl_.name)),
                     latency_ms,
                 );
-                db::record_pref(&proc.name, &impl_.name, false);
+                db::record_pref(&pl.name, &proc.name, &impl_.name, false);
                 // v0.15 incident 一等实体：失败信号束成事故候选落库（聚合去重）
                 record_incident(pl, proc, &err);
                 // v0.14 根因透传：最终 Err 携带最后 impl 的原始错误（非包装串），
@@ -859,6 +860,7 @@ fn exec_foreach_proc(
         &recent_map,
         &eligible,
         &proc.pick_by,
+        &pl.name,
         &proc.name,
     );
     // v0.20.1 when-gate 死路归层（foreach 同修）：零 eligible = 全 impl 被 .when 门死。

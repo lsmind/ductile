@@ -114,6 +114,34 @@ pub fn migrate(conn: &Connection) {
         )
         .ok();
     }
+    // v0.22 PR-3 E1 补全：impl_prefs 补 pipeline 列 + UNIQUE 约束重建。
+    // 老行 pipeline=''（全库唯一共享行——恰好是 PR-1 前语义；新行带维度隔离）。
+    let has_ipl = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('impl_prefs') WHERE name='pipeline'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    if has_ipl == 0 {
+        // SQLite 无 DROP CONSTRAINT——重建表：改名→按新 schema 建→回灌→删旧。
+        conn.execute_batch(
+            "ALTER TABLE impl_prefs RENAME TO impl_prefs_old;
+             CREATE TABLE impl_prefs (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                pipeline    TEXT NOT NULL DEFAULT '',
+                proc_name   TEXT NOT NULL,
+                impl_name   TEXT NOT NULL,
+                weight      REAL NOT NULL DEFAULT 1.0,
+                updated_at  TEXT DEFAULT '',
+                UNIQUE(pipeline, proc_name, impl_name)
+             );
+             INSERT INTO impl_prefs (pipeline, proc_name, impl_name, weight, updated_at)
+               SELECT '', proc_name, impl_name, weight, updated_at FROM impl_prefs_old;
+             DROP TABLE impl_prefs_old;",
+        )
+        .ok();
+    }
     // v0.18.12 信号易逝性（MetaRSI Eq.22）：tier_journal 补 ctx 列。
     // ctx = agent 定义(system/schema/guide/tiers) + 档位模型指纹的哈希——
     // 定义一变 ctx 变，旧经验自动与新定义隔离（读路径 WHERE ctx 过滤），
@@ -246,11 +274,12 @@ pub const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS pipelines (
         CREATE INDEX IF NOT EXISTS idx_procs_name ON procs(name);
         CREATE TABLE IF NOT EXISTS impl_prefs (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            pipeline    TEXT NOT NULL DEFAULT '',
             proc_name   TEXT NOT NULL,
             impl_name   TEXT NOT NULL,
             weight      REAL NOT NULL DEFAULT 1.0,
             updated_at  TEXT DEFAULT '',
-            UNIQUE(proc_name, impl_name)
+            UNIQUE(pipeline, proc_name, impl_name)
         );
         -- v0.18.10 双向自适应阶梯：agent 档位经验。成功于 tier k → 起步档
         -- 可下探（省成本）；失败 → 反馈随梯上传（高档免重蹈）。
@@ -985,15 +1014,17 @@ pub fn recent_runs_limit_conn(conn: &Connection, proc_name: &str, limit: usize) 
 // ── Impl preferences (v0.8 LGuess-style multiplicative weights) ──
 
 /// Load all learned impl weights: (proc_name, impl_name) -> weight.
-pub fn load_impl_prefs_conn(conn: &Connection) -> Vec<(String, String, f64)> {
+/// v0.22 PR-3 E1：返回 (pipeline, proc, impl, weight) 四元组。
+pub fn load_impl_prefs_conn(conn: &Connection) -> Vec<(String, String, String, f64)> {
     let mut stmt = conn
-        .prepare("SELECT proc_name, impl_name, weight FROM impl_prefs")
+        .prepare("SELECT COALESCE(pipeline,''), proc_name, impl_name, weight FROM impl_prefs")
         .unwrap();
     stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
-            row.get::<_, f64>(2)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, f64>(3)?,
         ))
     })
     .unwrap()
@@ -1001,26 +1032,32 @@ pub fn load_impl_prefs_conn(conn: &Connection) -> Vec<(String, String, f64)> {
     .collect()
 }
 
-pub fn load_impl_prefs() -> Vec<(String, String, f64)> {
+pub fn load_impl_prefs() -> Vec<(String, String, String, f64)> {
     let conn = open();
     load_impl_prefs_conn(&conn)
 }
 
 /// Upsert one learned impl weight.
-pub fn upsert_impl_pref_conn(conn: &Connection, proc_name: &str, impl_name: &str, weight: f64) {
+pub fn upsert_impl_pref_conn(
+    conn: &Connection,
+    pipeline: &str,
+    proc_name: &str,
+    impl_name: &str,
+    weight: f64,
+) {
     conn.execute(
-        "INSERT INTO impl_prefs (proc_name, impl_name, weight, updated_at)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(proc_name, impl_name)
-         DO UPDATE SET weight = ?3, updated_at = ?4",
-        params![proc_name, impl_name, weight, now_ts()],
+        "INSERT INTO impl_prefs (pipeline, proc_name, impl_name, weight, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(pipeline, proc_name, impl_name)
+         DO UPDATE SET weight = ?4, updated_at = ?5",
+        params![pipeline, proc_name, impl_name, weight, now_ts()],
     )
     .ok();
 }
 
-pub fn upsert_impl_pref(proc_name: &str, impl_name: &str, weight: f64) {
+pub fn upsert_impl_pref(pipeline: &str, proc_name: &str, impl_name: &str, weight: f64) {
     let conn = open();
-    upsert_impl_pref_conn(&conn, proc_name, impl_name, weight)
+    upsert_impl_pref_conn(&conn, pipeline, proc_name, impl_name, weight)
 }
 
 // ── v0.18.10 双向自适应阶梯：tier_journal ──
@@ -1113,21 +1150,28 @@ pub fn tier_failure_notes_conn(
 
 /// v0.8 preference bump — 单语句原子乘性更新（免读改写）。
 /// success: ×1.1；fail: ÷1.5；clamp [0.05, 20]；初值 1.0。
-pub fn record_pref_conn(conn: &Connection, proc_name: &str, impl_name: &str, success: bool) {
+/// v0.22 PR-3 E1：键含 pipeline 维度——跨管线污染实锤（learn_probe）。
+pub fn record_pref_conn(
+    conn: &Connection,
+    pipeline: &str,
+    proc_name: &str,
+    impl_name: &str,
+    success: bool,
+) {
     let factor = if success { 1.1f64 } else { 1.0 / 1.5 };
     conn.execute(
-        "INSERT INTO impl_prefs (proc_name, impl_name, weight, updated_at)
-         VALUES (?1, ?2, MAX(0.05, MIN(20.0, 1.0 * ?3)), ?4)
-         ON CONFLICT(proc_name, impl_name)
-         DO UPDATE SET weight = MAX(0.05, MIN(20.0, weight * ?3)), updated_at = ?4",
-        params![proc_name, impl_name, factor, now_ts()],
+        "INSERT INTO impl_prefs (pipeline, proc_name, impl_name, weight, updated_at)
+         VALUES (?1, ?2, ?3, MAX(0.05, MIN(20.0, 1.0 * ?4)), ?5)
+         ON CONFLICT(pipeline, proc_name, impl_name)
+         DO UPDATE SET weight = MAX(0.05, MIN(20.0, weight * ?4)), updated_at = ?5",
+        params![pipeline, proc_name, impl_name, factor, now_ts()],
     )
     .ok();
 }
 
-pub fn record_pref(proc_name: &str, impl_name: &str, success: bool) {
+pub fn record_pref(pipeline: &str, proc_name: &str, impl_name: &str, success: bool) {
     let conn = open();
-    record_pref_conn(&conn, proc_name, impl_name, success)
+    record_pref_conn(&conn, pipeline, proc_name, impl_name, success)
 }
 
 // ── Composition ──
@@ -1975,32 +2019,60 @@ mod conn_tests {
 
     // ── impl_prefs 乘性学习回路 ──
 
+    // v0.22 PR-3 E1 补全：impl_prefs 键必须含 pipeline 维度——LP1 毒臂
+    // 连败降权不得污染 LP2 同名 proc 的健康 impl（learn_probe 黑箱实锤）。
+    #[test]
+    fn pref_pipeline_isolation() {
+        let conn = memdb();
+        record_pref_conn(&conn, "LP1", "mix", "a", false); // LP1 毒臂首败
+        record_pref_conn(&conn, "LP1", "mix", "a", false); // 再败 → w=1/2.25
+        let w_lp1 = load_impl_prefs_conn(&conn)
+            .into_iter()
+            .find(|(pl, p, i, _)| pl == "LP1" && p == "mix" && i == "a")
+            .map(|x| x.3)
+            .unwrap();
+        assert!(
+            (w_lp1 - 1.0 / 2.25).abs() < 1e-9,
+            "LP1 poison weight should be 1/2.25, got {w_lp1}"
+        );
+        // LP2 同名 proc：必须查不到 LP1 的污染（默认 1.0，非 LP1 的 0.444）
+        let w_lp2 = load_impl_prefs_conn(&conn)
+            .into_iter()
+            .find(|(pl, p, i, _)| pl == "LP2" && p == "mix" && i == "a")
+            .map(|x| x.3)
+            .unwrap_or(1.0);
+        assert!(
+            (w_lp2 - 1.0).abs() < 1e-9,
+            "LP2 must not inherit LP1 poison (expected 1.0, got {w_lp2}) — E1 leak"
+        );
+    }
+
     #[test]
     fn pref_multiplicative_roundtrip() {
         let conn = memdb();
-        record_pref_conn(&conn, "p", "i", true); // 1.0 × 1.1
+        record_pref_conn(&conn, "", "p", "i", true); // 1.0 × 1.1
         let w1 = load_impl_prefs_conn(&conn)
             .into_iter()
-            .find(|(p, i, _)| p == "p" && i == "i")
+            .find(|(pl, p, i, _)| p == "p" && i == "i")
             .unwrap()
-            .2;
+            .3;
         assert!((w1 - 1.1).abs() < 1e-9);
-        record_pref_conn(&conn, "p", "i", false); // 1.1 ÷ 1.5
+        record_pref_conn(&conn, "", "p", "i", false); // 1.1 ÷ 1.5
         let w2 = load_impl_prefs_conn(&conn)
             .into_iter()
-            .find(|(p, i, _)| p == "p" && i == "i")
+            .find(|(pl, p, i, _)| p == "p" && i == "i")
             .unwrap()
-            .2;
+            .3;
         assert!((w2 - 1.1 / 1.5).abs() < 1e-9);
         // clamp：连败 100 次 → 0.05
         for _ in 0..100 {
-            record_pref_conn(&conn, "p", "i", false);
+            record_pref_conn(&conn, "", "p", "i", false);
         }
         let w3 = load_impl_prefs_conn(&conn)
             .into_iter()
-            .find(|(p, i, _)| p == "p" && i == "i")
+            .find(|(pl, p, i, _)| p == "p" && i == "i")
             .unwrap()
-            .2;
+            .3;
         assert!((w3 - 0.05).abs() < 1e-9);
     }
 

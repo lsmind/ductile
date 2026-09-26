@@ -831,7 +831,7 @@ fn cmd_run(path: &str, topic_str: &str, policy_path: Option<&str>) -> Result<i32
                     let mut ws: Vec<(f64, &str)> = proc
                         .plan
                         .iter()
-                        .map(|i| (prefs.get(&proc.name, &i.name), i.name.as_str()))
+                        .map(|i| (prefs.get(&pl.name, &proc.name, &i.name), i.name.as_str()))
                         .collect();
                     ws.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
                     println!(

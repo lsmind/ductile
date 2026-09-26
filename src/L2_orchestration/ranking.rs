@@ -18,31 +18,41 @@ pub const PREF_MIN: f64 = 0.05; // clamp 下界（最多涨 20 倍）
 
 /// 每 (proc, impl) 的学习偏好权重，SQLite 持久化（impl_prefs 表）。
 /// w>1 = 历史可靠 → effective cost 除以 w（打折）；w<1 = 不可靠 → 变贵。
+/// v0.22 PR-3 E1：键 = (pipeline, proc, impl) 三元组——LP1 毒臂连败降权
+/// 不得污染 LP2 同名 proc（learn_probe 黑箱实锤修复）。
 #[derive(Debug, Default)]
 pub struct ImplPrefs {
-    map: BTreeMap<(String, String), f64>,
+    map: BTreeMap<(String, String, String), f64>,
 }
 
 impl ImplPrefs {
     pub fn load(dir: &std::path::Path) -> Self {
         let _ = dir;
         let mut map = BTreeMap::new();
-        for (p, i, w) in db::load_impl_prefs() {
-            map.insert((p, i), w);
+        for (pl, p, i, w) in db::load_impl_prefs() {
+            map.insert((pl, p, i), w);
         }
         ImplPrefs { map }
     }
 
-    pub fn get(&self, proc_name: &str, impl_name: &str) -> f64 {
+    pub fn get(&self, pipeline: &str, proc_name: &str, impl_name: &str) -> f64 {
         self.map
-            .get(&(proc_name.to_string(), impl_name.to_string()))
+            .get(&(
+                pipeline.to_string(),
+                proc_name.to_string(),
+                impl_name.to_string(),
+            ))
             .copied()
             .unwrap_or(1.0)
     }
 
     /// 乘性更新并持久化。成功 ×α / 失败 ÷β，clamp [PREF_MIN, PREF_MAX]。
-    pub fn update(&mut self, proc_name: &str, impl_name: &str, success: bool) {
-        let key = (proc_name.to_string(), impl_name.to_string());
+    pub fn update(&mut self, pipeline: &str, proc_name: &str, impl_name: &str, success: bool) {
+        let key = (
+            pipeline.to_string(),
+            proc_name.to_string(),
+            impl_name.to_string(),
+        );
         let w = self.map.get(&key).copied().unwrap_or(1.0);
         let w = if success {
             w * PREF_ALPHA
@@ -51,7 +61,7 @@ impl ImplPrefs {
         };
         let w = w.clamp(PREF_MIN, PREF_MAX);
         self.map.insert(key, w);
-        db::upsert_impl_pref(proc_name, impl_name, w);
+        db::upsert_impl_pref(pipeline, proc_name, impl_name, w);
     }
 }
 
@@ -62,7 +72,7 @@ fn rank_impls<'a>(
     impls: &[&'a Impl],
     pick_by: &str,
 ) -> Vec<&'a Impl> {
-    rank_impls_named(weights, recent, impls, pick_by, "")
+    rank_impls_named(weights, recent, impls, pick_by, "", "")
 }
 
 pub fn rank_impls_named<'a>(
@@ -70,10 +80,11 @@ pub fn rank_impls_named<'a>(
     recent: &BTreeMap<String, RecentRuns>,
     impls: &[&'a Impl],
     pick_by: &str,
+    pipeline: &str,
     proc_name: &str,
 ) -> Vec<&'a Impl> {
     let prefs = ImplPrefs::load(std::path::Path::new(""));
-    rank_impls_pref(weights, recent, impls, pick_by, &prefs, proc_name)
+    rank_impls_pref(weights, recent, impls, pick_by, &prefs, pipeline, proc_name)
 }
 
 /// 排序核心：effective = base×(1+penalty)/w + rd。
@@ -85,6 +96,7 @@ fn rank_impls_pref<'a>(
     impls: &[&'a Impl],
     pick_by: &str,
     prefs: &ImplPrefs,
+    pipeline: &str,
     proc_name: &str,
 ) -> Vec<&'a Impl> {
     let static_mode = pick_by == "static";
@@ -112,7 +124,7 @@ fn rank_impls_pref<'a>(
             let w = if static_mode {
                 1.0
             } else {
-                prefs.get(proc_name, &i.name).max(1e-6)
+                prefs.get(pipeline, proc_name, &i.name).max(1e-6)
             };
             (base * (1.0 + penalty) / w, *i)
         })
@@ -218,20 +230,20 @@ mod tests {
     #[test]
     fn pref_update_success_increases_weight() {
         let mut p = ImplPrefs::default();
-        let w0 = p.get("procA", "implA");
-        p.update("procA", "implA", true);
-        let w1 = p.get("procA", "implA");
+        let w0 = p.get("", "procA", "implA");
+        p.update("", "procA", "implA", true);
+        let w1 = p.get("", "procA", "implA");
         assert!(w1 > w0, "success must increase weight");
         assert!((w1 - w0 * PREF_ALPHA).abs() < 1e-9);
         // untouched impl stays at 1.0
-        assert_eq!(p.get("procA", "implB"), 1.0);
+        assert_eq!(p.get("", "procA", "implB"), 1.0);
     }
 
     #[test]
     fn pref_update_failure_decreases_weight() {
         let mut p = ImplPrefs::default();
-        p.update("procA", "implA", false);
-        let w1 = p.get("procA", "implA");
+        p.update("", "procA", "implA", false);
+        let w1 = p.get("", "procA", "implA");
         assert!(w1 < 1.0, "failure must decrease weight");
         assert!((w1 - 1.0 / PREF_BETA).abs() < 1e-9);
     }
@@ -240,14 +252,14 @@ mod tests {
     fn pref_update_clamps() {
         let mut p = ImplPrefs::default();
         for _ in 0..1000 {
-            p.update("procA", "implA", true);
+            p.update("", "procA", "implA", true);
         }
-        assert_eq!(p.get("procA", "implA"), PREF_MAX);
+        assert_eq!(p.get("", "procA", "implA"), PREF_MAX);
         let mut q = ImplPrefs::default();
         for _ in 0..1000 {
-            q.update("procA", "implA", false);
+            q.update("", "procA", "implA", false);
         }
-        assert_eq!(q.get("procA", "implA"), PREF_MIN);
+        assert_eq!(q.get("", "procA", "implA"), PREF_MIN);
     }
 
     #[test]
@@ -255,12 +267,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ductile-pref-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let mut p = ImplPrefs::load(&dir);
-        p.update("pX", "iX", true);
-        p.update("pX", "iX", true);
-        let w = p.get("pX", "iX");
+        p.update("", "pX", "iX", true);
+        p.update("", "pX", "iX", true);
+        let w = p.get("", "pX", "iX");
         // fresh load from same dir must see the persisted weight
         let q = ImplPrefs::load(&dir);
-        assert_eq!(q.get("pX", "iX"), w);
+        assert_eq!(q.get("", "pX", "iX"), w);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -274,13 +286,13 @@ mod tests {
         let cheap = mk_impl("cheap", 1_000);
         // 30 consecutive successes on expensive → w clamped at PREF_MAX
         for _ in 0..30 {
-            prefs.update("procA", "expensive", true);
+            prefs.update("", "procA", "expensive", true);
         }
         let impls = vec![&cheap, &expensive];
-        let ranked = rank_impls_pref(&weights, &recent, &impls, "cost", &prefs, "procA");
+        let ranked = rank_impls_pref(&weights, &recent, &impls, "cost", &prefs, "", "procA");
         assert_eq!(ranked[0].name, "expensive");
         // static mode ignores prefs: cheap must win
-        let ranked_static = rank_impls_pref(&weights, &recent, &impls, "static", &prefs, "procA");
+        let ranked_static = rank_impls_pref(&weights, &recent, &impls, "static", &prefs, "", "procA");
         assert_eq!(ranked_static[0].name, "cheap");
     }
 
@@ -293,7 +305,7 @@ mod tests {
         let a = mk_impl("a", 5_000);
         let b = mk_impl("b", 2_000);
         let impls = vec![&a, &b];
-        let ranked = rank_impls_pref(&weights, &recent, &impls, "cost", &prefs, "procA");
+        let ranked = rank_impls_pref(&weights, &recent, &impls, "cost", &prefs, "", "procA");
         assert_eq!(ranked[0].name, "b");
     }
 
@@ -435,11 +447,11 @@ mod v022_tests {
         let recent = BTreeMap::new();
         let mut prefs = ImplPrefs::default();
         // 直接构造（子模块可访问父模块私有字段）：a 20 败 → clamp 下界 0.05
-        prefs.map.insert(("P".into(), "a".into()), PREF_MIN);
+        prefs.map.insert(("".into(), "P".into(), "a".into()), PREF_MIN);
         let a = mk_nocost("a"); // 声明序在前
         let b = mk_nocost("b");
         let impls = vec![&a, &b];
-        let ranked = rank_impls_pref(&weights, &recent, &impls, "history", &prefs, "P");
+        let ranked = rank_impls_pref(&weights, &recent, &impls, "history", &prefs, "", "P");
         assert_eq!(
             ranked[0].name, "b",
             "F1: 未声明 cost 时 base≡1，w=0.05 的败家子必须输给 w=1.0 的新臂"
@@ -494,7 +506,7 @@ mod v022_tests {
             ..mk_nocost_inner()
         };
         let impls = vec![&fast, &slow];
-        let ranked = rank_impls_pref(&weights, &recent, &impls, "latency", &prefs, "P");
+        let ranked = rank_impls_pref(&weights, &recent, &impls, "latency", &prefs, "", "P");
         assert_eq!(
             ranked[0].name, "declared_slow",
             "latency 通道：实测 200ms 必须压过实测 4000ms（声明值只做冷启动回退）"
@@ -539,7 +551,7 @@ mod v022_tests {
         let b = mk_nocost("fresh");
         let prefs = ImplPrefs::default();
         let impls = vec![&a, &b];
-        let ranked = rank_impls_pref(&weights, &recent, &impls, "history", &prefs, "P");
+        let ranked = rank_impls_pref(&weights, &recent, &impls, "history", &prefs, "", "P");
         assert_ne!(
             ranked[0].name, "poison",
             "F1: base≡1 时 1×INF/w = INF（非 NaN），毒臂必须垫底"
@@ -555,7 +567,7 @@ mod v022_tests {
         let a = mk_nocost("a");
         let b = mk_nocost("b");
         let impls = vec![&a, &b];
-        let ranked = rank_impls_pref(&weights, &recent, &impls, "history", &prefs, "P");
+        let ranked = rank_impls_pref(&weights, &recent, &impls, "history", &prefs, "", "P");
         assert_eq!(ranked[0].name, "a", "冷启动等价平面：稳定排序保留声明序");
     }
 }
