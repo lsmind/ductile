@@ -88,8 +88,18 @@ pub fn parse_pipeline(input: &str) -> Result<Pipeline, ParseError> {
             continue;
         }
 
-        // Unknown line — skip
-        idx += 1;
+        // v0.22 PR-2 F7 fail-closed：顶层 Unknown line 不再静默跳过——垃圾语法
+        // 静默吞掉后 exit 0 是 false terminal state。声明即契约：解析器必须
+        // 拒绝它不认识的行。
+        return Err(ParseError {
+            line: idx + 1,
+            col: 1,
+            msg: format!(
+                "unknown top-level line (v0.22 fail-closed) — expected .proc(...): {:?}",
+                trimmed
+            ),
+            line_text: line.to_string(),
+        });
     }
 
     // v0.18.15 deliver fail-closed（X6 实锤 bug）：顶层独行 `.deliver(@x)` 会被
@@ -629,8 +639,11 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
                         .trim(),
                     None => entry,
                 };
-                let (body_text, _cost, retry, ensure, when, enabled, stub, tags, desc) =
+                let (body_text, _cost, retry, ensure, when, enabled, stub, tags, desc, ensure_retired) =
                     extract_cost_and_modifiers(body, &name);
+                if let Some(msg) = ensure_retired {
+                    return Err(ParseError { line: 0, col: 0, msg, line_text: body.to_string() });
+                }
                 let func = crate::textargs::detect_func(&body_text);
                 let mut tags = tags;
                 if tags.is_empty() && !func.is_empty() {
@@ -1059,14 +1072,19 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
 
         // .check(result => predicate, "message")
         if trimmed.starts_with(".check(") || trimmed.starts_with(".check (") {
-            // v0.11 谓词层退役：裁判与生产分离。质量门槛改用独立 judge proc + .when 路由。
-            eprintln!(
-                "[v0.11] warning: .check() retired — predicate layer removed, quality gates now live in judge procs (.when routing). Line ignored: {}",
-                crate::trunc_chars(trimmed, 60)
-            );
+            // v0.22 PR-2 F4 fail-closed：.check 从「警告+忽略」升级为硬错。
+            // v0.11 退役时留了静默通道——声明被丢弃且无告知，是「声明不兑现」
+            // 家族的成员。迁移指引：质量门槛 = 独立 judge proc + .when 路由。
             let _ = parse_check_line(trimmed)?; // 仍解析以保留语法错误检查
-            idx += 1;
-            continue;
+            return Err(ParseError {
+                line: idx + 1,
+                col: 1,
+                msg: format!(
+                    ".check() retired since v0.11 (hard error since v0.22) — migrate: quality gate = independent judge proc + .when routing. Line: {}",
+                    crate::trunc_chars(trimmed, 60)
+                ),
+                line_text: line.to_string(),
+            });
         }
 
         // .contract(outputs="a,b", invariants="...", invariants="...")
@@ -1160,8 +1178,17 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
             break;
         }
 
-        // Unknown line — skip
-        idx += 1;
+        // v0.22 PR-2 F7 fail-closed：proc 体内 Unknown line 同样不再静默跳过
+        // （顶层已堵，此处是第二处洞——垃圾行落进 proc 循环同样伪装成功）。
+        return Err(ParseError {
+            line: idx + 1,
+            col: 1,
+            msg: format!(
+                "unknown line inside pipeline (v0.22 fail-closed) — expected proc modifier (.when/.plan/.needs/...): {:?}",
+                trimmed
+            ),
+            line_text: line.to_string(),
+        });
     }
 
     // v0.16 单 impl 内联糖脱糖：.proc("x", verb(...)) ≡ .plan(verb -> verb(...))。
@@ -1169,8 +1196,11 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
     // 块级 .when 语义不变（下推）；.plan 与内联共存时 .plan 追加（防呆：单
     // impl 糖下再写 .plan 属于自相矛盾，追加而不是硬错，兼容生成器输出）。
     if let Some(body) = inline_body {
-        let (body_text, _cost, retry, ensure, when, enabled, stub, tags, description) =
+        let (body_text, _cost, retry, ensure, when, enabled, stub, tags, description, ensure_retired) =
             extract_cost_and_modifiers(&body, &name);
+        if let Some(msg) = ensure_retired {
+            return Err(ParseError { line: 0, col: 0, msg, line_text: body.clone() });
+        }
         let func = crate::textargs::detect_func(&body_text);
         // 第二刀：手写 tags 为空时按动词推导（语义域标记如 #git/#gate 仍可手写叠加）
         let mut tags = tags;
@@ -1424,8 +1454,11 @@ fn parse_impl_entries(text: &str, proc_name: &str) -> Result<Vec<Impl>, ParseErr
             let name = entry[..arrow_pos].trim().to_string();
             let body_with_cost = entry[arrow_pos + 4..].trim();
 
-            let (body_text, cost, retry, ensure, when, enabled, stub, tags, description) =
+            let (body_text, cost, retry, ensure, when, enabled, stub, tags, description, ensure_retired) =
                 extract_cost_and_modifiers(body_with_cost, &name);
+            if let Some(msg) = ensure_retired {
+                return Err(ParseError { line: 0, col: 0, msg, line_text: body_with_cost.to_string() });
+            }
 
             // v0.11.1 重构：.when() 里的 @ref 也算依赖——裁判路由 `.when(@gate.score < 80)`
             // 需要 gate → 本 proc 的 DAG 边，否则 deliver 会先于 gate 执行，判决必然落空。
@@ -1523,6 +1556,7 @@ fn extract_cost_and_modifiers(
     bool,
     BTreeSet<String>,
     String,
+    Option<String>,
 ) {
     let cost = Cost::default();
     let mut body = text.trim().to_string();
@@ -1592,35 +1626,19 @@ fn extract_cost_and_modifiers(
     }
 
     // Extract .ensure(cond, "msg")
-    loop {
-        if let Some(e_pos) = body.find(".ensure(") {
-            // v0.11 谓词层退役：.ensure 同 .check 一并退役。
-            eprintln!(
-                "[v0.11] warning: .ensure() retired — predicate layer removed. Modifier ignored."
-            );
-            let prefix = ".ensure(";
-            let after = &body[e_pos..];
-            if let Some(close) = find_matching_paren(after) {
-                // find_matching_paren 返回字节索引（v0.14.2 语义），但它是相对
-                // after 的——close+1 可能正好落在多字节字符中间或越界（末尾
-                // 中文标点形态实测 panic start byte index out of bounds）。
-                // 剥离用 char 边界钳制：close+1 不在边界上就退到下一个边界。
-                let strip_at = (close + 1).min(after.len());
-                let strip_at = after
-                    .char_indices()
-                    .map(|(b, _)| b)
-                    .find(|b| *b >= strip_at)
-                    .unwrap_or(after.len());
-                let inner_start = prefix.len();
-                if strip_at >= inner_start {
-                    body = format!("{}{}", &body[..e_pos], &after[strip_at..]);
-                    continue;
-                }
-                break;
-            }
-            break;
-        }
-        break;
+    // v0.22 PR-2 F4 fail-closed：.ensure 从「警告+剥离」升级为硬错+迁移指引
+    // （同 .check）。声明被静默丢弃是「声明不兑现」家族成员。
+    // 本函数返回裸元组（四调用点历史契约），错误经 ensure_retired 标记位
+    // 上抛——调用方见到非 None 即 return Err（fail-closed 在 parse 层闭环）。
+    let mut ensure_retired: Option<String> = None;
+    if let Some(e_pos) = body.find(".ensure(") {
+        let snippet: String = body[e_pos..].chars().take(60).collect();
+        ensure_retired = Some(format!(
+            ".ensure() retired since v0.11 (hard error since v0.22) — migrate: invariants = .contract(invariants=\"...\") or judge proc + .when routing. Found: {}",
+            snippet
+        ));
+        // 剥离以防后续解析被残句干扰（body 不再使用，语义上只是防御）
+        body = body[..e_pos].to_string();
     }
 
     // Extract .when(cond)
@@ -1653,6 +1671,7 @@ fn extract_cost_and_modifiers(
         stub,
         tags,
         description,
+        ensure_retired,
     )
 }
 
@@ -2343,9 +2362,13 @@ mod tests {
   )
   .check(result => has_results, "no search results")
 "#;
-        let pl = parse_pipeline(input).unwrap();
-        // v0.11 谓词层退役：.check 解析但不入 AST（警告+忽略），门槛改独立 judge proc + .when。
-        assert_eq!(pl.procs[0].checks.len(), 0);
+        // v0.22 PR-2 F4：.check 从「警告+忽略」升级为硬错（fail-closed）。
+        let r = parse_pipeline(input);
+        assert!(r.is_err(), ".check must be a hard error since v0.22");
+        assert!(
+            r.unwrap_err().msg.contains(".when"),
+            "migration hint must mention judge/.when"
+        );
     }
 
     // ── v0.11 Policy (.eval) parsing ──
@@ -2532,9 +2555,9 @@ Pipeline("t")
       .ensure(result => not_empty, "empty result")
   )
 "#;
-        let pl = parse_pipeline(input).unwrap();
-        // v0.11 谓词层退役：.ensure 同 .check，警告+忽略。
-        assert_eq!(pl.procs[0].plan[0].ensure.len(), 0);
+        // v0.22 PR-2 F4：.ensure 从「警告+忽略」升级为硬错（fail-closed）。
+        let r = parse_pipeline(input);
+        assert!(r.is_err(), ".ensure must be a hard error since v0.22");
     }
 
     // ── pick default ──
@@ -2575,6 +2598,71 @@ Pipeline("t")
         assert!(tags.contains("search"));
         assert!(tags.contains("network"));
         assert!(tags.contains("file"));
+    }
+
+    // ═══ v0.22 PR-2 解析器 fail-closed（TDD 负例）═══
+    // F7 实锤：垃圾 DSL 行被 Unknown-line 分支静默吞掉，exit 0 伪装成功
+    // （false terminal state——Eureka 词汇）。声明即契约：未验收的终态不是终态。
+
+    #[test]
+    fn v022_f7_garbage_line_is_hard_error() {
+        let input = r#"
+Pipeline("t", "t")
+  .proc("a", run("echo hi"))
+垃圾语法这行必须炸
+"#;
+        let r = parse_pipeline(input);
+        assert!(r.is_err(), "F7: 垃圾行必须硬错，不得静默跳过后 exit 0");
+        let e = r.unwrap_err();
+        assert!(
+            e.msg.contains("unknown") || e.msg.contains("garbage") || e.msg.contains("垃圾"),
+            "错误信息应指认未知行：{}",
+            e.msg
+        );
+    }
+
+    #[test]
+    fn v022_f7_blank_pipeline_is_warning_not_error() {
+        // 零 proc = 警告（可执行空转），不是硬错——报告用管线等合法形态
+        let input = "Pipeline(\"t\", \"t\")\n";
+        let r = parse_pipeline(input);
+        assert!(r.is_ok(), "零 proc 管线合法（警告即可），不得硬错");
+    }
+
+    // F4 实锤：.check/.ensure 静默退役（警告+忽略）——声明被丢弃且无迁移指引。
+    // v0.22：硬错 + 迁移指引。
+    #[test]
+    fn v022_f4_check_is_hard_error_with_migration() {
+        let input = r#"
+Pipeline("t", "t")
+  .proc("s")
+  .plan(
+    web -> web_search(query="AI").tags(#search)
+  )
+  .check(result => has_results, "no search results")
+"#;
+        let r = parse_pipeline(input);
+        assert!(r.is_err(), "F4: .check 必须硬错（fail-closed），不得警告+忽略");
+        let e = r.unwrap_err();
+        assert!(
+            e.msg.contains(".when") || e.msg.contains("judge"),
+            "错误信息必须带迁移指引（judge proc + .when）：{}",
+            e.msg
+        );
+    }
+
+    #[test]
+    fn v022_f4_ensure_is_hard_error_with_migration() {
+        let input = r#"
+Pipeline("t", "t")
+  .proc("s")
+  .plan(
+    web -> web_search(query="AI").tags(#search)
+  )
+  .ensure(slow => 5000, "too slow")
+"#;
+        let r = parse_pipeline(input);
+        assert!(r.is_err(), "F4: .ensure 必须硬错（fail-closed）");
     }
 }
 

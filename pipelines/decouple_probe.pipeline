@@ -10,4 +10,4 @@ Pipeline("decouple_probe", "验证评价机制与流程描述的耦合现状")
         .tags(#run)
         .cost(latency=500, risk=0.0, tokens=0, money=0)
     )
-    .check(result => not_empty, "空结果")
+    // v0.22 迁移：.check 已 fail-closed。质量门槛 = 独立 judge proc + .when 路由（原: .check(result => not_empty, "空结果")）

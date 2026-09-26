@@ -257,6 +257,29 @@ fn apply_policy(pl: &mut Pipeline, policy: &Policy, cache: &dyn CostCacheStore, 
         "  [policy] weights: latency={} risk={} tokens={:.4} money={}",
         pl.weights.latency, pl.weights.risk, pl.weights.tokens, pl.weights.money
     );
+    // v0.22 PR-2 F5 fail-closed：policy 键必须命中管线中的 proc.impl。
+    // 旧态：写错的键（如 pick.a 而非 t.a）静默 continue——声明无效且无告知。
+    // 新态：键名对不上 = 硬错，指认键与管线现有 proc.impl 全集。
+    if policy.fail_closed {
+        let known: std::collections::BTreeSet<String> = pl
+            .procs
+            .iter()
+            .flat_map(|p| p.plan.iter().map(move |i| format!("{}.{}", p.name, i.name)))
+            .collect();
+        let unknown: Vec<&String> = policy
+            .costs
+            .keys()
+            .filter(|k| !known.contains(*k))
+            .collect();
+        if !unknown.is_empty() {
+            eprintln!(
+                "  [policy] FATAL unknown keys (v0.22 fail-closed): {:?} — known proc.impl: {:?}",
+                unknown,
+                known.iter().collect::<Vec<_>>()
+            );
+            std::process::exit(3);
+        }
+    }
     for proc in &mut pl.procs {
         for impl_ in &mut proc.plan {
             let key = format!("{}.{}", proc.name, impl_.name);

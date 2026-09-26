@@ -8,13 +8,13 @@ Pipeline("feature_demo", "全语法演示")
         .tags(#search, #api)
         .desc("API 采集")
         .retry(n=2)
-        .ensure(result => not_empty, "API 返回空"),
+,
       cache -> read(from="/tmp/ductile_cache.txt")
         .tags(#search, #file)
         .desc("本地缓存兜底")
         .when(fallback == "true")
     )
-    .check(result => has_items, "采集结果太少")
+    // v0.22 迁移：.check 已 fail-closed。质量门槛 = 独立 judge proc + .when 路由（原: .check(result => has_items, "采集结果太少")）
 
   .proc("process_each")
     .desc("逐条处理")

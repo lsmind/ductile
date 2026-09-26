@@ -13,7 +13,7 @@ Pipeline("redroid-vm", "Redroid VM 全生命周期管理")
       fallback -> run("echo VM start failed")
         .tags(#vm, #fallback)
     )
-    .check(not_empty)
+    // v0.22 迁移：.check 已 fail-closed。质量门槛 = 独立 judge proc + .when 路由（原: .check(not_empty)）
 
   .proc("wait-ssh")
     .desc("等待 VM SSH 可达")
@@ -23,7 +23,7 @@ Pipeline("redroid-vm", "Redroid VM 全生命周期管理")
         .retry(n=1)
         .cost(latency=90, risk=0.1, tokens=0, money=0)
     )
-    .check(result => result.contains("ok"), "SSH not reachable")
+    // v0.22 迁移：.check 已 fail-closed。质量门槛 = 独立 judge proc + .when 路由（原: .check(result => result.contains("ok"), "SSH not reachable")）
 
   .proc("load-binder")
     .desc("VM 内加载 binder 内核模块")
@@ -33,7 +33,7 @@ Pipeline("redroid-vm", "Redroid VM 全生命周期管理")
         .retry(n=1)
         .cost(latency=10, risk=0.05, tokens=0, money=0)
     )
-    .check(result => result.contains("binder_ok"), "binder module failed")
+    // v0.22 迁移：.check 已 fail-closed。质量门槛 = 独立 judge proc + .when 路由（原: .check(result => result.contains("binder_ok"), "binder module failed")）
 
   .proc("start-redroid")
     .desc("启动 Redroid 容器")
@@ -43,7 +43,7 @@ Pipeline("redroid-vm", "Redroid VM 全生命周期管理")
         .retry(n=1)
         .cost(latency=30, risk=0.1, tokens=0, money=0)
     )
-    .check(result => result.contains("started"), "redroid container failed")
+    // v0.22 迁移：.check 已 fail-closed。质量门槛 = 独立 judge proc + .when 路由（原: .check(result => result.contains("started"), "redroid container failed")）
 
   .proc("wait-adb")
     .desc("等待 ADB 连接就绪")
@@ -53,7 +53,7 @@ Pipeline("redroid-vm", "Redroid VM 全生命周期管理")
         .retry(n=1)
         .cost(latency=90, risk=0.15, tokens=0, money=0)
     )
-    .check(result => result.contains("adb_ok"), "ADB not ready")
+    // v0.22 迁移：.check 已 fail-closed。质量门槛 = 独立 judge proc + .when 路由（原: .check(result => result.contains("adb_ok"), "ADB not ready")）
 
   .proc("full-chain")
     .desc("全链路状态汇总")
@@ -62,5 +62,5 @@ Pipeline("redroid-vm", "Redroid VM 全生命周期管理")
         .tags(#health, #summary)
         .cost(latency=15, risk=0.05, tokens=0, money=0)
     )
-    .check(has_content)
+    // v0.22 迁移：.check 已 fail-closed。质量门槛 = 独立 judge proc + .when 路由（原: .check(has_content)）
     .deliver(@start-vm)

@@ -7,4 +7,4 @@ Pipeline("nocost_probe", "无 .cost() 时引擎是否照常排序降级")
       good -> run("echo 'recovered from fallback'")
         .tags(#run)
     )
-    .check(result => not_empty, "空")
+    // v0.22 迁移：.check 已 fail-closed。质量门槛 = 独立 judge proc + .when 路由（原: .check(result => not_empty, "空")）

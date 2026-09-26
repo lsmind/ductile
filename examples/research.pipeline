@@ -11,7 +11,7 @@ Pipeline("research", "搜索主题并撰写报告")
         .tags(#search, #mcp)
         .desc("MCP搜索")
     )
-    .check(result => has_results, "搜索无结果")
+    // v0.22 迁移：.check 已 fail-closed。质量门槛 = 独立 judge proc + .when 路由（原: .check(result => has_results, "搜索无结果")）
 
   .proc("summarize")
     .desc("LLM 总结")
@@ -20,7 +20,7 @@ Pipeline("research", "搜索主题并撰写报告")
         .tags(#llm, #parse)
         .desc("LLM综合")
     )
-    .check(result => has_content, "总结为空")
+    // v0.22 迁移：.check 已 fail-closed。质量门槛 = 独立 judge proc + .when 路由（原: .check(result => has_content, "总结为空")）
 
   .proc("report")
     .desc("写入报告文件")

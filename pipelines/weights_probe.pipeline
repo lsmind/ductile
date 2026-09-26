@@ -9,4 +9,4 @@ Pipeline("weights_probe", "验证 SPEC 声称的 .plan() 内 weights(rd=N) 语�
       b -> run("echo 'BBB'")
         .tags(#run)
     )
-    .check(result => not_empty, "空")
+    // v0.22 迁移：.check 已 fail-closed。质量门槛 = 独立 judge proc + .when 路由（原: .check(result => not_empty, "空")）

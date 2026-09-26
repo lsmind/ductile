@@ -5,5 +5,5 @@ Pipeline("judge_probe", "裁判恒真漏洞：引擎不存在的谓词是否放�
       a -> run("echo 'garbage output, no score at all'")
         .tags(#run)
     )
-    .check(result => num_gt("score", 80), "分数必须超过80")
-    .check(result => field_eq("status", "ok"), "状态必须是ok")
+    // v0.22 迁移：.check 已 fail-closed。质量门槛 = 独立 judge proc + .when 路由（原: .check(result => num_gt("score", 80), "分数必须超过80")）
+    // v0.22 迁移：.check 已 fail-closed。质量门槛 = 独立 judge proc + .when 路由（原: .check(result => field_eq("status", "ok"), "状态必须是ok")）

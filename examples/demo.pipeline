@@ -11,7 +11,7 @@ Pipeline("demo", "最小演示：run() + check + 多路径降级")
         .tags(#run, #shell)
         .desc("备用路径")
     )
-    .check(result => not_empty, "结果为空")
+    // v0.22 迁移：.check 已 fail-closed。质量门槛 = 独立 judge proc + .when 路由（原: .check(result => not_empty, "结果为空")）
 
   .proc("transform")
     .desc("转换数据")
