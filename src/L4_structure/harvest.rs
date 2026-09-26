@@ -360,6 +360,8 @@ pub fn harvest(days: u32) -> Result<Vec<HarvestHit>, String> {
 pub struct CmdCount {
     pub calls: u32,
     pub sessions: u32,
+    /// v0.22 PR-4：最近一次使用的 unix 秒——摊销门新鲜度信号。
+    pub last_ts: f64,
 }
 
 /// 全文命令计数 (无首行归一化) — grow.rs 的取数层.
@@ -402,13 +404,15 @@ pub fn harvest_full_counts(
     let mut counts: std::collections::HashMap<String, CmdCount> = std::collections::HashMap::new();
     let mut seen_sess: std::collections::HashMap<(String, String), ()> =
         std::collections::HashMap::new();
-    for (tc, _, sid) in &rows {
+    // v0.22 PR-4：rows 按 timestamp DESC——首见即最近使用。
+    for (tc, ts, sid) in &rows {
         for cmd in extract_commands_exact(tc) {
             let c = cmd.trim();
             if c.len() >= 6 {
                 let e = counts.entry(c.to_string()).or_insert(CmdCount {
                     calls: 0,
                     sessions: 0,
+                    last_ts: *ts,
                 });
                 e.calls += 1;
                 seen_sess.entry((c.to_string(), sid.clone())).or_insert(());

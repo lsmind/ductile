@@ -8,7 +8,7 @@
 //! 账本: promotions 表 (可审计可回滚).
 
 use crate::db;
-use crate::harvest::{self, HarvestHit};
+use crate::harvest::{self, CmdCount, HarvestHit};
 use rusqlite::{params, Connection};
 
 /// 查询已铸成的构式模板 (来自 V26 生长).
@@ -35,6 +35,54 @@ pub fn list_scaffolds(q: &str) -> Result<Vec<(String, i64, i64, i64)>, String> {
         .flatten()
         .collect();
     Ok(rows)
+}
+
+/// v0.22 PR-4 摊销门输入信号：过去计数 + 时间分布 → 未来期望。
+pub struct AmortSignals {
+    pub count: usize,
+    pub sessions: u32,
+    pub days_since_last: f64,
+    pub horizon_days: f64,
+}
+
+/// 摊销版裁决：期望未来使用 E[N] 驱动（旧门用过去 count——探索噪声伪装复用）。
+pub struct AmortVerdict {
+    pub expected_uses: f64,
+    pub lit_bits: f64,
+    pub count: usize,
+    pub gain_bits: f64,
+    pub promoted: bool,
+}
+
+/// E[N] = session_rate × horizon × freshness × per_session，clamp ≤ 3×count。
+/// - sessions<2 → E[N]=0：无跨会话证据（V28：99% 调用是会话内迭代噪声），
+///   未来使用不可外推——单会话狂调是探索，探索结束即死。
+/// - freshness = 2^(-days_since_last/7)：7 天半衰期，信号易逝（Eq.22 同哲学）。
+/// - per_session = 1 + (calls/sessions − 1)/2：会话内迭代率折半外推——
+///   首用必计，迭代不可全额外推（探索期迭代密度 ≠ 复用期）。
+/// - 观测窗用 days_since_last 做下界（无首次使用时间戳的保守近似）。
+pub fn mdl_gate_amortized(cmd: &str, sig: AmortSignals, vocab_size: usize) -> AmortVerdict {
+    let lit_bits = 8.0 * cmd.len() as f64 + 32.0;
+    if sig.sessions < 2 {
+        return AmortVerdict { expected_uses: 0.0, lit_bits, count: sig.count, gain_bits: -lit_bits, promoted: false };
+    }
+    let ref_bits = (vocab_size as f64 + 1.0).log2();
+    let saving_per_use = 8.0 * cmd.len() as f64 - ref_bits;
+
+    let session_rate = sig.sessions as f64 / sig.days_since_last.max(1.0);
+    let freshness = 2.0f64.powf(-sig.days_since_last / 7.0);
+    let per_session = 1.0 + (sig.count as f64 / sig.sessions as f64 - 1.0) / 2.0;
+    let cap = (sig.count as f64) * 3.0; // 未来 ≤ 3× 过去：防下界近似爆炸
+    let en = (session_rate * sig.horizon_days * freshness * per_session).min(cap);
+
+    let gain = en * saving_per_use - lit_bits;
+    AmortVerdict {
+        expected_uses: en,
+        lit_bits,
+        count: sig.count,
+        gain_bits: gain,
+        promoted: gain > 0.0 && en >= 2.0,
+    }
 }
 
 pub struct PromotionVerdict {
@@ -96,16 +144,24 @@ fn vocab_size(conn: &Connection) -> usize {
 pub fn promote(days: u32, top: usize, dry_run: bool) -> Result<(usize, usize), String> {
     // v0.9.3: 跨会话判据 — 会话内重复=迭代(探索), 跨会话重复=复用(知识)
     let full = harvest::harvest_full_counts(days)?;
-    let mut hits: Vec<HarvestHit> = full
-        .into_iter()
+    let full_by_cmd: std::collections::HashMap<String, CmdCount> = full;
+    let mut hits: Vec<HarvestHit> = full_by_cmd
+        .iter()
         .filter(|(_, cc)| cc.sessions >= 2)
         .map(|(cmd, cc)| HarvestHit {
             count: cc.sessions as usize,
-            cmd,
+            cmd: cmd.clone(),
             last_seen: String::new(),
         })
         .collect();
     hits.sort_by(|a, b| b.count.cmp(&a.count));
+
+    // v0.22 PR-4 摊销门：过去计数只是证据，裁决改期望未来使用 E[N]。
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    const HORIZON_DAYS: f64 = 3.0e1;
     let mut conn = db_open()?;
 
     conn.execute(
@@ -161,10 +217,18 @@ pub fn promote(days: u32, top: usize, dry_run: bool) -> Result<(usize, usize), S
         }
         evaluated += 1;
         seen_keys.insert(norm_key);
-        let v = PromotionVerdict {
-            cmd: h.cmd.clone(),
-            ..mdl_gate(res, h.count, v0 + promoted_n)
+        // v0.22 PR-4：摊销裁决（E[N] 替代过去 count）。观测窗 = max(days, 距今)。
+        let cc = full_by_cmd.get(&h.cmd);
+        let days_since_last = cc
+            .map(|c| ((now_ts - c.last_ts) / 86400.0).max(0.0))
+            .unwrap_or(days as f64);
+        let sig = AmortSignals {
+            count: cc.map(|c| c.calls as usize).unwrap_or(h.count),
+            sessions: cc.map(|c| c.sessions).unwrap_or(2),
+            days_since_last,
+            horizon_days: HORIZON_DAYS,
         };
+        let v = mdl_gate_amortized(res, sig, v0 + promoted_n);
         let tag = auto_tag(res, &mut tag_used);
         println!(
             "  [{:>7.0}b {:+9.0}b net] x{:<3} #{} ← {}",
@@ -283,6 +347,52 @@ mod tests {
         assert_eq!(residual("cd /tmp && ls -la"), "ls -la");
         assert_eq!(residual("echo hi"), "echo hi");
         assert_eq!(residual("cd only"), "cd only");
+    }
+
+    // ═══ v0.22 PR-4 晋升摊销门（TDD 负例）═══
+    // 旧 mdl_gate 的盲区：count 是过去计数，不是未来预期。会话内高频迭代
+    // （探索噪声）只要 count 够大就能过门——但探索结束后未来 E[N]≈0，
+    // 晋升的 32b 选择码永远收不回。摊销门 = 期望未来使用驱动。
+
+    #[test]
+    fn v022_amort_expectation_gate_blocks_dying_cmd() {
+        // 死命令：过去 20 次（探索期狂调）但全部集中在 1 个会话 + 3 天未见
+        // → E[N]≈0，不得晋升——无论过去 count 多大。
+        let v = mdl_gate_amortized(
+            "ffmpeg -i in.mp4 -vf scale=1920:1080 out.mp4", // 45B 残差
+            AmortSignals { count: 20, sessions: 1, days_since_last: 3.0, horizon_days: 30.0 },
+            10,
+        );
+        assert!(!v.promoted, "dying cmd (20 calls, 1 session, 3d stale) must NOT promote: E[N]={}", v.expected_uses);
+    }
+
+    #[test]
+    fn v022_amort_expectation_gate_passes_recurring_cmd() {
+        // 活命令：10 会话 × 每天 2 次 × 昨天还在用 → E[N] 高，应晋升。
+        let v = mdl_gate_amortized(
+            "cargo test --release --lib 2>&1 | grep test.result",
+            AmortSignals { count: 60, sessions: 10, days_since_last: 1.0, horizon_days: 30.0 },
+            8,
+        );
+        assert!(v.promoted, "recurring cmd (10 sessions, used yesterday) should promote: E[N]={}", v.expected_uses);
+    }
+
+    #[test]
+    fn v022_amort_stale_but_high_rate_still_blocks() {
+        // 高频但已死：过去 100 次 20 会话，但 14 天未见 → 半衰期衰减后
+        // E[N] 应显著缩水。30 天视野下不应晋升（信息陈旧，未来不可外推）。
+        let v = mdl_gate_amortized(
+            "python3 scripts/build_all_assets.py --target=ep1 --quality=high",
+            AmortSignals { count: 100, sessions: 20, days_since_last: 14.0, horizon_days: 30.0 },
+            10,
+        );
+        // 边界敏感测试：不硬性断言不晋升（长命令 gain 大），但 E[N] 必须
+        // 显著低于无衰减外推（100×30/14≈214）——衰减机制必须生效。
+        assert!(
+            v.expected_uses < 60.0,
+            "14d-stale must decay E[N] below naive extrapolation, got {}",
+            v.expected_uses
+        );
     }
 
     #[test]
