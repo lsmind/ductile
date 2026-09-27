@@ -223,11 +223,123 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             cmd_script_call(&args[3], &args[4])
         }
 
+        // v0.23 深题手册：`ductile help <topic>` 把引擎行为写进二进制，
+        // 终端即得——不再逼使用者进 Rust 源码排障（反馈单第 3 条）。
+        "help" if args.len() >= 3 => cmd_help_topic(&args[2]),
+        "help" => {
+            print_usage();
+            Ok(0)
+        }
+
         _ => {
             print_usage();
             Ok(1)
         }
     }
+}
+
+/// v0.23 `ductile help <topic>`——深题手册。每条 = 一次真实排障的答案，
+/// 内容与 SPEC 同源但面向"刚撞上坑的使用者"（现象 → 原因 → 修法）。
+fn cmd_help_topic(topic: &str) -> Result<i32, String> {
+    let text: Vec<&str> = match topic {
+        "args" => vec![
+            "ductile help args — 参数怎么从管线流进脚本（v0.23 参数通道）",
+            "",
+            "引擎传参通道由契约头 `# args:` 声明（默认 env，存量零迁移）：",
+            "  env  (默认)  引擎设 DUCTILE_ARG_<NAME> 环境变量；脚本 os.environ 取",
+            "  argv         引擎追加 --key=value 位置参数；脚本 sys.argv/\"$@\"/$1 取",
+            "  both         双通道同传同值（迁移期兼容）",
+            "",
+            "attach 期 lint（fail-closed）：声明与脚本体读取方式错配 → 拒绝注册。",
+            "现象（错配不拦时会发生的）：参数静默蒸发，脚本落回自身 default",
+            "照常跑完——cmd=\"models\" 进去、status 出来，无任何报错。",
+            "修法三选一：改脚本读声明通道 / 改声明匹配脚本 / '# args: xxx!' 跳 lint。",
+            "",
+            "排障口诀：参数没生效 → 先 `ductile script show <name>` 看 args 行，",
+            "再 `ductile script call <name> \"k=v\"` 单发（绕开管线看脚本本体的回包）。",
+            "env 通道细节：值支持 {topic}/@proc.field/契约 default；引擎注入前剥",
+            "一层对称包围引号；嵌套 run 时外层 DUCTILE_ARG_* 会被剥（防污染）。",
+        ],
+        "quotes" => vec![
+            "ductile help quotes — DSL 引号语义（三层引号必炸的地方）",
+            "",
+            "总原则：DSL 层引号 ≠ shell 层引号，各管各的，不要套娃。",
+            "",
+            "  script(x, text=\"a b\")        双引号内是字面值，空格安全",
+            "  script(x, cfg='{\"a\":\"b\"}')   JSON 参数：外层单引号，内层双引号",
+            "  run(\"grep '\\\"x\\\"' file\")      run() 内是 shell 语义，按 shell 规则转义",
+            "",
+            "三条铁律：",
+            "  1. 禁止 echo '@ref' —— @ref 展开后含单引号会撕裂 shell 结构。",
+            "     LLM/上游文本要落盘走 write 动词，要读用 read 或 .when 字段。",
+            "  2. 三层同引号（\\\"'…'\\\"）必炸——外层换引号种类，别转义套娃。",
+            "  3. 多行 @ref 必须整体引号包裹：echo \"@scan\" 也不行（同第 1 条），",
+            "     用 write(from=\"@scan\", to=...) 或 read(from=...)。",
+            "",
+            "排障口诀：bash 语法错 + 消息里看到撕裂的引号 → 90% 是 @ref 进了",
+            "echo/run 的引号结构；把数据边改成 write/read 动词，别修引号。",
+        ],
+        "errflow" => vec![
+            "ductile help errflow — 错误分类与自动处置（十五类 → 策略）",
+            "",
+            "失败不是炸管线，是值：Left 值 §§FIELDS§§err=1§§err_code=…§§ 传播，",
+            "关键链（.deliver 闭包）外的旁路失败可容忍。",
+            "",
+            "  timeout/ratelimit/memory/network → Retry（指数退避；关键节点预算×2）",
+            "  auth/data/format/schema         → Switch（自动切备选 impl；auth=标死坏实现）",
+            "  data 同输入必再错                → Reroute（跳过剩余重试直接换 impl）",
+            "  cancelled/contract/dependency   → Escalate/Exit（fail-fast，别重试）",
+            "",
+            "排障口诀：先看 err_code 属哪类——Retry 类等它自己退避，Switch 类",
+            "查备选 impl 是否存在（plan 里得先有 b 摆着），contract 类是你自己",
+            "的契约红灯（参数/输出形状），改管线别改引擎。",
+            "注意 err_msg 截断 200 字符：traceback 尾部常被切——单发复现用",
+            "ductile script call，拿完整报错再建因果链。",
+        ],
+        "script" => vec![
+            "ductile help script — 脚本契约速查（# ductile: v1 头）",
+            "",
+            "最小契约头（缺必填键拒绝注册）：",
+            "  # ductile: v1",
+            "  # name: my_tool            # 字母数字/_/-",
+            "  # desc: 一句话",
+            "  # lang: python             # python | bash | powershell",
+            "  # params: text(str, required), n(int, default=10)",
+            "  # output: n(int)",
+            "  # pure: true               # 副作用标注",
+            "  # idempotent: true",
+            "  # concurrency: safe        # safe | serial | exclusive（flock 物理互斥）",
+            "  # effects: none            # none | fs | net | system",
+            "  # timeout: 60              # 可选 # retries: N",
+            "  # args: env                # 可选 v0.23：env|argv|both（help args）",
+            "",
+            "输出协议：##DSL_RESULT\\nkey=value\\n##DSL_END（stderr 给人看）。",
+            "bash 必须 set -euo pipefail（否则静默半成功）。",
+            "契约卡存 attach 时的绝对路径——脚本挪窝要重新 attach",
+            "（ductile script doctor 列 DEAD 路径）。",
+        ],
+        "topics" | "index" => vec![
+            "ductile help <topic> — 深题手册（v0.23）",
+            "",
+            "  help args      参数怎么流进脚本：env/argv/both 通道 + 静默回落坑",
+            "  help quotes    DSL 引号语义：三层引号、@ref 禁入 echo、JSON 参数写法",
+            "  help errflow   错误分类：十五类 err_code → Retry/Switch/Reroute/Exit",
+            "  help script    脚本契约头速查：必填键、DSL_RESULT、concurrency 档位",
+            "",
+            "命令总表：ductile（无参数）。动词全表与引擎语义：SPEC.md。",
+        ],
+        other => {
+            eprintln!(
+                "unknown help topic '{}' — try: args | quotes | errflow | script | topics",
+                other
+            );
+            return Ok(1);
+        }
+    };
+    for line in text {
+        println!("{}", line);
+    }
+    Ok(0)
 }
 
 // ── v0.12 script contract line — 脚本即 API ──
@@ -753,6 +865,12 @@ fn print_usage() {
     eprintln!("  patch <pipeline> <proc> <impl> <field> <value>");
     eprintln!("  patch list");
     eprintln!("  patch clear <pipeline>");
+    eprintln!();
+    eprintln!("Deep help (v0.23 — 深题手册, 现象→原因→修法):");
+    eprintln!("  help args              参数通道 env/argv/both + 静默回落坑");
+    eprintln!("  help quotes            DSL 引号语义 (三层引号/@ref 禁入 echo)");
+    eprintln!("  help errflow           错误分类 Retry/Switch/Reroute/Exit");
+    eprintln!("  help script            脚本契约头速查");
     eprintln!();
     eprintln!("Script contracts (v0.12 — 脚本即 API):");
     eprintln!("  script attach <file>    Register script (parses # ductile: contract header)");

@@ -449,6 +449,21 @@ key1=value1
 - 逃生门：`# args: argv!` / `# args: env!` 后缀 `!` 跳过 lint（反射/封装读参的场景，责任自负）
 - lint 是启发式（脚本体扫描 `sys.argv`/`ARGV`/`$1`/`DUCTILE_ARG_` 痕迹），只做注册期红灯，不做运行期保证
 
+### 7.2d 深题手册 `ductile help <topic>`（v0.23）
+
+排障知识写进二进制，终端即得（反馈单第 3 条：调试不该逼人进 Rust 源码）：
+
+```
+ductile help topics    手册索引
+ductile help args      参数通道 env/argv/both + 静默回落坑（现象→原因→修法）
+ductile help quotes    DSL 引号语义（三层引号、@ref 禁入 echo、JSON 参数写法）
+ductile help errflow   错误分类十五类 → Retry/Switch/Reroute/Exit + err_msg 截断坑
+ductile help script    脚本契约头速查（必填键、DSL_RESULT、concurrency 档位）
+```
+
+每条按「现象 → 原因 → 修法 → 排障口诀」组织，与 SPEC 同源；新增深题时
+SPEC 与 help 文本同步改（内容单一事实源在 cli.rs cmd_help_topic）。
+
 ### 7.2c DSL 引号语义速查（反馈单点名补表）
 
 | 场景 | 写法 | 陷阱 |
