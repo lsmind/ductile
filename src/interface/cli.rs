@@ -225,7 +225,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
 
         // v0.23 深题手册：`ductile help <topic>` 把引擎行为写进二进制，
         // 终端即得——不再逼使用者进 Rust 源码排障（反馈单第 3 条）。
-        "help" if args.len() >= 3 => cmd_help_topic(&args[2]),
+        "help" if args.len() >= 3 => cmd_help_topic(&args[2..].join(" ")),
         "help" => {
             print_usage();
             Ok(0)
@@ -240,7 +240,23 @@ pub fn run(args: &[String]) -> Result<i32, String> {
 
 /// v0.23 `ductile help <topic>`——深题手册。每条 = 一次真实排障的答案，
 /// 内容与 SPEC 同源但面向"刚撞上坑的使用者"（现象 → 原因 → 修法）。
-fn cmd_help_topic(topic: &str) -> Result<i32, String> {
+fn cmd_help_topic(topic_raw: &str) -> Result<i32, String> {
+    // `ductile help <topic> src` — LSP 语义：概念 → 本版本源码定义位置。
+    // 行号运行时解析（反映工作树，不写死）；版本 hash 编译期烤入，
+    // git show 命令永远钉在构建版本上。
+    let mut parts = topic_raw.split_whitespace();
+    let topic = parts.next().unwrap_or("topics");
+    let sub = parts.next().unwrap_or("");
+    if sub == "src" {
+        return cmd_help_src(topic);
+    }
+    if !sub.is_empty() {
+        eprintln!(
+            "unknown help subcommand '{}' — try: ductile help {} src",
+            sub, topic
+        );
+        return Ok(1);
+    }
     let text: Vec<&str> = match topic {
         "args" => vec![
             "ductile help args — 参数怎么从管线流进脚本（v0.23 参数通道）",
@@ -338,6 +354,72 @@ fn cmd_help_topic(topic: &str) -> Result<i32, String> {
     };
     for line in text {
         println!("{}", line);
+    }
+    Ok(0)
+}
+
+// ── v0.23 help <topic> src — 源码锚点表（LSP 式 go-to-definition）──
+
+/// 每题挂 (文件, 符号, 职责一句话)。行号运行时 grep 解析——工作树改了
+/// 位置跟着走；未命中退化为符号名（rg -n 仍可定位）。
+fn cmd_help_src(topic: &str) -> Result<i32, String> {
+    let hash = option_env!("DUCTILE_BUILD_HASH").unwrap_or("dev");
+    println!(
+        "ductile help {} src — 本版本源码锚点 (v{} @ {})",
+        topic,
+        env!("CARGO_PKG_VERSION"),
+        hash
+    );
+    println!("  工作树行号实时解析; 钉版本看定义: git show {}:{{file}}", hash);
+    println!();
+    let anchors: &[(&str, &str, &str)] = match topic {
+        "args" => &[
+            ("src/core/script_card.rs", "enum ArgsChannel", "通道枚举与 parse（'!' 抑制语义）"),
+            ("src/L2_orchestration/script.rs", "fn parse_contract", "契约头解析; args 键读入+lint 触发"),
+            ("src/L2_orchestration/script.rs", "fn lint_args_channel", "双向 lint: env声明×argv读取 互拦"),
+            ("src/L2_orchestration/steps.rs", "v0.23 参数通道 argv/both", "执行点: argv/both 时附加 --key=value"),
+            ("src/L2_orchestration/steps.rs", "DUCTILE_ARG_", "env 注入 + 继承污染剥离"),
+            ("src/L0_physical/db.rs", "args_channel", "scripts 表列与迁移"),
+        ],
+        "quotes" => &[
+            ("src/L2_orchestration/script.rs", "fn parse_script_body", "DSL 侧引号感知 tokenizer（script(...) 参数）"),
+            ("src/L2_orchestration/textargs.rs", "fn strip_wrapping_quotes", "env 注入前剥对称包围引号"),
+            ("src/L2_orchestration/textargs.rs", "fn resolve_vars", "{topic}/@proc.field 解析"),
+            ("src/L2_orchestration/steps.rs", "fn exec_write", "write 动词: @ref 落盘的安全通道"),
+        ],
+        "errflow" => &[
+            ("src/L1_feedback/errflow.rs", "pub enum ErrCode", "十五类错误码定义"),
+            ("src/L1_feedback/errflow.rs", "pub fn classify", "原始报错 → ErrCode 分类"),
+            ("src/L1_feedback/errflow.rs", "pub fn strategy", "ErrCode → Retry/Switch/Reroute/Exit"),
+            ("src/L1_feedback/errflow.rs", "pub fn respond", "分类 → 具体响应动作"),
+            ("src/L1_feedback/errflow.rs", "fn delay_secs", "Retry 指数退避节奏"),
+            ("src/L1_feedback/errflow.rs", "fn propagated", "Left 值跨 proc 传播（err_code 继承根因）"),
+        ],
+        "script" => &[
+            ("src/core/script_card.rs", "pub struct ScriptCard", "契约卡数据结构"),
+            ("src/L2_orchestration/script.rs", "fn parse_contract", "契约头解析与必填键校验"),
+            ("src/L2_orchestration/script.rs", "pub fn lang_interpreter", "lang → 解释器映射"),
+            ("src/L0_physical/db.rs", "fn script_attach_conn", "注册入库（含 args_channel）"),
+            ("src/interface/cli.rs", "fn cmd_script_show", "契约卡展示（LLM 读这张卡）"),
+        ],
+        _ => {
+            eprintln!(
+                "no source map for '{}' — try: args | quotes | errflow | script",
+                topic
+            );
+            return Ok(1);
+        }
+    };
+    let root = std::env::current_dir().unwrap_or_default();
+    for (file, needle, what) in anchors {
+        let path = root.join(file);
+        let mut found = String::new();
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Some(lno) = content.lines().position(|l| l.contains(needle)) {
+                found = format!(":{}", lno + 1);
+            }
+        }
+        println!("  {:<38} {:<34} {}", format!("{}{}", file, found), needle, what);
     }
     Ok(0)
 }

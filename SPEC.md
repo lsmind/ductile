@@ -464,6 +464,13 @@ ductile help script    脚本契约头速查（必填键、DSL_RESULT、concurre
 每条按「现象 → 原因 → 修法 → 排障口诀」组织，与 SPEC 同源；新增深题时
 SPEC 与 help 文本同步改（内容单一事实源在 cli.rs cmd_help_topic）。
 
+**`ductile help <topic> src`（v0.23）— LSP 式源码锚点**：每题挂
+(file, 符号, 职责) 锚点表，行号**运行时**解析（反映工作树当前状态，
+改码后位置自动跟），版本 hash **编译期**烤入（build.rs 注入
+DUCTILE_BUILD_HASH）——`git show <hash>:<file>` 永远钉在构建版本。
+锚点未命中退化为符号名（rg -n 仍可定位）。新增深题时同步锚点表
+（cli.rs cmd_help_src）。
+
 ### 7.2c DSL 引号语义速查（反馈单点名补表）
 
 | 场景 | 写法 | 陷阱 |
