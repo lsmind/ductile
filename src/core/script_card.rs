@@ -28,6 +28,45 @@ pub struct ScriptCard {
     /// **具体是什么**（不是通用维度名"场域"——那等于没说）。空串 = mcsm 未声明。
     /// 解析校验见 script::parse_contract。
     pub mcsm_note: String,
+    /// v0.23 参数通道声明：env（默认，DUCTILE_ARG_* 环境）| argv（--key=value
+    /// 位置参数）| both（双通道同值）。管道反馈单：脚本读 argv 而引擎只传 env →
+    /// 参数静默落回脚本自身 default，"cmd 进去 status 出来"无任何报错——
+    /// 最恶劣的失败模式是静默。attach 期 lint 双向硬错（见 script::lint_args_channel）。
+    pub args_channel: String,
+}
+
+/// v0.23 参数通道。default → Env（存量契约零迁移）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgsChannel {
+    Env,
+    Argv,
+    Both,
+}
+
+impl ArgsChannel {
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let t = s.trim();
+        if t.is_empty() {
+            return Ok(ArgsChannel::Env); // 未声明 → env（存量契约零迁移）
+        }
+        match t.trim_end_matches('!') {
+            "env" => Ok(ArgsChannel::Env),
+            "argv" => Ok(ArgsChannel::Argv),
+            "both" => Ok(ArgsChannel::Both),
+            other => Err(format!(
+                "unknown args channel '{}' (known: env/argv/both, optional '!' suffix to skip lint)",
+                other
+            )),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ArgsChannel::Env => "env",
+            ArgsChannel::Argv => "argv",
+            ArgsChannel::Both => "both",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

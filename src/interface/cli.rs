@@ -560,13 +560,14 @@ fn cmd_script_attach(path: &str) -> Result<i32, String> {
     let card = crate::script::parse_contract(&source, path)?;
     crate::db::script_attach(&card)?;
     println!(
-        "attached: {} (lang={}, pure={}, idempotent={}, concurrency={}, effects={})",
+        "attached: {} (lang={}, pure={}, idempotent={}, concurrency={}, effects={}, args={})",
         card.name,
         card.lang,
         card.pure,
         card.idempotent,
         card.concurrency.as_str(),
-        card.effects
+        card.effects,
+        card.args_channel
     );
     Ok(0)
 }
@@ -664,6 +665,7 @@ fn cmd_script_show(name: &str) -> Result<i32, String> {
     println!("  effects:      {}", c.effects);
     println!("  timeout:      {}s", c.timeout_secs);
     println!("  retries:      {}", c.retries);
+    println!("  args:         {} (v0.23 参数通道: env=DUCTILE_ARG_* | argv=--key=value | both)", c.args_channel);
     if !c.mcsm.is_empty() {
         println!("  mcsm:         {}", c.mcsm);
         if !c.mcsm_note.is_empty() {

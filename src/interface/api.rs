@@ -643,6 +643,7 @@ mod tests {
             retries: 0,
             mcsm: String::new(),
             mcsm_note: String::new(),
+            args_channel: "env".to_string(),
         }
     }
 

@@ -217,6 +217,20 @@ pub fn migrate(conn: &Connection) {
         conn.execute_batch("ALTER TABLE scripts ADD COLUMN mcsm_note TEXT NOT NULL DEFAULT '';")
             .ok();
     }
+    // v0.23：scripts 补 args_channel 列（参数通道 env/argv/both，存量='env'）。
+    let has_ac = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('scripts') WHERE name='args_channel'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    if has_ac == 0 {
+        conn.execute_batch(
+            "ALTER TABLE scripts ADD COLUMN args_channel TEXT NOT NULL DEFAULT 'env';",
+        )
+        .ok();
+    }
     // v0.18.6 P1-2：l4_reviews 补 label_source（human / blind:regcheck3）。
     // 老数据默认 human（历史语义：人打的标签）。
     let has_lsrc = conn
@@ -380,6 +394,7 @@ pub const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS pipelines (
             retries     INTEGER NOT NULL DEFAULT 0,
             mcsm        TEXT NOT NULL DEFAULT '',
             mcsm_note   TEXT NOT NULL DEFAULT '',
+            args_channel TEXT NOT NULL DEFAULT 'env',
             attached_at TEXT DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS canaries (
@@ -1588,15 +1603,17 @@ use crate::L0_physical::time::now_ts;
 pub fn script_attach_conn(conn: &Connection, card: &ScriptCard) -> Result<(), String> {
     conn.execute(
         "INSERT INTO scripts (name, path, lang, desc, params, output, pure, idempotent,
-                              concurrency, effects, timeout_secs, retries, mcsm, mcsm_note)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+                              concurrency, effects, timeout_secs, retries, mcsm, mcsm_note,
+                              args_channel)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
          ON CONFLICT(name) DO UPDATE SET
             path=excluded.path, lang=excluded.lang, desc=excluded.desc,
             params=excluded.params, output=excluded.output, pure=excluded.pure,
             idempotent=excluded.idempotent, concurrency=excluded.concurrency,
             mcsm=excluded.mcsm, mcsm_note=excluded.mcsm_note,
             effects=excluded.effects, timeout_secs=excluded.timeout_secs,
-            retries=excluded.retries, attached_at=datetime('now')",
+            retries=excluded.retries, args_channel=excluded.args_channel,
+            attached_at=datetime('now')",
         rusqlite::params![
             card.name,
             card.path,
@@ -1612,6 +1629,7 @@ pub fn script_attach_conn(conn: &Connection, card: &ScriptCard) -> Result<(), St
             card.retries as i64,
             card.mcsm,
             card.mcsm_note,
+            card.args_channel,
         ],
     )
     .map_err(|e| format!("script_attach failed: {}", e))?;
@@ -1637,7 +1655,7 @@ pub fn script_detach(name: &str) -> bool {
 pub fn script_get_conn(conn: &Connection, name: &str) -> Option<ScriptCard> {
     conn.query_row(
         "SELECT name, path, lang, desc, params, output, pure, idempotent,
-                concurrency, effects, timeout_secs, retries, mcsm, mcsm_note
+                concurrency, effects, timeout_secs, retries, mcsm, mcsm_note, args_channel
          FROM scripts WHERE name = ?1",
         [name],
         |r| {
@@ -1657,6 +1675,7 @@ pub fn script_get_conn(conn: &Connection, name: &str) -> Option<ScriptCard> {
                 retries: r.get::<_, i64>(11)? as usize,
                 mcsm: r.get(12)?,
                 mcsm_note: r.get(13)?,
+                args_channel: r.get(14)?,
             })
         },
     )
@@ -1672,7 +1691,7 @@ pub fn script_list_conn(conn: &Connection) -> Vec<ScriptCard> {
     let mut stmt = conn
         .prepare(
             "SELECT name, path, lang, desc, params, output, pure, idempotent,
-                    concurrency, effects, timeout_secs, retries, mcsm, mcsm_note
+                    concurrency, effects, timeout_secs, retries, mcsm, mcsm_note, args_channel
              FROM scripts ORDER BY name",
         )
         .expect("script_list failed");
@@ -1694,6 +1713,7 @@ pub fn script_list_conn(conn: &Connection) -> Vec<ScriptCard> {
                 retries: r.get::<_, i64>(11)? as usize,
                 mcsm: r.get(12)?,
                 mcsm_note: r.get(13)?,
+                args_channel: r.get(14)?,
             })
         })
         .expect("script_list query failed");
@@ -1975,6 +1995,7 @@ mod conn_tests {
             retries: 1,
             mcsm: String::new(),
             mcsm_note: String::new(),
+            args_channel: "env".to_string(),
         };
         assert!(script_attach_conn(&conn, &card).is_ok());
         let got = script_get_conn(&conn, "word_stats").unwrap();

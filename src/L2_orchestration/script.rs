@@ -28,7 +28,7 @@
 //! - `concurrency` — safe(随便并发) / exclusive(不许与自身并发) / serial(禁并发)
 //! - `effects` — none/fs/net/process/system，声明副作用面（诚实声明是作者责任）
 
-use crate::core::script_card::{Concurrency, ScriptCard};
+use crate::core::script_card::{ArgsChannel, Concurrency, ScriptCard};
 use std::collections::BTreeMap;
 
 /// lang → 解释器二进制。注册时校验，未知 lang fail-closed。
@@ -253,6 +253,15 @@ pub fn parse_contract(source: &str, path: &str) -> Result<ScriptCard, String> {
         )
     };
 
+    // v0.23 参数通道：args 可选键（env 默认 / argv / both），'!' 后缀跳过 lint
+    // （声明意图但脚本用反射/封装读参的逃生门——lint 误报时用，代价是自负的）。
+    let raw_args = kv.get("args").cloned().unwrap_or_default();
+    let lint_suppressed = raw_args.trim().ends_with('!');
+    let args_channel = ArgsChannel::parse(&raw_args)?;
+    if !lint_suppressed {
+        lint_args_channel(&source, args_channel, path)?;
+    }
+
     Ok(ScriptCard {
         name,
         path: path.to_string(),
@@ -268,7 +277,67 @@ pub fn parse_contract(source: &str, path: &str) -> Result<ScriptCard, String> {
         retries,
         mcsm,
         mcsm_note,
+        args_channel: args_channel.as_str().to_string(),
     })
+}
+
+/// v0.23 attach 期参数通道 lint：把"参数通道错配"从静默运行期错误提前到
+/// 注册期硬错。两个方向都拦：
+/// - 声明 argv 但脚本体读 env（DUCTILE_ARG_）→ 引擎不传 env，参数蒸发；
+/// - 声明 env（含默认）但脚本体读 argv（sys.argv/ARGV/$1）→ 引擎不传
+///   argv，参数蒸发，脚本静默落回自身 default——炼丹师反馈单实锤形态
+///   （"cmd 进去 status 出来"，读 steps.rs 源码才确诊）。
+/// 判定按"脚本体出现**对面**通道的读取痕迹"：启发式（契约语言跨
+/// python/bash/node/lua），只做注册期红灯，不做运行期保证。
+/// 误报逃生门：契约写 `# args: argv!` / `# args: env!` 跳过 lint。
+pub fn lint_args_channel(source: &str, channel: ArgsChannel, path: &str) -> Result<(), String> {
+    // 契约头之后的脚本体（首个非注释行起）
+    let body_start = source
+        .lines()
+        .position(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
+        .unwrap_or(source.lines().count());
+    let body: String = source.lines().skip(body_start).collect::<Vec<_>>().join("\n");
+    let reads_env = body.contains("DUCTILE_ARG_");
+    let reads_argv = body.contains("sys.argv")
+        || body.contains("os.argv")
+        || body.contains("ARGV")
+        || body.contains("\"$@\"")
+        || body.contains("$1")
+        || body.contains("$2");
+    let (bad, hint) = match channel {
+        ArgsChannel::Env => {
+            if reads_argv {
+                (true, "env")
+            } else {
+                return Ok(());
+            }
+        }
+        ArgsChannel::Argv => {
+            if reads_env {
+                (true, "argv")
+            } else {
+                return Ok(());
+            }
+        }
+        ArgsChannel::Both => return Ok(()), // 双通道同传，脚本读哪边都对
+    };
+    if bad {
+        // 到这里必有一方错配：hint = 脚本实际在读的通道
+        let (declared, reads) = if hint == "argv" {
+            (ArgsChannel::Argv.as_str(), "DUCTILE_ARG_ env")
+        } else {
+            (ArgsChannel::Env.as_str(), "argv (sys.argv/ARGV/$1)")
+        };
+        Err(format!(
+            "{}: args={} but script body reads {} — params would silently \
+             vanish and fall back to script defaults. Fix: switch script to \
+             read the declared channel, or declare '# args: {}', or append '!' \
+             to skip this lint",
+            path, declared, reads, if hint == "argv" { "env" } else { "argv" }
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 /// v0.18.11 校验并规范化 MCSM/FOPT 坐标。
@@ -466,6 +535,7 @@ mod tests {
             retries: 0,
             mcsm: mcsm.into(),
             mcsm_note: String::new(),
+            args_channel: "env".to_string(),
         }
     }
 
@@ -515,6 +585,60 @@ mod tests {
 # timeout: 60
 print("hi")
 "#;
+
+
+    // ── v0.23 参数通道 lint（反馈单：env/argv 静默回落修复）──
+
+    #[test]
+    fn args_channel_default_env_and_parse() {
+        let card = parse_contract(GOOD, "/tmp/resize.py").unwrap();
+        assert_eq!(card.args_channel, "env"); // 未声明 → env（存量零迁移）
+        assert_eq!(ArgsChannel::parse("env").unwrap(), ArgsChannel::Env);
+        assert_eq!(ArgsChannel::parse("argv").unwrap(), ArgsChannel::Argv);
+        assert_eq!(ArgsChannel::parse("both").unwrap(), ArgsChannel::Both);
+        assert_eq!(ArgsChannel::parse("argv!").unwrap(), ArgsChannel::Argv); // ! 只抑制 lint
+        assert!(ArgsChannel::parse("carrier").is_err());
+    }
+
+    #[test]
+    fn args_lint_catches_env_script_reading_argv() {
+        // 炼丹师实锤形态：默认 env 通道，脚本读 argv → 参数静默蒸发
+        let src = GOOD.replace("print(\"hi\")", "import sys\nprint(sys.argv[1])");
+        let err = parse_contract(&src, "/tmp/x.py").unwrap_err();
+        assert!(err.contains("reads argv"), "应拦 env 声明+argv 读取: {err}");
+    }
+
+    #[test]
+    fn args_lint_catches_argv_script_reading_env() {
+        // 反向：声明 argv 但脚本读 DUCTILE_ARG_ → 引擎不传 env，参数蒸发
+        let src = GOOD
+            .replace("# effects: fs", "# effects: fs\n# args: argv")
+            .replace("print(\"hi\")", "import os\nprint(os.environ[\"DUCTILE_ARG_SRC\"])");
+        let err = parse_contract(&src, "/tmp/x.py").unwrap_err();
+        assert!(err.contains("DUCTILE_ARG_"), "应拦 argv 声明+env 读取: {err}");
+    }
+
+    #[test]
+    fn args_lint_suppression_and_both_pass() {
+        // '!' 逃生门：声明意图跳过 lint
+        let src = GOOD
+            .replace("# effects: fs", "# effects: fs\n# args: argv!")
+            .replace("print(\"hi\")", "import os\nprint(os.environ[\"DUCTILE_ARG_SRC\"])");
+        let card = parse_contract(&src, "/tmp/x.py").unwrap();
+        assert_eq!(card.args_channel, "argv");
+        // both：双通道同传，读哪边都合法
+        let src2 = GOOD
+            .replace("# effects: fs", "# effects: fs\n# args: both")
+            .replace("print(\"hi\")", "import sys, os\nprint(sys.argv, os.environ)");
+        let card2 = parse_contract(&src2, "/tmp/x.py").unwrap();
+        assert_eq!(card2.args_channel, "both");
+        // 干净 argv 声明 + argv 读取 → 放行
+        let src3 = GOOD
+            .replace("# effects: fs", "# effects: fs\n# args: argv")
+            .replace("print(\"hi\")", "import sys\nprint(sys.argv[1])");
+        let card3 = parse_contract(&src3, "/tmp/x.py").unwrap();
+        assert_eq!(card3.args_channel, "argv");
+    }
 
     #[test]
     fn parse_good_contract() {

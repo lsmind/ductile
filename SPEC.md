@@ -435,6 +435,30 @@ key1=value1
 - 值支持 `{topic}`、`@proc.field`、契约 default；env 注入前引擎剥一层对称包围引号
 - 输出复用 ##DSL_RESULT；timeout/retries 走契约头
 
+### 7.2b 参数通道（v0.23）——`# args:` 契约键 + attach 期双向 lint
+
+契约可选键 `# args: env | argv | both`（默认 `env`，存量契约零迁移）：
+
+| 声明 | 引擎行为 | 脚本侧读取 |
+|---|---|---|
+| `env`（默认） | `DUCTILE_ARG_<NAME>` 环境 | `os.environ["DUCTILE_ARG_X"]` |
+| `argv` | 追加 `--key=value` 位置参数（env 不再传参） | `sys.argv` / `"$@"` / `$1` |
+| `both` | 双通道同传同值 | 读哪边都行（迁移期兼容） |
+
+- **attach 期 lint 硬错**（fail-closed，红灯带修法）：声明 env 但脚本体读 argv、或声明 argv 但读 `DUCTILE_ARG_` → 拒绝注册。根因是实测事故：脚本读 argv 而引擎只传 env，参数静默蒸发、脚本落回自身 default 照常跑完（"cmd 进去 status 出来"）——静默是最恶劣的失败模式
+- 逃生门：`# args: argv!` / `# args: env!` 后缀 `!` 跳过 lint（反射/封装读参的场景，责任自负）
+- lint 是启发式（脚本体扫描 `sys.argv`/`ARGV`/`$1`/`DUCTILE_ARG_` 痕迹），只做注册期红灯，不做运行期保证
+
+### 7.2c DSL 引号语义速查（反馈单点名补表）
+
+| 场景 | 写法 | 陷阱 |
+|---|---|---|
+| 字符串参数含空格 | `script(x, text="a b")` | DSL 引号内是字面值，不再二次解析 |
+| 参数值是 JSON | `script(x, cfg='{"a":"b"}')` | 外层必须**单引号**，内层用双引号——三层同引号必炸 |
+| @ref 含单引号 | `echo "@scan"` | `@ref` 展开后单引号会破坏 shell 结构 → 禁止 echo @ref，用 `.when` 字段或 `write` 落盘（§13.5 物理闸） |
+| 多行文本 | `run("cmd \\"a b\\"")` | run() 内是 shell 语义，嵌套引号按 shell 规则 |
+| {topic} 含引号 | `text="{topic}"` | DSL 侧安全（不进 shell）；只有 run() 里才需要防注入 |
+
 ### 7.3 脚本写作四律
 
 1. bash 必须 `set -euo pipefail`（否则中间失败被吞、末尾 echo 返回 0 → 静默半成功）

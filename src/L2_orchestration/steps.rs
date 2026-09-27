@@ -2473,6 +2473,18 @@ pub fn exec_script_call(
     let interp = crate::script::lang_interpreter(&card.lang)?;
     let mut command = Command::new(interp);
     command.arg(&card.path);
+    // v0.23 参数通道 argv/both：除 env 外附加 --key=value 位置参数。
+    // 动机：反馈单实锤——脚本读 argv 而引擎只传 env，参数静默蒸发，
+    // 脚本落回自身 default 照常跑完（"cmd 进去 status 出来"）。
+    // 契约 `# args: argv` 声明意图；attach 期 lint（script.rs）已保证
+    // 声明与脚本体读取方式一致，这里只按声明补第二通道。
+    let channel = crate::core::script_card::ArgsChannel::parse(&card.args_channel)
+        .unwrap_or(crate::core::script_card::ArgsChannel::Env);
+    if channel != crate::core::script_card::ArgsChannel::Env {
+        for (k, v) in &call_args {
+            command.arg(format!("--{}={}", k, v));
+        }
+    }
     // v0.21 资源治理①：引擎边界 env 卫生——必须在注入前剥掉继承的外层
     // DUCTILE_ARG_*（Command 的 env 变异按调用顺序应用，后置会误伤正当参数）。
     // 场景：script 步内嵌套 ductile run，外层参数 env 泄给内层脚本——
