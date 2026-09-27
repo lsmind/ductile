@@ -111,6 +111,7 @@ Pipeline("name", "desc", cwd="...", env=["K=V", ...])
 | `write` | `write(to="path", content=@ref)` | Rust 侧解析 @ref 落盘，不过 shell |
 | `read` / `read_file` | `read(from="path")` | 读文件 |
 | `llm` | `llm(agent)` 或 `llm(agent, prompt="…", schema="…", tier="…")` | OpenAI 兼容；见 §5 |
+| `mcp` | `mcp(server, tool="…", args='{json}')` — v0.22 | MCP 工具调用：server 声明于 config `[mcp.servers.<name>]`（url/token_dir/style）；协议与 OAuth 刷新在 bridge/mcp_bridge.py；结果拍平为字段+raw=（##DSL_RESULT 协议，Rust 零 JSON 依赖）。args 可含 @ref/{topic} |
 | `script` | `script(name, k=v, …)` | 脚本契约调用，见 §7 |
 | `merge` | `merge(@a, @b, dedup)` | 合并结果（可选去重） |
 | `search` / `mcp_search` / `web_search` | `search(query="…")` | 检索动词（桥接） |
@@ -173,8 +174,13 @@ Pipeline("name", "desc", cwd="...", env=["K=V", ...])
 | `ductile compose <name> <desc> <#tags> …` | 按 tag 链组装管线 |
 | `ductile learn [dir]` | 静态 tag 序列模式学习（频率 ≥2） |
 | `ductile similar [--json] [dirs]` | 结构键对齐检索 |
+| `ductile okr "目标"` | v0.22 OKR 编译器：NL 目标 → llm 分解 KR 树 → .hyper 草稿（parse 过才落盘，人审后 hyper build） |
 | `ductile build` | 从材料构建 |
 | `ductile cost` | cost 相关操作 |
+
+v0.22 check 期同构门禁（推模式）：`ductile check` 通过后自动对 db 注册表查
+结构键等价图，命中即 stderr 提示 `[iso-gate] ≅ <名> — <路径>`。AGENTS.md
+"写新图前 hyper similar"从自觉变物理结构；提示不阻断（新场景可忽略）。
 
 ### 2.3 超网络（.hyper）
 

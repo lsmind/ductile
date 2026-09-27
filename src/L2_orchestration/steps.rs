@@ -771,6 +771,8 @@ pub fn step_registry() -> BTreeMap<&'static str, StepFn> {
         }),
     );
     m.insert("llm", Box::new(exec_llm));
+    // v0.22 MCP 动词：mcp(server, tool=..., args=...) — 见 exec_mcp_call 注释
+    m.insert("mcp", Box::new(exec_mcp_call));
     m.insert(
         "merge",
         Box::new(|i: &Impl, _t: &str, b: &str, r: &BTreeMap<String, Value>| exec_merge(i, b, r)),
@@ -914,6 +916,101 @@ pub fn replay_canary_llm(input: &str) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+// ── v0.22 MCP 动词：mcp(server, tool=..., args=...) ──
+//
+// 分层（照 llm() 模式）：
+//   DSL:     .proc("x", mcp(LibTV, tool="doctor"))
+//   Rust:    本函数——参数解析/桥启动/##DSL_RESULT 解析（零 JSON 依赖）
+//   桥:      bridge/mcp_bridge.py——协议（Streamable HTTP JSON-RPC）+ OAuth 刷新
+//   config:  [mcp.servers.<name>] url/token_dir/style（连接层不属于 DSL 语义）
+//
+// server 是裸首参（agent 同工效学）；args= 是 JSON 字符串（可含 @ref/{topic}，
+// 先走 resolve_vars）。桥拍平结果为字段 + raw=（完整 JSON）。
+fn extract_sq_arg(key: &str, body: &str) -> String {
+    /// 单引号变体：args='{...}'——JSON 内含双引号，DSL 层必须用单引号包裹。
+    /// 公共 extract_string_arg 只认 key="v"，这里局部补齐，不动公共契约。
+    let pat = format!("{}='", key);
+    if let Some(pos) = body.find(&pat) {
+        let before_ok = pos == 0 || {
+            let b = &body[..pos];
+            let c = b.chars().last().unwrap_or(' ');
+            !(c.is_alphanumeric() || c == '_')
+        };
+        if before_ok {
+            let after = &body[pos + pat.len()..];
+            return after.chars().take_while(|c| *c != '\'').collect();
+        }    }
+    String::new()
+}
+
+fn exec_mcp_call(
+    _impl_: &Impl,
+    topic: &str,
+    body: &str,
+    results: &BTreeMap<String, Value>,
+) -> Result<Value, String> {
+    let server = extract_first_bare_arg(body)
+        .ok_or_else(|| "mcp() requires a server name: mcp(LibTV, tool=\"...\")".to_string())?;
+    let tool = extract_string_arg("tool", body);
+    if tool.is_empty() {
+        return Err(format!(
+            "mcp('{server}'): missing tool= (mcp(server, tool=\"doctor\"))"
+        ));
+    }
+    let args_raw = {
+        let sq = extract_sq_arg("args", body);
+        if !sq.is_empty() {
+            sq
+        } else {
+            extract_string_arg("args", body)
+        }
+    };
+    let args_resolved = if args_raw.is_empty() {
+        "{}".to_string()
+    } else {
+        resolve_vars(&args_raw, topic, results)
+    };
+    let bridge = find_bridge("mcp_bridge.py");
+    if !Path::new(&bridge).exists() {
+        return Err(format!(
+            "mcp bridge not found at '{bridge}' (place bridge/mcp_bridge.py in repo or ~/.local/share/ductile/bridge/)"
+        ));
+    }
+    eprintln!("    -> mcp: {server}.{tool}");
+    let out = Command::new("python3")
+        .arg(&bridge)
+        .arg("--server")
+        .arg(&server)
+        .arg("--tool")
+        .arg(&tool)
+        .arg("--args")
+        .arg(&args_resolved)
+        .output()
+        .map_err(|e| format!("mcp bridge launch failed: {e}"))?;
+    let stdout_text = String::from_utf8_lossy(&out.stdout).to_string();
+    if !out.status.success() {
+        let stderr_text = String::from_utf8_lossy(&out.stderr);
+        return Err(format!(
+            "mcp {server}.{tool} failed (exit {:?}): {}",
+            out.status.code(),
+            &stderr_text.chars().take(400).collect::<String>()
+        ));
+    }
+    // ##DSL_RESULT 协议复用（桥已拍平字段；raw= 完整 JSON）
+    if let Some(kvs) = parse_dsl_result_block(&stdout_text) {
+        if !kvs.is_empty() {
+            eprintln!("    -> mcp result: {} fields", kvs.len());
+            return Ok(Value::Text(encode_structured_result(&kvs, &stdout_text)));
+        }
+    }
+    let trimmed = if stdout_text.len() > 5000 {
+        format!("{}...[truncated]", crate::trunc_chars(&stdout_text, 5000))
+    } else {
+        stdout_text
+    };
+    Ok(Value::Text(trimmed))
 }
 
 fn exec_llm(

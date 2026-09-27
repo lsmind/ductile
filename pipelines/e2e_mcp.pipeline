@@ -1,0 +1,15 @@
+// e2e_mcp.pipeline — v0.22 mcp() 动词 E2E（对真实 LibTV 服务器，只读工具）
+// 验证：DSL 动词 → 桥 → config 连接层 → OAuth 刷新 → 字段拍平 → 契约门禁全链。
+
+Pipeline("e2e_mcp", "mcp() 动词端到端验证", cwd="/home/beef/projects/ductile")
+
+  // 1. doctor：连接+身份（只读）
+  .proc("connect", mcp(LibTV, tool="doctor"))
+    .desc("LibTV 连接自检")
+    .contract(outputs="status", invariants="@self.status == \"ready\"")
+
+  // 2. 模型目录：args= 单引号 JSON（DSL 内层双引号在 Rust extract_string_arg 会截断）
+  .proc("catalog", mcp(LibTV, tool="search_models", args='{"action":"search","nodeType":"video","pageSize":5}'))
+    .desc("视频模型目录（免费/vip 标记）")
+    .needs(@connect)
+    .contract(outputs="n", invariants="@self.n >= 3")

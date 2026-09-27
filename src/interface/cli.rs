@@ -22,6 +22,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
 
     match args[1].as_str() {
         // Core
+        "okr" if args.len() >= 3 => okr_compile(&args[2]),
         "check" if args.len() >= 3 => match parse_pipeline_file(&args[2]) {
             Err(e) => {
                 eprintln!("{}", e);
@@ -31,6 +32,11 @@ pub fn run(args: &[String]) -> Result<i32, String> {
                 let errs = check_pipeline(&pl);
                 if errs.is_empty() {
                     println!("Type check passed");
+                    // v0.22 同构门禁（推模式）：check 通过后自动对 db 注册表查重。
+                    // AGENTS.md 第 5 条"写新图前 hyper similar"从自觉变物理强制——
+                    // 结构等价的图在 check 期就递到面前，不是等人想起去查。
+                    // 语义：提示不阻断（复用是建议不是义务）；db 空则静默（无语料可查）。
+                    iso_gate_print(&pl, &args[2]);
                     Ok(0)
                 } else {
                     eprintln!("Type check errors:");
@@ -2653,6 +2659,113 @@ fn cmd_harvest(days: u32) -> Result<i32, String> {
             Ok(0)
         }
     }
+}
+
+// ── v0.22 同构门禁（check 期推模式查重）──
+//
+// 把 AGENTS.md 第 5 条"写新图前 hyper similar"焊进物理结构：check 通过即
+// 自动扫 db 注册表，结构键精确等价 → stderr 提示可复用。拉模式变推模式。
+// 分层：interface 调 L4（struct_sig）+ L0（registered_graph_files），合法下行。
+fn iso_gate_print(pl: &crate::core::ast::Pipeline, src_path: &str) {
+    use crate::L4_structure::hyper::struct_sig_from_pipeline;
+    let qsig = struct_sig_from_pipeline(pl);
+    let qkey = qsig.structure_key();
+    let conn = crate::db::open();
+    let canon = |p: &str| -> String {
+        let a = std::fs::canonicalize(p)
+            .map(|x| x.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| p.to_string());
+        a
+    };
+    let self_canon = canon(src_path);
+    let mut hits: Vec<(String, String)> = Vec::new();
+    for (name, path) in crate::db::registered_graph_files(&conn) {
+        if path.ends_with(".hyper") {
+            continue; // 超图走 hyper check，不在此比对
+        }
+        if canon(&path) == self_canon {
+            continue; // 自身（重 check 自己）不算
+        }
+        let Ok(other) = crate::parser::parse_pipeline_file(&path) else {
+            continue; // 死路径跳过（doctor 语义）
+        };
+        if struct_sig_from_pipeline(&other).structure_key() == qkey {
+            hits.push((name, path));
+        }
+    }
+    if !hits.is_empty() {
+        eprintln!("[iso-gate] 结构等价图已存在（复用优先，AGENTS.md 第 5 条）：");
+        for (name, path) in hits.iter().take(5) {
+            eprintln!("  ≅ {} — {}", name, path);
+        }
+        eprintln!("[iso-gate] 若确为新场景，忽略本提示；否则考虑复用/参数化而不是新写。");
+    }
+}
+
+// ── v0.22 OKR 编译器：NL 目标 → KR 树 → .hyper 草稿（人审后 hyper build）──
+//
+// OKR ↔ ductile 映射：Objective=goal / KR=stage+contract / Initiative=vertex。
+// 职责分层（节点平等原则）：LLM 只做"分解提议"（origin=llm），结构与门禁
+// 由引擎判定——生成的 .hyper 必须过 parse 才落盘，人审后才能 build。
+// 兜底：llm 不可用 → 退出码 2，不吐半成品。
+fn okr_compile(objective: &str) -> Result<i32, String> {
+    let prompt = format!(
+        r#"你是管线架构师。把目标分解为 OKR 超图草稿。
+目标：{objective}
+
+硬性文法（违反=引擎拒绝落盘）：
+- 第一行 HyperGraph("名")，名用小写下划线
+- .goal("一句话目标")
+- .require(judge=true, min_impls=1)
+- 每个关键结果 KR 一行 .vertex("kr名", role=source|default|judge|sink, tags=#标签)
+  KR 名必须可判定（如 kr_score_ge_80 不是"提高质量"）
+- .hedge("flow", kind=chain, 依序列出全部 vertex)
+- 若有 judge vertex，加 .hedge("quality", kind=gate, judge=该vertex, producers=数据生产者, consumers=受门禁者)
+- .deliver(sink名)
+- 全部 8-14 行，不加任何解释
+
+只输出 .hyper 内容本身，不要代码围栏。"#,
+    );
+    // llm 桥直调（与 exec_llm 同源路径）；失败 fail-closed
+    let bridge = crate::steps::find_bridge("llm_bridge.py");
+    if bridge.is_empty() || !std::path::Path::new(&bridge).exists() {
+        return Err("llm bridge not found — OKR 编译器依赖 llm()".into());
+    }
+    let out = std::process::Command::new("python3")
+        .arg(&bridge)
+        .arg("--prompt")
+        .arg(&prompt)
+        .output()
+        .map_err(|e| format!("llm bridge launch failed: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "llm failed: {}",
+            String::from_utf8_lossy(&out.stderr).chars().take(300).collect::<String>()
+        ));
+    }
+    let raw = String::from_utf8_lossy(&out.stdout).to_string();
+    // 剥可能的代码围栏与前后空行
+    let body = raw
+        .trim()
+        .trim_start_matches("```hyper")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim()
+        .to_string();
+    // ##DSL_RESULT 污染防护：截到 HyperGraph 块止
+    let body = if let Some(p) = body.find("##DSL_RESULT") {
+        body[..p].trim().to_string()
+    } else {
+        body
+    };
+    // fail-closed：必须 parse 得过才落盘（LLM 提议 ≠ 结构合法）
+    crate::L4_structure::hyper::parse_hyper(&body).map_err(|e| format!("LLM 草稿不合文法（{e}）— 不落盘"))?;
+    let fname = format!("okr_{}.hyper", crate::L4_structure::hyper::parse_hyper(&body).unwrap().name);
+    std::fs::write(&fname, format!("// OKR 编译草稿（origin=llm，人审后 ductile hyper build {fname} -o <out>.pipeline）\n{body}\n"))
+        .map_err(|e| format!("write {fname}: {e}"))?;
+    println!("OKR 草稿已落盘：{fname}（LLM 提议，未经人审禁止 build）");
+    println!("下一步：人审 → ductile hyper build {fname} -o <out>.pipeline → ductile check");
+    Ok(0)
 }
 
 // ── v0.12.1 参数解析与分发单测 ──
