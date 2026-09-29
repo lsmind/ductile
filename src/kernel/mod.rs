@@ -11,3 +11,4 @@ pub mod check;
 pub mod hash;
 pub mod evalfns;
 pub mod fd3;
+pub mod runadapter;
