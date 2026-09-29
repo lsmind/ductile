@@ -6,3 +6,7 @@
 
 pub mod types;
 pub mod golden;
+pub mod ast;
+pub mod check;
+pub mod hash;
+pub mod evalfns;
