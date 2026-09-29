@@ -16,6 +16,7 @@ pub mod L3_dsl;
 #[allow(non_snake_case)]
 pub mod L4_structure;
 pub mod core;
+pub mod kernel;
 pub mod interface;
 
 pub use L0_physical::db;
