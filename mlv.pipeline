@@ -2,7 +2,7 @@
 // mlv.pipeline — v0.24 自组织治理超图 v3.1（外援终审「可施工」版实施）。
 //
 // 双轨：旧 12 步（kernel-binding 冻结字节断言）+ 新 13 步（mlv 治理内核协议串）。
-// 新步负例全部走独立 fixture 账本（mlv append fixture:L 位置参数，v3.1 C 条）。
+// 新步负例走独立夹具账本：harness 显式 ductile mlv <path> init 后直路径 append（f3 冻结规格：生产 CLI 无 fixture 语法）。
 // kill 步=父进程注入 SIGKILL 后重启验证（RECOVERED count=N）。
 // 链式 .needs() 排序（run() 裸文本无字段，.when 门禁必假——skill 坑#9）。
 
@@ -69,7 +69,7 @@ Pipeline("mlv", "v0.24 治理超图 v3.1：双轨 25 步（旧断言冻结+新�
     .desc("步4 幂等重试（ACK code=OK）")
     .needs(@create)
 
-  .proc("conflict", run("ductile mlv target/mlv/gov.jsonl append fixture:conflict --op CREATE_PROPOSAL --binding fx --rev 0 --rk same --at 100 > /dev/null 2>&1; python3 -c \"import pathlib;p=pathlib.Path('target/mlv/fixture-conflict/ledger.jsonl');d=p.read_bytes();i=d.find(b'sha256:');p.write_bytes(d[:i+7]+b'deadbeef'+d[i+15:])\"; ductile mlv target/mlv/fixture-conflict/ledger.jsonl verify > /tmp/mlv_conflict.out 2>&1 || true; if grep -q 'ERR' /tmp/mlv_conflict.out; then echo digest-tamper-rejected-ok; else echo BAD-digest-tamper-passed; exit 1; fi"))
+  .proc("conflict", run("ductile mlv target/mlv/fixture-conflict/ledger.jsonl init > /dev/null 2>&1; ductile mlv target/mlv/fixture-conflict/ledger.jsonl append --op CREATE_PROPOSAL --binding fx --rev 0 --rk same --at 100 > /dev/null 2>&1; python3 -c \"import pathlib;p=pathlib.Path('target/mlv/fixture-conflict/ledger.jsonl');d=p.read_bytes();i=d.find(b'sha256:');p.write_bytes(d[:i+7]+b'deadbeef'+d[i+15:])\"; ductile mlv target/mlv/fixture-conflict/ledger.jsonl verify > /tmp/mlv_conflict.out 2>&1 || true; if grep -q 'ERR' /tmp/mlv_conflict.out; then echo digest-tamper-rejected-ok; else echo BAD-digest-tamper-passed; exit 1; fi"))
     .desc("步5 摘要篡改必拒（改 request_digest 前缀→record_hash 失配→verify 拒）")
     .needs(@ack)
 
@@ -105,7 +105,7 @@ Pipeline("mlv", "v0.24 治理超图 v3.1：双轨 25 步（旧断言冻结+新�
     .desc("步13 篡改任一字节必拒（独立于旧轨同型步）")
     .needs(@replay)
 
-  .proc("illegal-new", run("ductile mlv target/mlv/gov.jsonl append main --op GRANT --binding b1 --rev 0 --rk fresh-illegal-probe --at 100 > /tmp/mlv_illegal2.out 2>&1 || true; if grep -q 'E422 illegal-edge' /tmp/mlv_illegal2.out; then echo illegal-edge-rejected-ok; else echo BAD-illegal; exit 1; fi"))
+  .proc("illegal-new", run("ductile mlv target/mlv/gov.jsonl append --op GRANT --binding b1 --rev 0 --rk fresh-illegal-probe --at 100 > /tmp/mlv_illegal2.out 2>&1 || true; if grep -q 'E422 illegal-edge' /tmp/mlv_illegal2.out; then echo illegal-edge-rejected-ok; else echo BAD-illegal; exit 1; fi"))
     .desc("步14 非法边（ACTIVE 上再 GRANT）必拒")
     .needs(@tamper-new)
 
@@ -113,7 +113,7 @@ Pipeline("mlv", "v0.24 治理超图 v3.1：双轨 25 步（旧断言冻结+新�
     .desc("步15 ABANDON 唯一放弃出口+重新 begin（P3）")
     .needs(@illegal-new)
 
-  .proc("receipt-gate", run("ductile mlv target/mlv/ledger.jsonl append fixture:norcpt --op CREATE_PROPOSAL --binding b3 --rev 0 --rk r --at 100 > /dev/null 2>&1; ductile mlv target/mlv/ledger.jsonl append fixture:norcpt --op GRANT --binding b3 --rev 0 --rk r --at 100 > /dev/null 2>&1; ductile mlv target/mlv/ledger.jsonl append fixture:norcpt --op DECISION --binding b3 --rev 0 --rk r --at 100 > /dev/null 2>&1; ductile mlv target/mlv/ledger.jsonl append fixture:norcpt --op ACTIVATE_BEGIN --binding b3 --rev 0 --rk r --at 100 > /dev/null 2>&1; ductile mlv target/mlv/ledger.jsonl append fixture:norcpt --op ACTIVATE_COMMIT --binding b3 --rev 0 --rk r --at 100 > /tmp/mlv_rcpt.out 2>&1; if grep -q 'receipt-required' /tmp/mlv_rcpt.out; then echo receipt-gate-ok; else echo BAD-receipt; exit 1; fi"))
+  .proc("receipt-gate", run("ductile mlv target/mlv/fixture-norcpt/ledger.jsonl init > /dev/null 2>&1; ductile mlv target/mlv/fixture-norcpt/ledger.jsonl append --op CREATE_PROPOSAL --binding b3 --rev 0 --rk r --at 100 > /dev/null 2>&1; ductile mlv target/mlv/fixture-norcpt/ledger.jsonl append --op GRANT --binding b3 --rev 0 --rk r --at 100 > /dev/null 2>&1; ductile mlv target/mlv/fixture-norcpt/ledger.jsonl append --op DECISION --binding b3 --rev 0 --rk r --at 100 > /dev/null 2>&1; ductile mlv target/mlv/fixture-norcpt/ledger.jsonl append --op ACTIVATE_BEGIN --binding b3 --rev 0 --rk r --at 100 > /dev/null 2>&1; ductile mlv target/mlv/fixture-norcpt/ledger.jsonl append --op ACTIVATE_COMMIT --binding b3 --rev 0 --rk r --at 100 > /tmp/mlv_rcpt.out 2>&1; if grep -q 'receipt-required' /tmp/mlv_rcpt.out; then echo receipt-gate-ok; else echo BAD-receipt; exit 1; fi"))
     .desc("步16 无回执 COMMIT 必拒（receipt-required）")
     .needs(@abandon-cycle)
 

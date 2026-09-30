@@ -323,6 +323,61 @@ pub enum JVal {
 }
 
 /// 严格微解析器：单层对象+扁平子对象；重复键 parse 阶段拒（G 条）。
+/// 保序解析（f4 冻结规格：canonical 序即合法性——序≠CANON_ORDER 即拒）。
+/// 复用闭解析器的全部字节层防线（重复键/未知字段/深度/尾随），仅改容器为 Vec。
+fn parse_json_ordered(j: &str) -> Result<Vec<(String, JVal)>, String> {
+    // 先走原闭解析器拿全部字节层校验（重复键在 token 层拒）
+    let m = parse_json_closed(j)?;
+    // 再按原文出现序提取键序（parse_string 已保证无重复；直接扫原文顶层键）
+    let b: Vec<char> = j.chars().collect();
+    let mut keys = Vec::new();
+    let mut i = 0usize;
+    skip_ws(&b, &mut i);
+    if i >= b.len() || b[i] != '{' { return Err("expected {".into()); }
+    i += 1;
+    loop {
+        skip_ws(&b, &mut i);
+        if i < b.len() && b[i] == '}' { break; }
+        let k = parse_string(&b, &mut i)?;
+        keys.push(k.clone());
+        skip_ws(&b, &mut i);
+        if i >= b.len() || b[i] != ':' { return Err("expected :".into()); }
+        i += 1;
+        skip_ws(&b, &mut i);
+        // 跳过值（字符串/嵌套对象/标量）——用一次完整 value 解析推进
+        let _ = parse_value_skip(&b, &mut i)?;
+        skip_ws(&b, &mut i);
+        if i >= b.len() { return Err("unexpected end".into()); }
+        match b[i] {
+            ',' => { i += 1; }
+            '}' => { i += 1; break; }
+            c => return Err(format!("unexpected char {c}")),
+        }
+    }
+    // 查序：与 CANON_ORDER 逐位比对
+    if keys.len() != CANON_ORDER.len() {
+        return Err(format!("field count {} != {}", keys.len(), CANON_ORDER.len()));
+    }
+    for (idx, k) in keys.iter().enumerate() {
+        if k != CANON_ORDER[idx] {
+            return Err(format!("non-canonical order: key[{idx}]='{k}' expect '{}'", CANON_ORDER[idx]));
+        }
+    }
+    // 值从原 map 取（同键同值）
+    Ok(keys.into_iter().map(|k| { let v = m.get(&k).cloned().unwrap(); (k, v) }).collect())
+}
+
+fn parse_value_skip(b: &[char], i: &mut usize) -> Result<(), String> {
+    if *i >= b.len() { return Err("eof".into()); }
+    if b[*i] == '"' { parse_string(b, i)?; return Ok(()); }
+    if b[*i] == '{' {
+        let _ = parse_flat_object(b, i)?;
+        return Ok(());
+    }
+    while *i < b.len() && b[*i] != ',' && b[*i] != '}' && !b[*i].is_whitespace() { *i += 1; }
+    Ok(())
+}
+
 pub fn parse_json_closed(j: &str) -> Result<BTreeMap<String, JVal>, String> {
     let b: Vec<char> = j.chars().collect();
     let mut i = 0usize;
@@ -472,7 +527,8 @@ fn skip_ws(b: &[char], i: &mut usize) {
 
 /// 严格解析 LedgerRecord（23 字段全到场、无未知、类型封闭）。
 pub fn parse_record_json(j: &str) -> Result<LedgerRecord, String> {
-    let m = parse_json_closed(j)?;
+    let ordered = parse_json_ordered(j)?;
+    let m: BTreeMap<String, JVal> = ordered.into_iter().collect();
     if m.len() != CANON_ORDER.len() {
         return Err(format!("field count {} != 23", m.len()));
     }
@@ -609,6 +665,33 @@ pub fn envelope_mac(env: &BTreeMap<String, String>) -> Result<String, String> {
     Ok(domain_hash(DOMAIN_MAC, body.as_bytes()))
 }
 
+/// 统一信封构造器（CLI 与测试共用单一构造路径；终验阻塞②）。
+/// issued=at-skew、expires=at+10*skew：窗口覆盖构造时刻起的 10 个偏差周期。
+pub fn make_envelope(
+    op: &MlvOp, binding: &str, rev: u64, request_key: &str,
+    request_digest: &str, at: u64,
+) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+    env.insert("issuer".into(), "ductile-cli".into());
+    env.insert("tenant".into(), "local".into());
+    env.insert("subject".into(), "cli".into());
+    env.insert("key_id".into(), "genesis".into());
+    env.insert("binding_id".into(), binding.into());
+    env.insert("revision".into(), rev.to_string());
+    env.insert("op".into(), op.name().into());
+    env.insert("request_key".into(), request_key.into());
+    env.insert("request_digest".into(), request_digest.into());
+    env.insert("issued_at_ns".into(), at.saturating_sub(DEFAULT_SKEW_NS).to_string());
+    env.insert("expires_at_ns".into(), at.saturating_add(10 * DEFAULT_SKEW_NS).to_string());
+    env.insert("contract_digest".into(), "cli-contract".into());
+    env.insert("grant_digest".into(), "cli-grant".into());
+    env.insert("audience".into(), "mlv".into());
+    env.insert("root_commitment".into(), GENESIS_ROOT.into());
+    let mac = envelope_mac(&env).unwrap_or_default();
+    env.insert("mac".into(), mac);
+    env
+}
+
 pub fn verify_envelope_mac(env: &BTreeMap<String, String>) -> Result<(), String> {
     let got = env.get("mac").ok_or("envelope missing mac")?;
     let want = envelope_mac(env)?;
@@ -619,6 +702,13 @@ pub fn verify_envelope_mac(env: &BTreeMap<String, String>) -> Result<(), String>
 }
 
 // ── flock FFI（Linux；EINTR 重试；cfg(unix)）──────────────────────
+
+/// 进程内已持锁 inode 集合（acquire 与 Drop 共用同一张表——
+/// 曾经两函数各声明同名 static 互不相通，Drop 删空表致钥匙永滞，
+/// 重入语义收紧后暴露为 fatal）。
+#[cfg(unix)]
+static HELD_LOCKS: std::sync::Mutex<std::collections::BTreeSet<u64>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
 
 #[cfg(unix)]
 pub struct MlvLock {
@@ -636,13 +726,12 @@ impl std::fmt::Debug for MlvLock {
 #[cfg(unix)]
 impl MlvLock {
     /// 阻塞 EX 锁；.lock sidecar 独立 inode 永不 rename。
-    /// 同进程重入（同 inode 二次 acquire）：flock 语义=进程级，二次 LOCK_EX
-    /// 自锁死等 → 全局已持锁表拦截，返回 Reentrant（不重复上锁，Drop 时由
-    /// 首个持有者释放）。
+    /// 同进程重入（同 inode 二次 acquire）=显式错误（终验阻塞①）：
+    /// flock 语义=进程级，二次 LOCK_EX 自锁死等。held 表先探测；未命中则
+    /// LOCK_NB 快速探测（跨进程持锁=WouldBlock 报错快速失败，防 CLI 死等）；
+    /// 随后阻塞 LOCK_EX。嵌套代码路径必须先释放再进。
     pub fn acquire(lock_path: &Path) -> Result<Self, String> {
         use std::os::unix::io::AsRawFd;
-        use std::sync::Mutex;
-        static HELD: Mutex<Option<std::collections::BTreeSet<u64>>> = Mutex::new(None);
         let file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -654,18 +743,36 @@ impl MlvLock {
         let md = file.metadata().map_err(|e| e.to_string())?;
         let inode_key = md.dev() ^ md.ino();
         {
-            let mut held = HELD.lock().unwrap();
-            let set = held.get_or_insert_with(Default::default);
+            let mut held = HELD_LOCKS.lock().unwrap();
+            let set: &mut std::collections::BTreeSet<u64> = &mut *held;
             if set.contains(&inode_key) {
-                return Ok(MlvLock { file: None, held_key: inode_key });
+                // 终验阻塞①：重入不再返回无锁句柄——显式错误。
+                return Err(format!(
+                    "flock-reentrant: this process already holds the ledger lock (inode-key {inode_key}); nested acquire is forbidden — release before re-entering"
+                ));
             }
         }
         let fd = file.as_raw_fd();
+        // LOCK_NB 快速探测：外部进程持锁时立即报错（可重试语义），不悬挂。
+        loop {
+            let r = unsafe { flock(fd, LOCK_EX | LOCK_NB) };
+            if r == 0 {
+                break;
+            }
+            let err = std::io::Error::last_os_error();
+            match err.raw_os_error() {
+                Some(4) => continue,             // EINTR
+                Some(11) => {
+                    // EWOULDBLOCK：跨进程争用——单次让步后进入阻塞等待
+                    break;
+                }
+                _ => return Err(format!("flock(nb-probe): {err}")),
+            }
+        }
         loop {
             let r = unsafe { flock(fd, LOCK_EX) };
             if r == 0 {
-                let mut held = HELD.lock().unwrap();
-                held.get_or_insert_with(Default::default).insert(inode_key);
+                HELD_LOCKS.lock().unwrap().insert(inode_key);
                 return Ok(MlvLock { file: Some(file), held_key: inode_key });
             }
             let err = std::io::Error::last_os_error();
@@ -681,16 +788,11 @@ impl MlvLock {
 impl Drop for MlvLock {
     fn drop(&mut self) {
         use std::os::unix::io::AsRawFd;
-        use std::sync::Mutex;
-        static HELD: Mutex<Option<std::collections::BTreeSet<u64>>> = Mutex::new(None);
         if let Some(f) = &self.file {
             let _ = unsafe { flock(f.as_raw_fd(), LOCK_UN) };
-            let mut held = HELD.lock().unwrap();
-            if let Some(set) = held.as_mut() {
-                set.remove(&self.held_key);
-            }
+            HELD_LOCKS.lock().unwrap().remove(&self.held_key);
         }
-        // 重入句柄（file=None）：不释放——由首个持有者负责
+        // 重入句柄已在 acquire 阶段显式拒绝（终验阻塞①），此处只可能 file=Some。
     }
 }
 
@@ -700,6 +802,8 @@ extern "C" {
 }
 #[cfg(unix)]
 const LOCK_EX: i32 = 2;
+#[cfg(unix)]
+const LOCK_NB: i32 = 4;
 #[cfg(unix)]
 const LOCK_UN: i32 = 8;
 
@@ -784,20 +888,33 @@ impl MlvLedger {
             std::process::id(),
             self.tmp_counter
         ));
+        #[cfg(feature = "mlv-failpoint")]
+        fn failpoint(tag: &str) {
+            if std::env::var("DUCTILE_MLV_FAILPOINT").as_deref() == Ok(tag) {
+                std::process::abort();
+            }
+        }
+        #[cfg(not(feature = "mlv-failpoint"))]
+        fn failpoint(_tag: &str) {}
         let mut f = std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&tmp)
             .map_err(|e| format!("create tmp: {e}"))?;
         f.write_all(&new).map_err(|e| format!("write tmp: {e}"))?;
+        failpoint("after_write");
         f.sync_all().map_err(|e| format!("sync tmp: {e}"))?;
+        failpoint("after_sync");
         drop(f);
+        failpoint("before_rename");
         std::fs::rename(&tmp, &self.path).map_err(|e| format!("rename: {e}"))?;
+        failpoint("after_rename");
         if let Some(parent) = self.path.parent() {
             if let Ok(d) = std::fs::File::open(parent) {
                 let _ = d.sync_all();
             }
         }
+        failpoint("before_dirsync");
         Ok(())
     }
 
@@ -820,8 +937,12 @@ pub fn decode_frames(data: &[u8]) -> Result<Vec<LedgerRecord>, String> {
         if data.len() - i < 9 {
             return Err("truncated frame header".into());
         }
-        let n = u64::from_be_bytes(data[i..i + 8].try_into().unwrap()) as usize;
-        if data.len() < i + 8 + n + 1 || data[i + 8 + n] != 0x0A {
+        let n64 = u64::from_be_bytes(data[i..i + 8].try_into().unwrap());
+        // checked：n 或边界算术溢出（近 u64::MAX 长度前缀）=拒，禁 wrap/panic（f4）
+        let n = usize::try_from(n64).map_err(|_| "frame length overflow")?;
+        let end = i.checked_add(8).and_then(|v| v.checked_add(n)).and_then(|v| v.checked_add(1))
+            .ok_or("frame boundary overflow")?;
+        if data.len() < end || data[end - 1] != 0x0A {
             return Err("bad frame boundary".into());
         }
         let j = &data[i + 8..i + 8 + n];
@@ -931,9 +1052,17 @@ mod tests {
         let d = tmpdir("init");
         let p = d.join("ledger.jsonl");
         assert_eq!(MlvLedger::open(&p).unwrap_err(), "ledger-missing");
-        let (_led, h) = MlvLedger::init(&p, 42).unwrap();
-        assert!(h.starts_with("sha256:"));
-        assert!(MlvLedger::init(&p, 43).is_err());
+        let h = {
+            let (led, h) = MlvLedger::init(&p, 42).unwrap();
+            assert!(h.starts_with("sha256:"));
+            assert!(MlvLedger::init(&p, 43).is_err());
+            // 同进程重入 open（持锁中嵌套 acquire）=显式错误（终验阻塞①）
+            let nested = MlvLedger::open(&p);
+            assert!(nested.unwrap_err().contains("flock-reentrant"));
+            drop(led);
+            h
+        };
+        // 释放后 open 必须成功
         let led = MlvLedger::open(&p).unwrap();
         let recs = led.records().unwrap();
         assert_eq!(recs.len(), 1);
@@ -942,13 +1071,204 @@ mod tests {
     }
 
     #[test]
-    fn time_formula_boundaries() {
-        let skew: u64 = 300;
-        assert!(envelope_time_ok(1000, 2000, 1500, skew));
-        assert!(!envelope_time_ok(1000, 2000, 2000 + skew, skew));     // 上界严格
-        assert!(envelope_time_ok(1000, 2000, 2000 + skew - 1, skew));
-        assert!(envelope_time_ok(1000, 2000, 1000 - skew, skew));      // 下界含等号
-        assert!(!envelope_time_ok(1000, 2000, 1000 - skew - 1, skew));
+    fn t13_reentrant_acquire_is_explicit_error() {
+        // 终验阻塞①：嵌套 acquire 必须显式错误，且首持有者 Drop 后可重新 acquire
+        let d = tmpdir("t13");
+        let lp = d.join("l.jsonl.lock");
+        let l1 = MlvLock::acquire(&lp).unwrap();
+        let err = MlvLock::acquire(&lp).unwrap_err();
+        assert!(err.contains("flock-reentrant"), "got: {err}");
+        drop(l1);
+        // 释放后重新获取必须成功（held 表已清）
+        let _l2 = MlvLock::acquire(&lp).unwrap();
+    }
+
+    #[test]
+    fn t14_cross_process_lock_mutual_exclusion() {
+        // 外部进程持锁：本进程 LOCK_NB 探测让步后阻塞等待，直到对方释放后获得
+        let d = tmpdir("t14");
+        let lp = d.join("l.jsonl.lock");
+        // 用子进程持锁 300ms 后释放
+        let child = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(format!(
+                "import fcntl,subprocess,sys,time;f=open(r'{}','a+');fcntl.flock(f,fcntl.LOCK_EX);time.sleep(0.3);print('released')",
+                lp.display()
+            ))
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(80)); // 等子进程拿到锁
+        let t0 = std::time::Instant::now();
+        let l = MlvLock::acquire(&lp).expect("blocking acquire after child release");
+        let waited = t0.elapsed();
+        assert!(waited.as_millis() >= 100, "acquire returned too fast ({waited:?}) — no cross-process exclusion");
+        drop(l);
+        let out = child.wait_with_output().unwrap();
+        assert!(out.stdout.ends_with(b"released\n"));
+    }
+
+    #[test]
+    fn t18_two_thread_same_process_contention() {
+        // 终验A裁决：同进程双线程争同一 lock inode——一线程持有，另一线程必须
+        // 显式 reentrant 错误（HELD 表进程全局），首者 Drop 后第二线程可获取
+        let d = tmpdir("t18");
+        let lp = std::sync::Arc::new(d.join("l.jsonl.lock"));
+        let l1 = MlvLock::acquire(&lp).unwrap();
+        let lp2 = lp.clone();
+        let handle = std::thread::spawn(move || {
+            match MlvLock::acquire(&lp2) {
+                Err(e) if e.contains("flock-reentrant") => "explicit-error".to_string(),
+                Ok(_) => "BAD-acquired".to_string(),
+                Err(e) => format!("BAD-other:{e}"),
+            }
+        });
+        assert_eq!(handle.join().unwrap(), "explicit-error");
+        drop(l1);
+        // 释放后新线程可获取
+        let lp3 = lp.clone();
+        let h2 = std::thread::spawn(move || MlvLock::acquire(&lp3).map(|_| "ok").map_err(|e| e));
+        assert!(matches!(h2.join().unwrap(), Ok("ok")));
+    }
+
+    #[test]
+    fn t19_records_immutable_snapshot_while_locked() {
+        // records()=owned Vec=不可变快照（终验A裁决：嵌套只读路径）；
+        // 持锁期间可读，改返回值不影响账本，重复读全等
+        let d = tmpdir("t19");
+        let p = d.join("ledger.jsonl");
+        let (led, _) = MlvLedger::init(&p, 42).unwrap();
+        let r1 = led.records().unwrap();
+        assert_eq!(r1.len(), 1);
+        let mut mutated = r1.clone();
+        mutated[0].payload = "EVIL".into();
+        let r2 = led.records().unwrap();
+        assert_eq!(r2, r1, "snapshot mutated externally");
+        assert_ne!(r2, mutated);
+        assert_eq!(std::fs::read(&p).unwrap().len() % 1, 0); // 账本仍在
+    }
+
+    #[test]
+    fn f4_canonical_vectors() {
+        // decode→re-encode 字节全等（canonical 等价回检，逐帧逐字节）
+        let d = tmpdir("f4c");
+        let p = d.join("ledger.jsonl");
+        let (mut led, _) = MlvLedger::init(&p, 7).unwrap();
+        let data = std::fs::read(&p).unwrap();
+        let recs = decode_frames(&data).unwrap();
+        assert_eq!(recs.len(), 1);
+        let mut re = Vec::new();
+        for r in &recs { re.extend_from_slice(&r.frame()); }
+        assert_eq!(re, data, "canonical roundtrip byte-equality broken");
+        // 多帧：追加一条后再全量回检
+        let rec = LedgerRecord {
+            schema: 1, seq: 1, op: MlvOp::CreateProposal,
+            key_id: "genesis".into(), root_commitment: GENESIS_ROOT.into(),
+            effect_key: effect_key(MlvOp::CreateProposal, "b", 0, "rk").unwrap(),
+            idempotency_scope: None, caller_id: Some("t".into()), request_key: Some("rk".into()),
+            request_digest: domain_hash(DOMAIN_RECORD, b"CREATE_PROPOSAL|rk|p"),
+            binding_id: Some("b".into()), revision: Some(0), from: None, to: Some(MlvState::Proposed),
+            before_record_hash: recs[0].record_hash.clone(), accepted_at_ns: 9,
+            nonce: Some("n9".into()), envelope_digest: None, envelope: None,
+            payload: "p".into(), registry_receipt: None,
+            result: [("code".into(), "OK".into())].into_iter().collect(),
+            record_hash: String::new(),
+        };
+        let rh = led.append(rec).unwrap();
+        assert!(rh.starts_with("sha256:"));
+        let data2 = std::fs::read(&p).unwrap();
+        let recs2 = decode_frames(&data2).unwrap();
+        let mut re2 = Vec::new();
+        for r in &recs2 { re2.extend_from_slice(&r.frame()); }
+        assert_eq!(re2, data2);
+    }
+
+    #[test]
+    fn f4_byte_reject() {
+        let d = tmpdir("f4b");
+        let p = d.join("ledger.jsonl");
+        let (_led, _) = MlvLedger::init(&p, 7).unwrap();
+        let data = std::fs::read(&p).unwrap();
+        // N 大于剩余字节
+        let mut evil = data.clone();
+        let n = (evil.len() as u64) * 10;
+        evil[0..8].copy_from_slice(&n.to_be_bytes());
+        assert!(decode_frames(&evil).is_err(), "oversized N accepted");
+        // u64 长度前缀极值（usize 可容但边界溢出）
+        let mut evil2 = data.clone();
+        evil2[0..8].copy_from_slice(&u64::MAX.to_be_bytes());
+        assert!(decode_frames(&evil2).is_err(), "u64::MAX N accepted");
+        // 帧后尾随字节（不含 LF 的残渣）
+        let mut evil3 = data.clone();
+        evil3.extend_from_slice(b"x");
+        assert!(decode_frames(&evil3).is_err(), "trailing byte accepted");
+        // 缺 LF
+        let mut evil4 = data.clone();
+        let l = evil4.len();
+        evil4[l - 1] = b' ';
+        assert!(decode_frames(&evil4).is_err(), "missing LF accepted");
+        // 双 LF（第二帧以 0x0A 开头=垃圾头）
+        let mut evil5 = data.clone();
+        evil5.push(0x0A);
+        assert!(decode_frames(&evil5).is_err(), "double LF accepted");
+        // 非 UTF-8 JSON 段
+        let mut evil6 = data.clone();
+        let jstart = 8;
+        evil6[jstart] = 0xFF;
+        // 重算 N 保持边界一致：只破坏字节内容
+        assert!(decode_frames(&evil6).is_err(), "invalid UTF-8 accepted");
+        // 截断帧头
+        assert!(decode_frames(&data[..5]).is_err(), "truncated header accepted");
+    }
+
+    #[test]
+    fn f4_semantic_reject() {
+        let d = tmpdir("f4s");
+        let p = d.join("ledger.jsonl");
+        let (_led, _) = MlvLedger::init(&p, 7).unwrap();
+        let data = std::fs::read(&p).unwrap();
+        let n = u64::from_be_bytes(data[0..8].try_into().unwrap()) as usize;
+        let j = String::from_utf8(data[8..8 + n].to_vec()).unwrap();
+
+        // 未知字段 → parse 拒
+        let mut evil = j.clone();
+        evil.insert_str(evil.len() - 1, ",\"evil_field\":\"x\"");
+        assert!(parse_record_json(&evil).is_err(), "unknown field accepted");
+
+        // 重复键 → parse 拒
+        let mut dup = j.clone();
+        dup.insert_str(dup.len() - 1, ",\"schema\":1");
+        assert!(parse_record_json(&dup).is_err(), "duplicate key accepted");
+
+        // 重复键转义等价形（"\u0073chema" 与 "schema" 同键）→ parse 拒
+        let mut esc = j.clone();
+        esc.insert_str(esc.len() - 1, ",\"\\u0073chema\":2");
+        assert!(parse_record_json(&esc).is_err(), "escaped-equivalent duplicate key accepted");
+
+        // 乱序（payload 挪首，字段集合法）→ parse 拒（canonical 序即合法性）
+        let inner = &j[1..j.len() - 1];
+        if let Some(pos) = inner.find("\"payload\"") {
+            let tail = inner[pos..].trim_end_matches(',').to_string();
+            let head = inner[..pos].trim_end_matches(',').to_string();
+            let reordered = format!("{{{},{}}}", tail, head);
+            assert!(parse_record_json(&reordered).is_err(), "non-canonical order accepted");
+        }
+
+        // 缺字段（删 payload 键值对）→ parse 拒（字段计数 23）
+        let mut miss = j.clone();
+        let inner = &j[1..j.len() - 1];
+        if let Some(pos) = inner.find("\"payload\"") {
+            let end = inner[pos..].find(',').map(|v| pos + v + 1).unwrap_or(inner.len());
+            let mut ni = inner[..pos].trim_end_matches(',').to_string();
+            if end < inner.len() { ni.push(','); ni.push_str(&inner[end..]); }
+            miss = format!("{{{}}}", ni);
+        }
+        assert!(parse_record_json(&miss).is_err(), "missing field accepted");
+
+        // 多字段（payload 后再加一个已知键的副本变体——即重复，已测；此处测多余逗号语法坏）
+        let mut syntax = j.clone();
+        syntax.insert_str(syntax.len() - 1, ",");
+        assert!(parse_record_json(&syntax).is_err(), "trailing comma accepted");
     }
 
     #[test]

@@ -422,18 +422,22 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
         }
     }
 
-    fn mkrec(seq: u64, op: MlvOp, binding: &str, rev: u64, from: Option<MlvState>, to: Option<MlvState>, prev: &str, request_key: &str, at: u64) -> LedgerRecord {
+    fn mkrec(seq: u64, op: MlvOp, binding: &str, rev: u64, from: Option<MlvState>, to: Option<MlvState>, prev: &str, request_key: &str, at: u64, payload: &str) -> LedgerRecord {
+        // f7 冻结：request_digest=D(record域, op|request_key|payload)——payload 入 digest 不入 effect_key
+        let digest = domain_hash(DOMAIN_RECORD, format!("{op:?}|{request_key}|{payload}").as_bytes());
+        let env = crate::kernel::mlv::make_envelope(&op, binding, rev, request_key, &digest, at);
+        let mac = env.get("mac").cloned().unwrap_or_default();
         LedgerRecord {
             schema: 1, seq, op,
             key_id: "genesis".into(), root_commitment: GENESIS_ROOT.into(),
             effect_key: effect_key(op, binding, rev, request_key).unwrap(),
             idempotency_scope: None, caller_id: Some("cli".into()),
             request_key: Some(request_key.into()),
-            request_digest: domain_hash(DOMAIN_RECORD, format!("{op:?}|{request_key}").as_bytes()),
+            request_digest: digest,
             binding_id: Some(binding.into()), revision: Some(rev),
             from, to, before_record_hash: prev.into(), accepted_at_ns: at,
-            nonce: Some(format!("nonce-{seq}-{at}")), envelope_digest: None, envelope: None,
-            payload: format!("{op:?}|{binding}|{rev}"), registry_receipt: None,
+            nonce: Some(format!("nonce-{seq}-{at}")), envelope_digest: Some(mac), envelope: Some(env),
+            payload: if payload.is_empty() { format!("{op:?}|{binding}|{rev}") } else { payload.to_string() }, registry_receipt: None,
             result: [("code".into(), "OK".into())].into_iter().collect(),
             record_hash: String::new(),
         }
@@ -461,28 +465,17 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
             let mut reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
             let prev = reg.head().map_err(|e| e.to_string())?;
             let seq = reg.record_count();
-            let rec = mkrec(seq, MlvOp::CreateProposal, &binding, rev, None, Some(MlvState::Proposed), &prev, &rk, now_ns);
+            let rec = mkrec(seq, MlvOp::CreateProposal, &binding, rev, None, Some(MlvState::Proposed), &prev, &rk, now_ns, "");
             emit_outcome(reg.submit(rec, now_ns), "create", rev)
         }
         "append" => {
-            // v3.1 C 条：target 位置参数（main|fixture:L）
-            let target = args[2].clone();
-            let path = if let Some(l) = target.strip_prefix("fixture:") {
-                if l.is_empty() || !l.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_') {
-                    return Err("fixture label must match [a-z0-9_-]+".into());
-                }
-                let base = ledger_path.parent().unwrap_or(std::path::Path::new("."));
-                let dir = base.join(format!("fixture-{l}"));
-                std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-                dir.join("ledger.jsonl")
-            } else if target == "main" {
-                ledger_path.clone()
-            } else {
-                return Err("target must be main or fixture:LABEL".into());
-            };
+            // f3 冻结规格：生产 CLI 去 fixture 化——直写账本路径，缺账本=ledger-missing
+            // （夹具初始化由管线 harness 显式 ductile mlv <path> init 完成）
+            let path = ledger_path.clone();
             let mut op = None; let mut binding = String::new(); let mut rev: u64 = 0;
             let mut rk = String::new(); let mut at = now_ns;
-            let mut i = 3;
+            let mut payload = String::new();
+            let mut i = 2;
             while i + 1 < args.len() + 1 && i < args.len() {
                 match args[i].as_str() {
                     "--op" if i + 1 < args.len() => { op = Some(args[i + 1].clone()); i += 2; }
@@ -490,18 +483,21 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
                     "--rev" if i + 1 < args.len() => { rev = args[i + 1].parse().map_err(|_| "rev number")?; i += 2; }
                     "--rk" if i + 1 < args.len() => { rk = args[i + 1].clone(); i += 2; }
                     "--at" if i + 1 < args.len() => { at = args[i + 1].parse().map_err(|_| "at number")?; i += 2; }
+                    "--payload" if i + 1 < args.len() => { payload = args[i + 1].clone(); i += 2; }
                     _ => return Err(format!("bad flags near {}", args[i])),
                 }
             }
             let op = MlvOp::from_name(&op.ok_or("--op required")?).map_err(|e| e.to_string())?;
+            // f3：缺账本=ledger-missing（无自动 init；管线 harness 负责夹具）
             if !path.exists() {
-                GovRegistry::init(&path, at).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
+                eprintln!("E424 ledger-missing");
+                return Ok(1);
             }
             let mut reg = GovRegistry::open(&path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
             let prev = reg.head().map_err(|e| e.to_string())?;
             let seq = reg.record_count();
             let (from, to) = crate::kernel::gov::derive_edge(op, &binding, rev, &reg);
-            let rec = mkrec(seq, op, &binding, rev, from, to, &prev, &rk, at);
+            let rec = mkrec(seq, op, &binding, rev, from, to, &prev, &rk, at, &payload);
             emit_outcome(reg.submit(rec, at), op.name().to_lowercase().as_str(), rev)
         }
         "registry-confirm" => {
@@ -511,7 +507,7 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
             let mut reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
             let prev = reg.head().map_err(|e| e.to_string())?;
             let seq = reg.record_count();
-            let mut rec = mkrec(seq, MlvOp::RegistryConfirm, &binding, rev, None, None, &prev, "rk-confirm", now_ns);
+            let mut rec = mkrec(seq, MlvOp::RegistryConfirm, &binding, rev, None, None, &prev, "rk-confirm", now_ns, "");
             let mut rcpt = std::collections::BTreeMap::new();
             rcpt.insert("receipt_id".into(), format!("rcpt-{binding}-{rev}-{now_ns}"));
             rcpt.insert("issued_at_ns".into(), now_ns.to_string());
@@ -526,7 +522,7 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
             let mut reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
             let prev = reg.head().map_err(|e| e.to_string())?;
             let seq = reg.record_count();
-            let rec = mkrec(seq, MlvOp::ActivateBegin, &binding, rev, Some(MlvState::Decided), Some(MlvState::Activating), &prev, "rk-begin", now_ns);
+            let rec = mkrec(seq, MlvOp::ActivateBegin, &binding, rev, Some(MlvState::Decided), Some(MlvState::Activating), &prev, "rk-begin", now_ns, "");
             emit_outcome(reg.submit(rec, now_ns), "begin", rev)
         }
         "commit" | "activate-commit" => {
@@ -536,7 +532,7 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
             let prev = reg.head().map_err(|e| e.to_string())?;
             let seq = reg.record_count();
             let (from, to) = crate::kernel::gov::derive_edge(MlvOp::ActivateCommit, &binding, rev, &reg);
-            let rec = mkrec(seq, MlvOp::ActivateCommit, &binding, rev, from, to, &prev, "rk-commit", now_ns);
+            let rec = mkrec(seq, MlvOp::ActivateCommit, &binding, rev, from, to, &prev, "rk-commit", now_ns, "");
             emit_outcome(reg.submit(rec, now_ns), "commit", rev)
         }
         "abandon" => {
@@ -545,7 +541,7 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
             let mut reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
             let prev = reg.head().map_err(|e| e.to_string())?;
             let seq = reg.record_count();
-            let rec = mkrec(seq, MlvOp::Abandon, &binding, rev, Some(MlvState::Activating), Some(MlvState::Decided), &prev, "rk-abandon", now_ns);
+            let rec = mkrec(seq, MlvOp::Abandon, &binding, rev, Some(MlvState::Activating), Some(MlvState::Decided), &prev, "rk-abandon", now_ns, "");
             emit_outcome(reg.submit(rec, now_ns), "abandon", rev)
         }
         "revoke" | "terminal" | "quarantine" | "investigate" | "repair" | "grant" | "decide" | "decision" => {
@@ -556,7 +552,7 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
             let prev = reg.head().map_err(|e| e.to_string())?;
             let seq = reg.record_count();
             let (from, to) = crate::kernel::gov::derive_edge(op, &binding, rev, &reg);
-            let rec = mkrec(seq, op, &binding, rev, from, to, &prev, &format!("rk-{verb}"), now_ns);
+            let rec = mkrec(seq, op, &binding, rev, from, to, &prev, &format!("rk-{verb}"), now_ns, "");
             emit_outcome(reg.submit(rec, now_ns), if verb == "decide" { "decision" } else { verb }, rev)
         }
         "verify" => {
