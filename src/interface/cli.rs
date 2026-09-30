@@ -223,6 +223,11 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             cmd_script_call(&args[3], &args[4])
         }
 
+        // v0.24 kernel 切片 D12-13：chaos harness 自举 + 证据账本/reproduce
+        "kernel-chaos" if args.len() >= 3 => cmd_kernel_chaos(&args[2..]),
+        "kernel-ledger" if args.len() >= 3 => cmd_kernel_ledger(&args[2..]),
+        "kernel-reproduce" if args.len() >= 3 => cmd_kernel_reproduce(&args[2..]),
+
         // v0.23 深题手册：`ductile help <topic>` 把引擎行为写进二进制，
         // 终端即得——不再逼使用者进 Rust 源码排障（反馈单第 3 条）。
         "help" if args.len() >= 3 => cmd_help_topic(&args[2..].join(" ")),
@@ -235,6 +240,150 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             print_usage();
             Ok(1)
         }
+    }
+}
+
+// ── v0.24 kernel D12-13：chaos 自举 / 证据账本 / reproduce 包 ──────────
+
+/// `ductile kernel-chaos <dir> [seeds]` — 六 killpoint × seeds 混沌注入。
+/// 产物：dir/verdicts.jsonl + dir/ledger.jsonl（每判定一事件+汇总事件）。
+/// exit 0 = 四判据全过（CHAOS-PASS）；任一违例 exit 1（fail-closed）。
+fn cmd_kernel_chaos(args: &[String]) -> Result<i32, String> {
+    let dir = &args[0];
+    let seeds: u64 = match args.get(1) {
+        Some(s) => s.parse().map_err(|_| format!("seeds must be a number, got '{s}'"))?,
+        None => 1,
+    };
+    if seeds == 0 {
+        return Err("seeds must be >= 1".into());
+    }
+    let base = std::path::PathBuf::from(dir);
+    let verdicts =
+        crate::kernel::chaos::chaos_all(&base, seeds).map_err(|e| format!("chaos: {e}"))?;
+    let mut lines = String::new();
+    let mut fails = 0usize;
+    for v in &verdicts {
+        let ok = v.duplicate_effects == 0 && v.chain_ok && v.results_match && v.resumed;
+        if !ok {
+            fails += 1;
+        }
+        lines.push_str(&format!(
+            "{{\"killpoint\":\"{}\",\"seed\":{},\"duplicate_effects\":{},\"chain_ok\":{},\"results_match\":{},\"resumed\":{},\"side_effects_total\":{},\"pass\":{}}}\n",
+            v.killpoint, v.seed, v.duplicate_effects, v.chain_ok, v.results_match, v.resumed, v.side_effects_total, ok
+        ));
+    }
+    std::fs::write(base.join("verdicts.jsonl"), &lines).map_err(|e| e.to_string())?;
+    // 证据账本：每判定一事件 + 汇总事件（payload=verdicts 全文，digest 入链）
+    let ledger = base.join("ledger.jsonl");
+    for v in &verdicts {
+        let payload = format!(
+            "{}|{}|{}|{}|{}|{}",
+            v.killpoint, v.seed, v.duplicate_effects, v.chain_ok, v.results_match, v.resumed
+        );
+        crate::kernel::ledger::append_event(
+            &ledger, "chaos_verdict", v.killpoint, v.seed, payload.as_bytes(), "kernel-chaos",
+        )?;
+    }
+    let head = crate::kernel::ledger::append_event(
+        &ledger, "chaos_run", "summary", seeds, lines.as_bytes(), "kernel-chaos",
+    )?;
+    println!(
+        "chaos: {} verdicts ({} killpoints x {} seeds), fails={}",
+        verdicts.len(),
+        crate::kernel::chaos::KillPoint::all().len(),
+        seeds,
+        fails
+    );
+    println!("ledger head: {head}");
+    if fails > 0 {
+        eprintln!("CHAOS-FAIL: {fails} verdict(s) violated criteria");
+        return Ok(1);
+    }
+    println!("CHAOS-PASS");
+    Ok(0)
+}
+
+/// `ductile kernel-ledger <file> --verify` — 验证证据账本哈希链。
+fn cmd_kernel_ledger(args: &[String]) -> Result<i32, String> {
+    if !args.iter().any(|a| a == "--verify") {
+        return Err("usage: ductile kernel-ledger <file> --verify".into());
+    }
+    let path = std::path::PathBuf::from(&args[0]);
+    match crate::kernel::ledger::verify_ledger(&path) {
+        Ok((n, head)) => {
+            println!("LEDGER-OK events={n} head={head}");
+            Ok(0)
+        }
+        Err(e) => {
+            eprintln!("LEDGER-BROKEN: {e}");
+            Ok(1)
+        }
+    }
+}
+
+/// `ductile kernel-reproduce <dir> -o out.tar.zst`（打包）
+/// `ductile kernel-reproduce --verify <dir>`（解包后离线验证）
+fn cmd_kernel_reproduce(args: &[String]) -> Result<i32, String> {
+    if args[0] == "--verify" {
+        if args.len() < 2 {
+            return Err("usage: ductile kernel-reproduce --verify <dir>".into());
+        }
+        let dir = std::path::PathBuf::from(&args[1]);
+        match crate::kernel::ledger::verify_reproduce(&dir) {
+            Ok((files, events, head)) => {
+                println!("REPRODUCE-OK files={files} ledger_events={events} head={head}");
+                Ok(0)
+            }
+            Err(e) => {
+                eprintln!("REPRODUCE-BROKEN: {e}");
+                Ok(1)
+            }
+        }
+    } else {
+        let dir = std::path::PathBuf::from(&args[0]);
+        let out = args
+            .iter()
+            .position(|a| a == "-o")
+            .and_then(|i| args.get(i + 1))
+            .ok_or("usage: ductile kernel-reproduce <dir> -o out.tar.zst")?;
+        if !dir.join("ledger.jsonl").exists() {
+            return Err(format!(
+                "no ledger.jsonl in {} — run `ductile kernel-chaos {}` first",
+                dir.display(),
+                dir.display()
+            ));
+        }
+        // MANIFEST.json = dir 内全部产物逐文件 sha256（不含 MANIFEST 自身）
+        let entries = crate::kernel::ledger::dir_manifest(&dir)
+            .map_err(|e| format!("manifest: {e}"))?;
+        std::fs::write(
+            dir.join("MANIFEST.json"),
+            crate::kernel::ledger::manifest_json(&entries),
+        )
+        .map_err(|e| e.to_string())?;
+        // 打包走系统 tar --zstd（kernel 保持零新依赖）
+        let status = std::process::Command::new("tar")
+            .args([
+                "--zstd",
+                "-cf",
+                out,
+                "-C",
+                dir.to_str().unwrap_or("."),
+                ".",
+            ])
+            .status()
+            .map_err(|e| format!("spawn tar: {e} (tar with zstd required)"))?;
+        if !status.success() {
+            return Err(format!("tar exited with {status}"));
+        }
+        let meta = std::fs::metadata(out).map_err(|e| e.to_string())?;
+        println!(
+            "REPRODUCE-PACKED {} bytes -> {} ({} files)",
+            meta.len(),
+            out,
+            entries.len()
+        );
+        Ok(0)
     }
 }
 
@@ -918,6 +1067,10 @@ fn print_usage() {
     eprintln!("                         --restrict-shell blocks run/sh/spawn (or set DUCTILE_RESTRICT_SHELL=1)");
     eprintln!("  graph <file>           Show e-graph structure");
     eprintln!("  parse <file>           Parse only (show structure)");
+    eprintln!("  kernel-chaos <dir> [seeds]       Chaos harness: 6 killpoints x seeds (WAL-backed, fail-closed)");
+    eprintln!("  kernel-ledger <file> --verify    Verify evidence ledger hash chain");
+    eprintln!("  kernel-reproduce <dir> -o <out.tar.zst>   Pack reproduce bundle");
+    eprintln!("  kernel-reproduce --verify <dir>  Verify unpacked reproduce bundle offline");
     eprintln!("  hyper build <f.hyper> [-o out.pipeline]  Emit pipeline from hyper layer");
     eprintln!("  hyper check <f.hyper> <f.pipeline>       Check pipeline vs hyper constraints");
     eprintln!("  hyper parse <f.hyper>  Show hyper stages / requires");

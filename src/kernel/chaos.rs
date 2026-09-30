@@ -172,9 +172,13 @@ fn crash_at(lines: &[String], kp: KillPoint) -> Vec<String> {
     }
 }
 
-/// 单场景单 killpoint 的 chaos 判定。
+/// 单场景单 killpoint 单 seed 的 chaos 判定。
+/// seed 变输入（payload/plan_fp/manifest），不变结构——多 seed 验证
+/// 「不同输入同一保证」（plan §多 seed 基准协议：确定性组件用性质测试）。
+#[derive(Debug, Clone)]
 pub struct ChaosVerdict {
     pub killpoint: &'static str,
+    pub seed: u64,
     pub duplicate_effects: usize,
     pub chain_ok: bool,
     pub results_match: bool,
@@ -182,25 +186,25 @@ pub struct ChaosVerdict {
     pub side_effects_total: usize,
 }
 
-pub fn chaos_once(dir: &Path, kp: KillPoint) -> Result<ChaosVerdict, String> {
+pub fn chaos_once(dir: &Path, kp: KillPoint, seed: u64) -> Result<ChaosVerdict, String> {
     let sc = ScenarioWork {
-        plan_fp: "chaos-plan-1".into(),
+        plan_fp: format!("chaos-plan-{seed}"),
         steps: vec![
-            StepSpec { id: "s1".into(), effect_index: 0, payload: "alpha".into() },
-            StepSpec { id: "s2".into(), effect_index: 1, payload: "beta".into() },
+            StepSpec { id: "s1".into(), effect_index: 0, payload: format!("alpha-{seed}") },
+            StepSpec { id: "s2".into(), effect_index: 1, payload: format!("beta-{seed}") },
         ],
-        deliver_items: vec![Deliverable { channel: "sink".into(), manifest: "m".into() }],
+        deliver_items: vec![Deliverable { channel: "sink".into(), manifest: format!("m-{seed}") }],
     };
 
     // —— 基线（无故障）——
-    let base_path = dir.join(format!("base-{}.jsonl", kp.name()));
+    let base_path = dir.join(format!("base-{}-{}.jsonl", kp.name(), seed));
     let _ = std::fs::remove_file(&base_path);
     let mut base_wal = Wal::open(&base_path).map_err(|e| e.to_string())?;
     let mut base_chan = RecordingChannel::default();
     let (base_out, base_chan) = run_full(&mut base_wal, BTreeSet::new(), base_chan, &sc);
 
     // —— crash 场景：跑到一半按 killpoint 截断 ——
-    let crash_path = dir.join(format!("crash-{}.jsonl", kp.name()));
+    let crash_path = dir.join(format!("crash-{}-{}.jsonl", kp.name(), seed));
     let _ = std::fs::remove_file(&crash_path);
     // 先完整跑出 WAL，再按 killpoint 截断（等效于在那些点被杀）
     let mut cw = Wal::open(&crash_path).map_err(|e| e.to_string())?;
@@ -281,6 +285,7 @@ pub fn chaos_once(dir: &Path, kp: KillPoint) -> Result<ChaosVerdict, String> {
 
     Ok(ChaosVerdict {
         killpoint: kp.name(),
+        seed,
         duplicate_effects: duplicate_effects + sink_dups,
         chain_ok,
         results_match,
@@ -290,15 +295,18 @@ pub fn chaos_once(dir: &Path, kp: KillPoint) -> Result<ChaosVerdict, String> {
 }
 
 /// 汇总入口（kernel-chaos 子命令调用）。
-pub fn chaos_all(base_dir: &Path) -> Result<Vec<ChaosVerdict>, String> {
+/// seeds：每个 killpoint 跑的种子数（D14 验收=3；单测=1）。
+pub fn chaos_all(base_dir: &Path, seeds: u64) -> Result<Vec<ChaosVerdict>, String> {
     let dir: PathBuf = base_dir.to_path_buf();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for kp in KillPoint::all() {
-        // 每个 killpoint 独立子目录（隔离）
+        // 每个 killpoint 独立子目录（隔离），内按 seed 分文件
         let sub = dir.join(kp.name());
         std::fs::create_dir_all(&sub).map_err(|e| e.to_string())?;
-        out.push(chaos_once(&sub, kp)?);
+        for seed in 0..seeds {
+            out.push(chaos_once(&sub, kp, seed)?);
+        }
     }
     Ok(out)
 }
@@ -317,13 +325,14 @@ mod tests {
     #[test]
     fn all_six_killpoints_pass_four_criteria() {
         let dir = tmp("six");
-        let verdicts = chaos_all(&dir).unwrap();
-        assert_eq!(verdicts.len(), 6);
+        // D14 验收口径：六 killpoint × 3 seeds 零重复（进单测=永久回归钉）
+        let verdicts = chaos_all(&dir, 3).unwrap();
+        assert_eq!(verdicts.len(), 18);
         for v in &verdicts {
-            assert_eq!(v.duplicate_effects, 0, "{} duplicate!", v.killpoint);
-            assert!(v.chain_ok, "{} chain broken", v.killpoint);
-            assert!(v.results_match, "{} results differ", v.killpoint);
-            assert!(v.resumed, "{} did not resume", v.killpoint);
+            assert_eq!(v.duplicate_effects, 0, "{} seed{} duplicate!", v.killpoint, v.seed);
+            assert!(v.chain_ok, "{} seed{} chain broken", v.killpoint, v.seed);
+            assert!(v.results_match, "{} seed{} results differ", v.killpoint, v.seed);
+            assert!(v.resumed, "{} seed{} did not resume", v.killpoint, v.seed);
         }
     }
 

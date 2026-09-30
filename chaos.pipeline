@@ -1,0 +1,43 @@
+#!/usr/bin/env -S ductile run
+// chaos.pipeline — v0.24 kernel D12：chaos harness 的 .pipeline 自举外壳。
+// 测试场本身是 ductile 管线（吃狗粮）：编排 kernel-chaos 子命令而不是直接
+// 调 Rust 函数——被测对象（kernel chaos）与测试编排（DSL）分离。
+//
+// 直跑：./chaos.pipeline            （六 killpoint × 3 seeds，D14 验收口径）
+// 产物：target/kernel-chaos/ 下 verdicts.jsonl + ledger.jsonl + reproduce 包
+//
+// 流程：chaos 注入 → 账本链验证 → reproduce 打包 → 解包离线验证 → 防伪负例
+// 链式 .needs() 排序（run() 无 §§FIELDS§§，.when 门禁在此必假——skill 坑#9）；
+// fail-closed 由各 run() 自身 exit code 保证：任一步非零 → proc crash → 管线红。
+
+Pipeline("chaos", "v0.24 kernel chaos 自举：注入 → 账本 → reproduce → 离线验证", cwd="${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)}")
+
+  .proc("clean", run("rm -rf target/kernel-chaos target/kernel-chaos-unpacked && mkdir -p target/kernel-chaos"))
+    .desc("清场（重跑幂等）")
+
+  .proc("chaos", run("ductile kernel-chaos target/kernel-chaos 3"))
+    .desc("六 killpoint × 3 seeds 注入；CHAOS-PASS / exit 1 fail-closed")
+    .needs(@clean)
+
+  .proc("ledger", run("ductile kernel-ledger target/kernel-chaos/ledger.jsonl --verify"))
+    .desc("证据账本哈希链验证（LEDGER-OK）")
+    .needs(@chaos)
+
+  .proc("pack", run("ductile kernel-reproduce target/kernel-chaos -o target/kernel-chaos-bundle.tar.zst"))
+    .desc("reproduce 包：MANIFEST 逐文件 sha256 + tar.zst（输出包放目录外，防自包含）")
+    .needs(@ledger)
+
+  .proc("unpack", run("mkdir -p target/kernel-chaos-unpacked && tar --zstd -xf target/kernel-chaos-bundle.tar.zst -C target/kernel-chaos-unpacked"))
+    .desc("模拟第三方：干净目录解包")
+    .needs(@pack)
+
+  .proc("verify", run("ductile kernel-reproduce --verify target/kernel-chaos-unpacked"))
+    .desc("离线验证：manifest sha256 比对 + 账本链（REPRODUCE-OK）")
+    .needs(@unpack)
+
+  .proc("tamper", run("printf x >> target/kernel-chaos-unpacked/verdicts.jsonl; if ductile kernel-reproduce --verify target/kernel-chaos-unpacked >/dev/null 2>&1; then echo BAD-tamper-undetected; exit 1; else echo tamper-detected-ok; fi"))
+    .desc("防伪负例：篡改解包目录一个字节 → verify 必须拒绝（未拒绝则 proc 红）")
+    .needs(@verify)
+
+  .proc("deliver", run("echo CHAOS-SUITE-PASS"))
+    .deliver(@tamper)
