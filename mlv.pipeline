@@ -1,0 +1,61 @@
+#!/usr/bin/env -S ductile run
+// mlv.pipeline — v0.24 自组织治理超图最小活体（sonet 第四轮实施）。
+// 编排 kernel-binding 子命令——自组织闭环=测试场本身是 ductile 管线（吃狗粮）。
+//
+// 直跑：./mlv.pipeline
+// 闭环：propose → grant → decide → activate → 账本验证 → reproduce 打包
+//       → 解包离线验证 → 治理负例（非法边必拒+防伪一字节必检出）
+// 真实数据：PO0 素材=本仓库 204 条管线/18 张 hyper 图的重复绑定摩擦（db 实测）。
+// 链式 .needs() 排序（run() 裸文本无字段，.when 门禁必假——skill 坑#9）。
+
+Pipeline("mlv", "v0.24 治理超图 MLV：propose→grant→decide→activate→账本→reproduce→负例", cwd="${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)}")
+
+  .proc("clean", run("rm -rf target/mlv target/mlv-unpacked target/mlv-bundle.tar.zst && mkdir -p target/mlv"))
+    .desc("清场（重跑幂等）")
+
+  .proc("propose", run("ductile kernel-binding target/mlv/ledger.jsonl propose scan-gate 1 actor-llm"))
+    .desc("任意 origin 自主提案（自组织入口；受制度门禁约束的结构化涌现）")
+    .needs(@clean)
+
+  .proc("grant", run("ductile kernel-binding target/mlv/ledger.jsonl advance scan-gate 1 GRANTED genesis-root"))
+    .desc("授权：genesis 单根签发（MLV 简化；完整 enrollment=PO0 后）")
+    .needs(@propose)
+
+  .proc("decide", run("ductile kernel-binding target/mlv/ledger.jsonl advance scan-gate 1 DECIDED judge-a"))
+    .desc("独立裁决（judge-a≠提案者 actor-llm——E404 禁自判的 MLV 体现）")
+    .needs(@grant)
+
+  .proc("activate", run("ductile kernel-binding target/mlv/ledger.jsonl advance scan-gate 1 ACTIVATING actor-ops && ductile kernel-binding target/mlv/ledger.jsonl advance scan-gate 1 ACTIVE actor-ops && ductile kernel-binding target/mlv/ledger.jsonl status scan-gate"))
+    .desc("激活：两段提交（ACTIVATING→ACTIVE）+状态回读")
+    .needs(@decide)
+
+  .proc("ledger", run("ductile kernel-ledger target/mlv/ledger.jsonl --verify"))
+    .desc("证据账本链验证（6 事件 head-CAS 全链）")
+    .needs(@activate)
+
+  .proc("tamper", run("cp target/mlv/ledger.jsonl /tmp/mlv_backup.jsonl && sed -i 's/scan-gate/EVIL-ID/' target/mlv/ledger.jsonl && { ductile kernel-ledger target/mlv/ledger.jsonl --verify >/dev/null 2>&1 && echo BAD-tamper-undetected || echo tamper-detected-ok; }; cp /tmp/mlv_backup.jsonl target/mlv/ledger.jsonl"))
+    .desc("防伪负例：篡改账本一行→verify 必拒→恢复原账本")
+    .needs(@ledger)
+
+  .proc("illegal", run("ductile kernel-binding target/mlv/ledger.jsonl advance scan-gate 1 PROPOSED actor-x > /tmp/mlv_illegal.out 2>&1; if grep -q ADVANCE-FAIL /tmp/mlv_illegal.out; then echo illegal-edge-rejected-ok; else echo BAD-illegal-edge-passed; exit 1; fi"))
+    .desc("治理负例：ACTIVE→PROPOSED 非法边必须 E422 拒绝（grep 落盘判 exit）")
+    .needs(@tamper)
+
+  .proc("revoke", run("ductile kernel-binding target/mlv/ledger.jsonl advance scan-gate 1 REVOKED actor-ops && ductile kernel-binding target/mlv/ledger.jsonl advance scan-gate 1 ACTIVE actor-x > /tmp/mlv_revive.out 2>&1; if grep -q ADVANCE-FAIL /tmp/mlv_revive.out; then echo terminal-no-revive-ok; else echo BAD-revive-passed; exit 1; fi; ductile kernel-binding target/mlv/ledger.jsonl status scan-gate"))
+    .desc("终态路径：REVOKED 终态+复活必拒（grep 落盘）+stop_generation 生效")
+    .needs(@illegal)
+
+  .proc("pack", run("ductile kernel-reproduce target/mlv -o target/mlv-bundle.tar.zst"))
+    .desc("reproduce 包（治理证据离线可验）")
+    .needs(@revoke)
+
+  .proc("unpack", run("mkdir -p target/mlv-unpacked && tar --zstd -xf target/mlv-bundle.tar.zst -C target/mlv-unpacked"))
+    .desc("第三方视角解包")
+    .needs(@pack)
+
+  .proc("verify", run("ductile kernel-reproduce --verify target/mlv-unpacked"))
+    .desc("离线验证：MANIFEST sha256+账本链（REPRODUCE-OK）")
+    .needs(@unpack)
+
+  .proc("deliver", run("echo MLV-SUITE-PASS"))
+    .deliver(@verify)

@@ -228,6 +228,9 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         "kernel-ledger" if args.len() >= 3 => cmd_kernel_ledger(&args[2..]),
         "kernel-reproduce" if args.len() >= 3 => cmd_kernel_reproduce(&args[2..]),
 
+        // v0.24 自组织治理超图 MLV（sonet 第四轮实施）
+        "kernel-binding" if args.len() >= 4 => cmd_kernel_binding(&args[2..]),
+
         // v0.23 深题手册：`ductile help <topic>` 把引擎行为写进二进制，
         // 终端即得——不再逼使用者进 Rust 源码排障（反馈单第 3 条）。
         "help" if args.len() >= 3 => cmd_help_topic(&args[2..].join(" ")),
@@ -384,6 +387,119 @@ fn cmd_kernel_reproduce(args: &[String]) -> Result<i32, String> {
             entries.len()
         );
         Ok(0)
+    }
+}
+
+/// v0.24 自组织治理超图 MLV 子命令。
+/// `ductile kernel-binding <ledger> propose <binding_id> <revision> <actor>`
+/// `ductile kernel-binding <ledger> advance <binding_id> <revision> <to_state> <actor>`
+/// `ductile kernel-binding <ledger> status <binding_id>`
+/// 一步一提交（head-CAS 由内部 head() 续接）；每步 exit 0/1 fail-closed。
+fn cmd_kernel_binding(args: &[String]) -> Result<i32, String> {
+    use crate::kernel::binding::{BindingRegistry, BindingState, BindingTransition, Phase};
+    let ledger = std::path::PathBuf::from(&args[0]);
+    let sub = args[1].as_str();
+    let mut reg = BindingRegistry::open(&ledger).map_err(|e| format!("open: {e}"))?;
+    match sub {
+        "propose" => {
+            if args.len() < 5 {
+                return Err("usage: kernel-binding <ledger> propose <binding_id> <revision> <actor>".into());
+            }
+            let head = reg.head().map_err(|e| format!("head: {e:?}"))?;
+            let t = BindingTransition {
+                binding_id: args[2].clone(),
+                revision: args[3].parse().map_err(|_| "revision must be number")?,
+                from_state: BindingState::Proposed,
+                to_state: BindingState::Proposed,
+                effect_key: crate::kernel::types::EffectKey {
+                    plan_fingerprint: format!("gov-proposal-{}", args[2]),
+                    effect_index: 0,
+                    input_digest: crate::kernel::hash::sha256_hex(
+                        format!("{}|{}|propose", args[2], args[3]).as_bytes(),
+                    ),
+                },
+                phase: Phase::Proposal,
+                expected_head: head,
+                actor: args[4].clone(),
+            };
+            let payload = format!("proposal|{}|{}", args[2], args[3]);
+            match reg.commit(&t, payload.as_bytes()) {
+                Ok(o) => {
+                    println!("PROPOSED {} rev={} head={}", args[2], args[3], &o.new_head[..16]);
+                    Ok(0)
+                }
+                Err(e) => {
+                    eprintln!("PROPOSE-FAIL {:?} (E-code priority: E404>E421>E423>E424>E425>E422>E420)", e);
+                    Ok(1)
+                }
+            }
+        }
+        "advance" => {
+            if args.len() < 6 {
+                return Err("usage: kernel-binding <ledger> advance <binding_id> <revision> <to_state> <actor>".into());
+            }
+            let binding_id = args[2].clone();
+            let revision: u64 = args[3].parse().map_err(|_| "revision must be number")?;
+            let to = crate::kernel::binding::state_from_name(&args[4])
+                .map_err(|e| format!("unknown state: {e}"))?;
+            let from = reg
+                .state_of(&binding_id, revision)
+                .ok_or("binding not found — propose first")?;
+            let head = reg.head().map_err(|e| format!("head: {e:?}"))?;
+            let phase = match to {
+                BindingState::Granted => Phase::Grant,
+                BindingState::Decided | BindingState::Rejected => Phase::Decision,
+                _ => Phase::Activation,
+            };
+            let t = BindingTransition {
+                binding_id: binding_id.clone(),
+                revision,
+                from_state: from,
+                to_state: to,
+                effect_key: crate::kernel::types::EffectKey {
+                    plan_fingerprint: format!("gov-{}-{:?}", binding_id, phase),
+                    effect_index: 0,
+                    input_digest: crate::kernel::hash::sha256_hex(
+                        format!("{}|{}|{:?}", binding_id, revision, to).as_bytes(),
+                    ),
+                },
+                phase,
+                expected_head: head,
+                actor: args[5].clone(),
+            };
+            let payload = format!("advance|{}|{}|{}", binding_id, revision, to.name());
+            match reg.commit(&t, payload.as_bytes()) {
+                Ok(o) => {
+                    println!("{} {} rev={} head={}", to.name(), binding_id, revision, &o.new_head[..16]);
+                    Ok(0)
+                }
+                Err(e) => {
+                    eprintln!("ADVANCE-FAIL {:?} (edge/state/phase/head rules)", e);
+                    Ok(1)
+                }
+            }
+        }
+        "status" => {
+            let binding_id = &args[2];
+            match reg.current_revision(binding_id) {
+                Some(r) => {
+                    let st = reg.state_of(binding_id, r).map(|s| s.name()).unwrap_or("?");
+                    println!(
+                        "binding={} current_rev={} state={} stop_gen={}",
+                        binding_id,
+                        r,
+                        st,
+                        reg.stop_generation(binding_id)
+                    );
+                    Ok(0)
+                }
+                None => {
+                    eprintln!("binding not found: {binding_id}");
+                    Ok(1)
+                }
+            }
+        }
+        _ => Err("usage: kernel-binding <ledger> propose|advance|status ...".into()),
     }
 }
 

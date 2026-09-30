@@ -17,3 +17,4 @@ pub mod wal;
 pub mod judge;
 pub mod chaos;
 pub mod ledger;
+pub mod binding;

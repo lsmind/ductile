@@ -195,6 +195,7 @@ pub enum ErrCode {
     E205, // Scope
     E206, // PlanMismatch
     E207, // PredicateType
+    E208, // AuthCompile：能力契约编译期授权失败（治理超图；失败不隔离，拒绝进入 registry）
     // E3xx 执行
     E301, // Spawn
     E302, // Exit
@@ -224,6 +225,13 @@ pub enum ErrCode {
     E407, // 网络策略拒绝
     E408, // 路径策略拒绝
     E409, // Worker 异常退出
+    // E42x 治理（sonet 第四轮：每码唯一检测者+时点；优先级 E404>E421>E423>E424>E425>E422>E420）
+    E420, // EffectScopeRuntime：运行期 preflight/提交越权（仅兜底，专属码优先）
+    E421, // EffectMismatch：registry/沙箱 mediator 发现实际 effect 与声明不符
+    E422, // QuotaViolation：配额预留/结算越界（预算维度=wall/cpu/as/fd/outbox）
+    E423, // CredentialInvalid：签名信封验证失败（根/issuer/时效/撤销/受众）
+    E424, // BeforeHashMismatch：head-CAS 失配（陈旧事件/并发写冲突）
+    E425, // ArtifactMismatch：candidate/decision/envelope 摘要不一致（含 fd3 语义伪造）
     // E5xx 契约
     E501, // OutputContract
     E502, // Invariant
@@ -246,6 +254,7 @@ impl ErrCode {
             Self::E205 => "E205",
             Self::E206 => "E206",
             Self::E207 => "E207",
+            Self::E208 => "E208",
             Self::E301 => "E301",
             Self::E302 => "E302",
             Self::E303 => "E303",
@@ -273,6 +282,12 @@ impl ErrCode {
             Self::E407 => "E407",
             Self::E408 => "E408",
             Self::E409 => "E409",
+            Self::E420 => "E420",
+            Self::E421 => "E421",
+            Self::E422 => "E422",
+            Self::E423 => "E423",
+            Self::E424 => "E424",
+            Self::E425 => "E425",
             Self::E501 => "E501",
             Self::E502 => "E502",
             Self::E503 => "E503",
@@ -294,6 +309,7 @@ impl ErrCode {
             Self::E205 => "Scope",
             Self::E206 => "PlanMismatch",
             Self::E207 => "PredicateType",
+            Self::E208 => "AuthCompile",
             Self::E301 => "Spawn",
             Self::E302 => "Exit",
             Self::E303 => "Timeout",
@@ -321,6 +337,12 @@ impl ErrCode {
             Self::E407 => "NetPolicy",
             Self::E408 => "PathPolicy",
             Self::E409 => "WorkerCrash",
+            Self::E420 => "EffectScopeRuntime",
+            Self::E421 => "EffectMismatch",
+            Self::E422 => "QuotaViolation",
+            Self::E423 => "CredentialInvalid",
+            Self::E424 => "BeforeHashMismatch",
+            Self::E425 => "ArtifactMismatch",
             Self::E501 => "OutputContract",
             Self::E502 => "Invariant",
             Self::E503 => "NoEligible",
@@ -690,13 +712,15 @@ mod tests {
         let all = [
             ErrCode::E101, ErrCode::E102, ErrCode::E103, ErrCode::E104,
             ErrCode::E201, ErrCode::E202, ErrCode::E203, ErrCode::E204, ErrCode::E205,
-            ErrCode::E206, ErrCode::E207,
+            ErrCode::E206, ErrCode::E207, ErrCode::E208,
             ErrCode::E301, ErrCode::E302, ErrCode::E303, ErrCode::E304, ErrCode::E305,
             ErrCode::E306, ErrCode::E307, ErrCode::E308, ErrCode::E309, ErrCode::E310,
             ErrCode::E311, ErrCode::E312, ErrCode::E313, ErrCode::E314, ErrCode::E315,
             ErrCode::E316, ErrCode::E317, ErrCode::E318,
             ErrCode::E401, ErrCode::E402, ErrCode::E403, ErrCode::E404, ErrCode::E405,
             ErrCode::E406, ErrCode::E407, ErrCode::E408, ErrCode::E409,
+            ErrCode::E420, ErrCode::E421, ErrCode::E422, ErrCode::E423, ErrCode::E424,
+            ErrCode::E425,
             ErrCode::E501, ErrCode::E502, ErrCode::E503, ErrCode::E504,
         ];
         let mut seen = std::collections::BTreeSet::new();
