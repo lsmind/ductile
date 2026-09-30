@@ -12,3 +12,7 @@ pub mod hash;
 pub mod evalfns;
 pub mod fd3;
 pub mod runadapter;
+pub mod quota;
+pub mod wal;
+pub mod judge;
+pub mod chaos;
