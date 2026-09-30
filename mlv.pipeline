@@ -1,61 +1,137 @@
 #!/usr/bin/env -S ductile run
-// mlv.pipeline — v0.24 自组织治理超图最小活体（sonet 第四轮实施）。
-// 编排 kernel-binding 子命令——自组织闭环=测试场本身是 ductile 管线（吃狗粮）。
+// mlv.pipeline — v0.24 自组织治理超图 v3.1（外援终审「可施工」版实施）。
 //
-// 直跑：./mlv.pipeline
-// 闭环：propose → grant → decide → activate → 账本验证 → reproduce 打包
-//       → 解包离线验证 → 治理负例（非法边必拒+防伪一字节必检出）
-// 真实数据：PO0 素材=本仓库 204 条管线/18 张 hyper 图的重复绑定摩擦（db 实测）。
+// 双轨：旧 12 步（kernel-binding 冻结字节断言）+ 新 13 步（mlv 治理内核协议串）。
+// 新步负例全部走独立 fixture 账本（mlv append fixture:L 位置参数，v3.1 C 条）。
+// kill 步=父进程注入 SIGKILL 后重启验证（RECOVERED count=N）。
 // 链式 .needs() 排序（run() 裸文本无字段，.when 门禁必假——skill 坑#9）。
 
-Pipeline("mlv", "v0.24 治理超图 MLV：propose→grant→decide→activate→账本→reproduce→负例", cwd="${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)}")
+Pipeline("mlv", "v0.24 治理超图 v3.1：双轨 25 步（旧断言冻结+新治理协议）", cwd="${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)}")
 
-  .proc("clean", run("rm -rf target/mlv target/mlv-unpacked target/mlv-bundle.tar.zst && mkdir -p target/mlv"))
+  // ── 旧轨：kernel-binding 冻结断言（字节不变）────────────────────
+  .proc("clean", run("rm -rf target/mlv target/mlv-unpacked target/mlv-bundle.tar.zst target/mlv-fx && mkdir -p target/mlv"))
     .desc("清场（重跑幂等）")
 
-  .proc("propose", run("ductile kernel-binding target/mlv/ledger.jsonl propose scan-gate 1 actor-llm"))
-    .desc("任意 origin 自主提案（自组织入口；受制度门禁约束的结构化涌现）")
+  .proc("init-old", run("ductile kernel-binding target/mlv/ledger.jsonl propose scan-gate 1 actor-llm"))
+    .desc("旧轨入口：propose（冻结协议串）")
     .needs(@clean)
 
-  .proc("grant", run("ductile kernel-binding target/mlv/ledger.jsonl advance scan-gate 1 GRANTED genesis-root"))
-    .desc("授权：genesis 单根签发（MLV 简化；完整 enrollment=PO0 后）")
-    .needs(@propose)
+  .proc("grant-old", run("ductile kernel-binding target/mlv/ledger.jsonl advance scan-gate 1 GRANTED genesis-root"))
+    .desc("授权（冻结）")
+    .needs(@init-old)
 
-  .proc("decide", run("ductile kernel-binding target/mlv/ledger.jsonl advance scan-gate 1 DECIDED judge-a"))
-    .desc("独立裁决（judge-a≠提案者 actor-llm——E404 禁自判的 MLV 体现）")
-    .needs(@grant)
+  .proc("decide-old", run("ductile kernel-binding target/mlv/ledger.jsonl advance scan-gate 1 DECIDED judge-a"))
+    .desc("独立裁决（冻结）")
+    .needs(@grant-old)
 
-  .proc("activate", run("ductile kernel-binding target/mlv/ledger.jsonl advance scan-gate 1 ACTIVATING actor-ops && ductile kernel-binding target/mlv/ledger.jsonl advance scan-gate 1 ACTIVE actor-ops && ductile kernel-binding target/mlv/ledger.jsonl status scan-gate"))
-    .desc("激活：两段提交（ACTIVATING→ACTIVE）+状态回读")
-    .needs(@decide)
+  .proc("activate-old", run("ductile kernel-binding target/mlv/ledger.jsonl advance scan-gate 1 ACTIVATING actor-ops && ductile kernel-binding target/mlv/ledger.jsonl advance scan-gate 1 ACTIVE actor-ops && ductile kernel-binding target/mlv/ledger.jsonl status scan-gate"))
+    .desc("两段激活+回读（冻结）")
+    .needs(@decide-old)
 
   .proc("ledger", run("ductile kernel-ledger target/mlv/ledger.jsonl --verify"))
-    .desc("证据账本链验证（6 事件 head-CAS 全链）")
-    .needs(@activate)
+    .desc("证据账本链验证（LEDGER-OK）")
+    .needs(@activate-old)
 
-  .proc("tamper", run("cp target/mlv/ledger.jsonl /tmp/mlv_backup.jsonl && sed -i 's/scan-gate/EVIL-ID/' target/mlv/ledger.jsonl && { ductile kernel-ledger target/mlv/ledger.jsonl --verify >/dev/null 2>&1 && echo BAD-tamper-undetected || echo tamper-detected-ok; }; cp /tmp/mlv_backup.jsonl target/mlv/ledger.jsonl"))
-    .desc("防伪负例：篡改账本一行→verify 必拒→恢复原账本")
+  .proc("tamper-old", run("cp target/mlv/ledger.jsonl /tmp/mlv_backup.jsonl && sed -i 's/scan-gate/EVIL-ID/' target/mlv/ledger.jsonl && { ductile kernel-ledger target/mlv/ledger.jsonl --verify >/dev/null 2>&1 && echo BAD-tamper-undetected || echo tamper-detected-ok; }; cp /tmp/mlv_backup.jsonl target/mlv/ledger.jsonl"))
+    .desc("防伪负例（冻结判定串）")
     .needs(@ledger)
 
-  .proc("illegal", run("ductile kernel-binding target/mlv/ledger.jsonl advance scan-gate 1 PROPOSED actor-x > /tmp/mlv_illegal.out 2>&1; if grep -q ADVANCE-FAIL /tmp/mlv_illegal.out; then echo illegal-edge-rejected-ok; else echo BAD-illegal-edge-passed; exit 1; fi"))
-    .desc("治理负例：ACTIVE→PROPOSED 非法边必须 E422 拒绝（grep 落盘判 exit）")
-    .needs(@tamper)
+  .proc("illegal-old", run("ductile kernel-binding target/mlv/ledger.jsonl advance scan-gate 1 PROPOSED actor-x > /tmp/mlv_illegal.out 2>&1; if grep -q ADVANCE-FAIL /tmp/mlv_illegal.out; then echo illegal-edge-rejected-ok; else echo BAD-illegal-edge-passed; exit 1; fi"))
+    .desc("非法边必拒（冻结）")
+    .needs(@tamper-old)
 
-  .proc("revoke", run("ductile kernel-binding target/mlv/ledger.jsonl advance scan-gate 1 REVOKED actor-ops && ductile kernel-binding target/mlv/ledger.jsonl advance scan-gate 1 ACTIVE actor-x > /tmp/mlv_revive.out 2>&1; if grep -q ADVANCE-FAIL /tmp/mlv_revive.out; then echo terminal-no-revive-ok; else echo BAD-revive-passed; exit 1; fi; ductile kernel-binding target/mlv/ledger.jsonl status scan-gate"))
-    .desc("终态路径：REVOKED 终态+复活必拒（grep 落盘）+stop_generation 生效")
-    .needs(@illegal)
+  .proc("revoke-old", run("ductile kernel-binding target/mlv/ledger.jsonl advance scan-gate 1 REVOKED actor-ops && ductile kernel-binding target/mlv/ledger.jsonl advance scan-gate 1 ACTIVE actor-x > /tmp/mlv_revive.out 2>&1; if grep -q ADVANCE-FAIL /tmp/mlv_revive.out; then echo terminal-no-revive-ok; else echo BAD-revive-passed; exit 1; fi; ductile kernel-binding target/mlv/ledger.jsonl status scan-gate"))
+    .desc("终态+复活必拒（冻结）")
+    .needs(@illegal-old)
 
   .proc("pack", run("ductile kernel-reproduce target/mlv -o target/mlv-bundle.tar.zst"))
-    .desc("reproduce 包（治理证据离线可验）")
-    .needs(@revoke)
+    .desc("reproduce 包")
+    .needs(@revoke-old)
 
   .proc("unpack", run("mkdir -p target/mlv-unpacked && tar --zstd -xf target/mlv-bundle.tar.zst -C target/mlv-unpacked"))
     .desc("第三方视角解包")
     .needs(@pack)
 
-  .proc("verify", run("ductile kernel-reproduce --verify target/mlv-unpacked"))
-    .desc("离线验证：MANIFEST sha256+账本链（REPRODUCE-OK）")
+  .proc("verify-old", run("ductile kernel-reproduce --verify target/mlv-unpacked"))
+    .desc("离线验证（REPRODUCE-OK）")
     .needs(@unpack)
 
-  .proc("deliver", run("echo MLV-SUITE-PASS"))
-    .deliver(@verify)
+  // ── 新轨：mlv 治理内核（v3.1 协议串）────────────────────────────
+  .proc("init", run("ductile mlv target/mlv/gov.jsonl init"))
+    .desc("步2 显式 init（OK init v1）")
+    .needs(@clean)
+
+  .proc("create", run("ductile mlv target/mlv/gov.jsonl create b1 0"))
+    .desc("步3 CREATE_PROPOSAL（OK create）")
+    .needs(@init)
+
+  .proc("ack", run("ductile mlv target/mlv/gov.jsonl create b1 0"))
+    .desc("步4 幂等重试（ACK code=OK）")
+    .needs(@create)
+
+  .proc("conflict", run("ductile mlv target/mlv/gov.jsonl append fixture:conflict --op CREATE_PROPOSAL --binding fx --rev 0 --rk same --at 100 > /dev/null 2>&1; python3 -c \"import pathlib;p=pathlib.Path('target/mlv/fixture-conflict/ledger.jsonl');d=p.read_bytes();i=d.find(b'sha256:');p.write_bytes(d[:i+7]+b'deadbeef'+d[i+15:])\"; ductile mlv target/mlv/fixture-conflict/ledger.jsonl verify > /tmp/mlv_conflict.out 2>&1 || true; if grep -q 'ERR' /tmp/mlv_conflict.out; then echo digest-tamper-rejected-ok; else echo BAD-digest-tamper-passed; exit 1; fi"))
+    .desc("步5 摘要篡改必拒（改 request_digest 前缀→record_hash 失配→verify 拒）")
+    .needs(@ack)
+
+  .proc("grant", run("ductile mlv target/mlv/gov.jsonl grant b1 0"))
+    .desc("步6 GRANT")
+    .needs(@conflict)
+
+  .proc("decide", run("ductile mlv target/mlv/gov.jsonl decide b1 0"))
+    .desc("步7 DECISION")
+    .needs(@grant)
+
+  .proc("begin", run("ductile mlv target/mlv/gov.jsonl begin b1 0"))
+    .desc("步8 ACTIVATE_BEGIN")
+    .needs(@decide)
+
+  .proc("confirm", run("ductile mlv target/mlv/gov.jsonl registry-confirm b1 0"))
+    .desc("步9 REGISTRY_CONFIRM（回执登记）")
+    .needs(@begin)
+
+  .proc("commit", run("ductile mlv target/mlv/gov.jsonl commit b1 0"))
+    .desc("步10 ACTIVATE_COMMIT（回执门禁后 ACTIVE）")
+    .needs(@confirm)
+
+  .proc("ledger-new", run("ductile mlv target/mlv/gov.jsonl verify"))
+    .desc("步11 账本验证（OK ledger head=）")
+    .needs(@commit)
+
+  .proc("replay", run("ductile mlv target/mlv/gov.jsonl status b1 > /tmp/mlv_replay.out 2>&1 && grep -q 'state=ACTIVE' /tmp/mlv_replay.out && echo replay-equal-ok || { echo BAD-replay; exit 1; }"))
+    .desc("步12 全量重放等价（open=重放→状态一致）")
+    .needs(@ledger-new)
+
+  .proc("tamper-new", run("cp target/mlv/gov.jsonl /tmp/gov_bak.jsonl && sed -i 's/\"op\":\"GRANT\"/\"op\":\"EVIL\"/' target/mlv/gov.jsonl; ductile mlv target/mlv/gov.jsonl verify > /tmp/mlv_tamper.out 2>&1; if grep -q 'ERR' /tmp/mlv_tamper.out; then echo tamper-detected-ok; else echo BAD-tamper; exit 1; fi; cp /tmp/gov_bak.jsonl target/mlv/gov.jsonl"))
+    .desc("步13 篡改任一字节必拒（独立于旧轨同型步）")
+    .needs(@replay)
+
+  .proc("illegal-new", run("ductile mlv target/mlv/gov.jsonl append main --op GRANT --binding b1 --rev 0 --rk fresh-illegal-probe --at 100 > /tmp/mlv_illegal2.out 2>&1 || true; if grep -q 'E422 illegal-edge' /tmp/mlv_illegal2.out; then echo illegal-edge-rejected-ok; else echo BAD-illegal; exit 1; fi"))
+    .desc("步14 非法边（ACTIVE 上再 GRANT）必拒")
+    .needs(@tamper-new)
+
+  .proc("abandon-cycle", run("ductile mlv target/mlv/gov.jsonl create b2 0 > /dev/null && ductile mlv target/mlv/gov.jsonl grant b2 0 > /dev/null && ductile mlv target/mlv/gov.jsonl decide b2 0 > /dev/null && ductile mlv target/mlv/gov.jsonl begin b2 0 > /dev/null && ductile mlv target/mlv/gov.jsonl abandon b2 0 && ductile mlv target/mlv/gov.jsonl begin b2 0"))
+    .desc("步15 ABANDON 唯一放弃出口+重新 begin（P3）")
+    .needs(@illegal-new)
+
+  .proc("receipt-gate", run("ductile mlv target/mlv/ledger.jsonl append fixture:norcpt --op CREATE_PROPOSAL --binding b3 --rev 0 --rk r --at 100 > /dev/null 2>&1; ductile mlv target/mlv/ledger.jsonl append fixture:norcpt --op GRANT --binding b3 --rev 0 --rk r --at 100 > /dev/null 2>&1; ductile mlv target/mlv/ledger.jsonl append fixture:norcpt --op DECISION --binding b3 --rev 0 --rk r --at 100 > /dev/null 2>&1; ductile mlv target/mlv/ledger.jsonl append fixture:norcpt --op ACTIVATE_BEGIN --binding b3 --rev 0 --rk r --at 100 > /dev/null 2>&1; ductile mlv target/mlv/ledger.jsonl append fixture:norcpt --op ACTIVATE_COMMIT --binding b3 --rev 0 --rk r --at 100 > /tmp/mlv_rcpt.out 2>&1; if grep -q 'receipt-required' /tmp/mlv_rcpt.out; then echo receipt-gate-ok; else echo BAD-receipt; exit 1; fi"))
+    .desc("步16 无回执 COMMIT 必拒（receipt-required）")
+    .needs(@abandon-cycle)
+
+  .proc("terminal-new", run("ductile mlv target/mlv/gov.jsonl revoke b1 0 > /dev/null && ductile mlv target/mlv/gov.jsonl terminal b1 0 > /tmp/mlv_term.out 2>&1; if grep -q 'ERR terminal' /tmp/mlv_term.out; then echo terminal-no-revive-ok; else echo BAD-terminal; exit 1; fi"))
+    .desc("步17 终态不可复活（REVOKED 上 TERMINAL 拒）")
+    .needs(@receipt-gate)
+
+  .proc("missing", run("ductile mlv /tmp/mlv-no-such-ledger.jsonl verify > /tmp/mlv_missing.out 2>&1; if grep -q 'ledger-missing' /tmp/mlv_missing.out; then echo missing-refused-ok; else echo BAD-missing; exit 1; fi"))
+    .desc("步18 缺账本必拒（不自动建）")
+    .needs(@terminal-new)
+
+  .proc("concurrent", run("bash scripts/mlv_concurrent_once.sh > /tmp/mlv_conc.out 2>&1; if grep -q 'ONE-WINS' /tmp/mlv_conc.out; then echo concurrent-one-wins-ok; else echo BAD-concurrent; cat /tmp/mlv_conc.out; exit 1; fi"))
+    .desc("步19 双进程并发仅一胜（ONE-WINS）")
+    .needs(@missing)
+
+  .proc("kill9", run("bash scripts/mlv_kill9_once.sh > /tmp/mlv_kill.out 2>&1; if grep -q 'RECOVERED' /tmp/mlv_kill.out; then echo kill9-recovered-ok; else echo BAD-kill; cat /tmp/mlv_kill.out; exit 1; fi"))
+    .desc("步20 kill -9 半提交恢复（RECOVERED）")
+    .needs(@concurrent)
+
+  .proc("deliver", run("echo MLV-V31-SUITE-PASS"))
+    .deliver(@verify-old, @kill9)

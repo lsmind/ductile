@@ -231,6 +231,9 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         // v0.24 自组织治理超图 MLV（sonet 第四轮实施）
         "kernel-binding" if args.len() >= 4 => cmd_kernel_binding(&args[2..]),
 
+        // v0.24 MLV v3.1 治理内核（旧动词输出字节冻结；新动词新格式）
+        "mlv" if args.len() >= 3 => cmd_mlv(&args[2..]),
+
         // v0.23 深题手册：`ductile help <topic>` 把引擎行为写进二进制，
         // 终端即得——不再逼使用者进 Rust 源码排障（反馈单第 3 条）。
         "help" if args.len() >= 3 => cmd_help_topic(&args[2..].join(" ")),
@@ -391,6 +394,192 @@ fn cmd_kernel_reproduce(args: &[String]) -> Result<i32, String> {
 }
 
 /// v0.24 自组织治理超图 MLV 子命令。
+/// `ductile mlv <ledger> <verb> ...` — v3.1 治理内核。
+fn cmd_mlv(args: &[String]) -> Result<i32, String> {
+    use crate::kernel::gov::{ApplyOutcome, GovErr, GovRegistry};
+    use crate::kernel::mlv::{effect_key, LedgerRecord, MlvOp, MlvState, DEFAULT_SKEW_NS, DOMAIN_RECORD, domain_hash, GENESIS_ROOT, DOMAIN_RECEIPT};
+    let ledger_path = std::path::PathBuf::from(&args[0]);
+    let verb = args[1].as_str();
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+
+    fn emit_outcome(r: Result<ApplyOutcome, GovErr>, label: &str, rev: u64) -> Result<i32, String> {
+        match r {
+            Ok(ApplyOutcome::Committed { record_hash, .. }) => {
+                println!("OK {label} rev={rev} record={record_hash}");
+                Ok(0)
+            }
+            Ok(ApplyOutcome::Acked { result }) => {
+                println!("ACK {label} rev={rev} code={}", result.get("code").unwrap_or(&"OK".into()));
+                Ok(0)
+            }
+            Err(e) => {
+                eprintln!("{} {}", e.code(), e.detail());
+                Ok(1)
+            }
+        }
+    }
+
+    fn mkrec(seq: u64, op: MlvOp, binding: &str, rev: u64, from: Option<MlvState>, to: Option<MlvState>, prev: &str, request_key: &str, at: u64) -> LedgerRecord {
+        LedgerRecord {
+            schema: 1, seq, op,
+            key_id: "genesis".into(), root_commitment: GENESIS_ROOT.into(),
+            effect_key: effect_key(op, binding, rev, request_key).unwrap(),
+            idempotency_scope: None, caller_id: Some("cli".into()),
+            request_key: Some(request_key.into()),
+            request_digest: domain_hash(DOMAIN_RECORD, format!("{op:?}|{request_key}").as_bytes()),
+            binding_id: Some(binding.into()), revision: Some(rev),
+            from, to, before_record_hash: prev.into(), accepted_at_ns: at,
+            nonce: Some(format!("nonce-{seq}-{at}")), envelope_digest: None, envelope: None,
+            payload: format!("{op:?}|{binding}|{rev}"), registry_receipt: None,
+            result: [("code".into(), "OK".into())].into_iter().collect(),
+            record_hash: String::new(),
+        }
+    }
+
+    let op_of = |v: &str| -> Result<MlvOp, String> {
+        MlvOp::from_name(&v.to_uppercase().replace('-', "_")).map_err(|e| e.to_string())
+    };
+
+    match verb {
+        "init" => {
+            match GovRegistry::init(&ledger_path, now_ns) {
+                Ok(reg) => {
+                    let h = reg.ledger.head().unwrap_or_default();
+                    println!("OK init v1 head={h}");
+                    Ok(0)
+                }
+                Err(e) => { eprintln!("{} {}", e.code(), e.detail()); Ok(1) }
+            }
+        }
+        "create" => {
+            let binding = args[2].clone();
+            let rev: u64 = args[3].parse().map_err(|_| "rev must be number")?;
+            let rk = args.get(4).cloned().unwrap_or_else(|| format!("rk-{binding}-{rev}"));
+            let mut reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
+            let prev = reg.head().map_err(|e| e.to_string())?;
+            let seq = reg.record_count();
+            let rec = mkrec(seq, MlvOp::CreateProposal, &binding, rev, None, Some(MlvState::Proposed), &prev, &rk, now_ns);
+            emit_outcome(reg.submit(rec, now_ns), "create", rev)
+        }
+        "append" => {
+            // v3.1 C 条：target 位置参数（main|fixture:L）
+            let target = args[2].clone();
+            let path = if let Some(l) = target.strip_prefix("fixture:") {
+                if l.is_empty() || !l.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_') {
+                    return Err("fixture label must match [a-z0-9_-]+".into());
+                }
+                let base = ledger_path.parent().unwrap_or(std::path::Path::new("."));
+                let dir = base.join(format!("fixture-{l}"));
+                std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                dir.join("ledger.jsonl")
+            } else if target == "main" {
+                ledger_path.clone()
+            } else {
+                return Err("target must be main or fixture:LABEL".into());
+            };
+            let mut op = None; let mut binding = String::new(); let mut rev: u64 = 0;
+            let mut rk = String::new(); let mut at = now_ns;
+            let mut i = 3;
+            while i + 1 < args.len() + 1 && i < args.len() {
+                match args[i].as_str() {
+                    "--op" if i + 1 < args.len() => { op = Some(args[i + 1].clone()); i += 2; }
+                    "--binding" if i + 1 < args.len() => { binding = args[i + 1].clone(); i += 2; }
+                    "--rev" if i + 1 < args.len() => { rev = args[i + 1].parse().map_err(|_| "rev number")?; i += 2; }
+                    "--rk" if i + 1 < args.len() => { rk = args[i + 1].clone(); i += 2; }
+                    "--at" if i + 1 < args.len() => { at = args[i + 1].parse().map_err(|_| "at number")?; i += 2; }
+                    _ => return Err(format!("bad flags near {}", args[i])),
+                }
+            }
+            let op = MlvOp::from_name(&op.ok_or("--op required")?).map_err(|e| e.to_string())?;
+            if !path.exists() {
+                GovRegistry::init(&path, at).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
+            }
+            let mut reg = GovRegistry::open(&path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
+            let prev = reg.head().map_err(|e| e.to_string())?;
+            let seq = reg.record_count();
+            let (from, to) = crate::kernel::gov::derive_edge(op, &binding, rev, &reg);
+            let rec = mkrec(seq, op, &binding, rev, from, to, &prev, &rk, at);
+            emit_outcome(reg.submit(rec, at), op.name().to_lowercase().as_str(), rev)
+        }
+        "registry-confirm" => {
+            let binding = args[2].clone();
+            let rev: u64 = args[3].parse().map_err(|_| "rev number")?;
+            let exp_in: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(2 * DEFAULT_SKEW_NS);
+            let mut reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
+            let prev = reg.head().map_err(|e| e.to_string())?;
+            let seq = reg.record_count();
+            let mut rec = mkrec(seq, MlvOp::RegistryConfirm, &binding, rev, None, None, &prev, "rk-confirm", now_ns);
+            let mut rcpt = std::collections::BTreeMap::new();
+            rcpt.insert("receipt_id".into(), format!("rcpt-{binding}-{rev}-{now_ns}"));
+            rcpt.insert("issued_at_ns".into(), now_ns.to_string());
+            rcpt.insert("expires_at_ns".into(), (now_ns + exp_in).to_string());
+            rcpt.insert("root".into(), domain_hash(DOMAIN_RECEIPT, binding.as_bytes()));
+            rec.registry_receipt = Some(rcpt);
+            emit_outcome(reg.submit(rec, now_ns), "receipt", rev)
+        }
+        "begin" | "activate-begin" => {
+            let binding = args[2].clone();
+            let rev: u64 = args[3].parse().map_err(|_| "rev number")?;
+            let mut reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
+            let prev = reg.head().map_err(|e| e.to_string())?;
+            let seq = reg.record_count();
+            let rec = mkrec(seq, MlvOp::ActivateBegin, &binding, rev, Some(MlvState::Decided), Some(MlvState::Activating), &prev, "rk-begin", now_ns);
+            emit_outcome(reg.submit(rec, now_ns), "begin", rev)
+        }
+        "commit" | "activate-commit" => {
+            let binding = args[2].clone();
+            let rev: u64 = args[3].parse().map_err(|_| "rev number")?;
+            let mut reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
+            let prev = reg.head().map_err(|e| e.to_string())?;
+            let seq = reg.record_count();
+            let (from, to) = crate::kernel::gov::derive_edge(MlvOp::ActivateCommit, &binding, rev, &reg);
+            let rec = mkrec(seq, MlvOp::ActivateCommit, &binding, rev, from, to, &prev, "rk-commit", now_ns);
+            emit_outcome(reg.submit(rec, now_ns), "commit", rev)
+        }
+        "abandon" => {
+            let binding = args[2].clone();
+            let rev: u64 = args[3].parse().map_err(|_| "rev number")?;
+            let mut reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
+            let prev = reg.head().map_err(|e| e.to_string())?;
+            let seq = reg.record_count();
+            let rec = mkrec(seq, MlvOp::Abandon, &binding, rev, Some(MlvState::Activating), Some(MlvState::Decided), &prev, "rk-abandon", now_ns);
+            emit_outcome(reg.submit(rec, now_ns), "abandon", rev)
+        }
+        "revoke" | "terminal" | "quarantine" | "investigate" | "repair" | "grant" | "decide" | "decision" => {
+            let op = op_of(if verb == "decide" { "decision" } else { verb })?;
+            let binding = args[2].clone();
+            let rev: u64 = args[3].parse().map_err(|_| "rev number")?;
+            let mut reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
+            let prev = reg.head().map_err(|e| e.to_string())?;
+            let seq = reg.record_count();
+            let (from, to) = crate::kernel::gov::derive_edge(op, &binding, rev, &reg);
+            let rec = mkrec(seq, op, &binding, rev, from, to, &prev, &format!("rk-{verb}"), now_ns);
+            emit_outcome(reg.submit(rec, now_ns), if verb == "decide" { "decision" } else { verb }, rev)
+        }
+        "verify" => {
+            let reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
+            let head = reg.head().map_err(|e| e.to_string())?;
+            println!("OK ledger head={head}");
+            Ok(0)
+        }
+        "status" => {
+            let binding = args[2].clone();
+            let reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
+            match reg.state_of(&binding) {
+                Some((rev, st)) => {
+                    println!("binding={} current_rev={} state={} stop_gen={}", binding, rev, st.name(), reg.stop_gen(&binding));
+                    Ok(0)
+                }
+                None => { eprintln!("binding not found: {binding}"); Ok(1) }
+            }
+        }
+        _ => Err(format!("unknown mlv verb: {verb}")),
+    }
+}
+
 /// `ductile kernel-binding <ledger> propose <binding_id> <revision> <actor>`
 /// `ductile kernel-binding <ledger> advance <binding_id> <revision> <to_state> <actor>`
 /// `ductile kernel-binding <ledger> status <binding_id>`
