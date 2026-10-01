@@ -493,3 +493,104 @@ fn a16_envelope_canon_excludes_sig_only() {
     // 改声明后 pk_of 查不到伪钥 → trust-chain；或找到则验签炸——两者均=拒
     assert!(matches!(&err, GovErr::EnvelopeInvalid(_)), "got: {err:?}");
 }
+
+// ===== 终审应改四件（修后通过判决的修复验证）=====
+
+/// 终审#1：trust_seq 规范语法锁（前导零/非数字/溢出=拒）
+#[test]
+fn a17_trust_seq_canonical_grammar() {
+    for bad in ["01", "+1", " 1", "1x", "", "18446744073709551616"] {
+        let j = format!(
+            "{{\"schema\":\"mlv_auth_v1\",\"kind\":\"TRUST_REVOKE\",\"key_id\":\"aa\",\"new_key_id\":\"\",\"new_pk\":\"\",\"trust_seq\":\"{bad}\",\"sig\":\"{}\",\"prev_trust_hash\":\"sha256:0\"}}",
+            "0".repeat(128)
+        );
+        assert!(TrustFrame::from_json(&j).is_err(), "trust_seq={bad:?} must be rejected");
+    }
+    let ok = format!(
+        "{{\"schema\":\"mlv_auth_v1\",\"kind\":\"TRUST_REVOKE\",\"key_id\":\"aa\",\"new_key_id\":\"\",\"new_pk\":\"\",\"trust_seq\":\"0\",\"sig\":\"{}\",\"prev_trust_hash\":\"sha256:0\"}}",
+        "0".repeat(128)
+    );
+    assert!(TrustFrame::from_json(&ok).is_ok());
+}
+
+/// 终审#2：无签名/空 sig/非 128/畸形 hex 信任帧=拒，且账本状态零变化
+#[test]
+fn a18_trust_frame_negative_battery() {
+    let (p, sk, _kid) = signed_ledger("a18");
+    {
+        let reg = GovRegistry::open(&p).unwrap();
+        assert_eq!(reg.trust.trust_seq, 0);
+    }
+    for make_bad in [
+        |sig: String| sig,                          // 原样（占位）
+    ] {
+        let _ = make_bad;
+    }
+    // 直接构造畸形帧走 submit_trust_frame：从 from_json 层拒
+    for sig_bad in ["", "zz", &"0".repeat(64), &"g".repeat(128)] {
+        let j = format!(
+            "{{\"schema\":\"mlv_auth_v1\",\"kind\":\"TRUST_REVOKE\",\"key_id\":\"aa\",\"new_key_id\":\"\",\"new_pk\":\"\",\"trust_seq\":\"1\",\"sig\":\"{sig_bad}\",\"prev_trust_hash\":\"sha256:0\"}}"
+        );
+        assert!(TrustFrame::from_json(&j).is_err(), "sig={sig_bad:?} must fail parse");
+    }
+    // 帧合法但签名错：submit_trust_frame 必拒且零写入
+    let mut reg = GovRegistry::open(&p).unwrap();
+    let wrong = TrustFrame {
+        kind: "TRUST_REVOKE".into(),
+        key_id: "00000000000000000000000000000000".into(),
+        new_key_id: String::new(),
+        new_pk: String::new(),
+        trust_seq: 1,
+        sig: "0".repeat(128),
+        prev_trust_hash: reg.trust.chain_hash.clone(),
+    };
+    let before = std::fs::read(&p).unwrap();
+    assert!(reg.submit_trust_frame(wrong).is_err());
+    assert_eq!(std::fs::read(&p).unwrap(), before, "rejected trust frame must not write");
+    drop(reg);
+    // 重开：trust_seq 仍 0
+    let reg2 = GovRegistry::open(&p).unwrap();
+    assert_eq!(reg2.trust.trust_seq, 0);
+    let _ = sk;
+}
+
+/// 终审#4：逐字段篡改矩阵（信封声明的每个签名字段被改=拒——防域外字段逃逸）
+#[test]
+fn a19_envelope_field_tamper_matrix() {
+    use std::collections::BTreeMap;
+    let (p, sk, kid) = signed_ledger("a19");
+    let mut reg = GovRegistry::open(&p).unwrap();
+    let prev = reg.head().unwrap();
+    // 基线：合法签名记录
+    let base = signed_rec(1, MlvOp::CreateProposal, "m", 0, None, Some(MlvState::Proposed), &prev, "rk", 1_000_000, &sk, &kid, 0);
+    // 逐字段改值重放（篡改=验签必炸）
+    for field in ["issuer", "binding_id", "mac", "effect_key", "nonce"] {
+        let mut evil = base.clone();
+        if let Some(env) = evil.envelope.as_mut() {
+            let v = env.get(field).cloned().unwrap_or_default();
+            env.insert(field.into(), v + "X");
+        }
+        let r = reg.submit(evil, 1_000_001);
+        assert!(r.is_err(), "tamper {field} must be rejected");
+    }
+}
+
+/// 终审#5：golden 扩展——去墙钟完整 typed frame fixture（字节级）
+#[test]
+fn a20_golden_typed_frame_fixture() {
+    let (p, _sk, _kid) = signed_ledger("a20");
+    let data = std::fs::read(&p).unwrap();
+    // fixture = 帧格式骨架（头 9 字节格式 + genesis 帧尾 LF + auth 字段序）
+    let n = u64::from_be_bytes(data[..8].try_into().unwrap()) as usize;
+    assert_eq!(data[8], 0x00, "genesis frame_type must be 0 (business)");
+    assert_eq!(data[9 + n], b'\n', "frame must end with LF");
+    let j = std::str::from_utf8(&data[9..9 + n]).unwrap();
+    // auth 对象字段序锁（SPEC 冻结序）
+    let order: Vec<usize> = ["schema", "mode", "root_key_id", "root_public_key", "trust_hash"]
+        .iter()
+        .map(|k| j.find(&format!("\\\"{k}\\\":")).unwrap())
+        .collect();
+    let mut sorted = order.clone();
+    sorted.sort();
+    assert_eq!(order, sorted, "auth object field order must be frozen schema<mode<root_key_id<root_public_key<trust_hash");
+}

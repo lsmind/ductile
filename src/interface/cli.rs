@@ -406,16 +406,46 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
     // --signing-key 全动词扫描（ed25519 规格 §三.7/§六.3）
+    // 终审#3：统一双形式（--signing-key PATH / --signing-key=PATH）、`--` 终止、重复=硬错（不静默取后者）
     let signing_key_path: Option<std::path::PathBuf> = {
-        let mut p = None;
+        let mut p: Option<std::path::PathBuf> = None;
+        let mut seen = false;
         let mut i = 2;
+        let mut terminated = false;
         while i < args.len() {
-            if args[i] == "--signing-key" && i + 1 < args.len() {
-                p = Some(std::path::PathBuf::from(&args[i + 1]));
-                i += 2;
-            } else {
-                i += 1;
+            let a = &args[i];
+            if !terminated {
+                if a == "--" {
+                    terminated = true;
+                    i += 1;
+                    continue;
+                }
+                if a == "--signing-key" && i + 1 < args.len() {
+                    if seen {
+                        eprintln!("ERR E422 duplicate --signing-key");
+                        std::process::exit(1);
+                    }
+                    p = Some(std::path::PathBuf::from(&args[i + 1]));
+                    seen = true;
+                    i += 2;
+                    continue;
+                }
+                if let Some(v) = a.strip_prefix("--signing-key=") {
+                    if seen {
+                        eprintln!("ERR E422 duplicate --signing-key");
+                        std::process::exit(1);
+                    }
+                    if v.is_empty() {
+                        eprintln!("ERR E422 --signing-key requires a value");
+                        std::process::exit(1);
+                    }
+                    p = Some(std::path::PathBuf::from(v));
+                    seen = true;
+                    i += 1;
+                    continue;
+                }
             }
+            i += 1;
         }
         p
     };

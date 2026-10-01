@@ -266,8 +266,21 @@ impl TrustFrame {
             key_id: m.get("key_id").cloned().ok_or("key_id missing")?,
             new_key_id: m.get("new_key_id").cloned().unwrap_or_default(),
             new_pk: m.get("new_pk").cloned().unwrap_or_default(),
-            trust_seq: m.get("trust_seq").and_then(|v| v.parse().ok()).ok_or("trust_seq must be number")?,
-            sig: m.get("sig").cloned().ok_or("sig missing")?,
+            // trust_seq 规范语法锁死：0|[1-9][0-9]*（无前导零/无符号/无空白），超界=拒（终审#1）
+            trust_seq: m
+                .get("trust_seq")
+                .and_then(|v| {
+                    let ok = !v.is_empty()
+                        && v.bytes().all(|b| b.is_ascii_digit())
+                        && (v.len() == 1 || !v.starts_with('0'));
+                    if ok { v.parse::<u64>().ok() } else { None }
+                })
+                .ok_or("trust_seq must be canonical decimal")?,
+            sig: {
+                let s = m.get("sig").cloned().ok_or("sig missing")?;
+                let ok = s.len() == 128 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+                if ok { s } else { return Err("sig must be 128 lowercase hex".into()) }
+            },
             prev_trust_hash: m.get("prev_trust_hash").cloned().ok_or("prev_trust_hash missing")?,
         })
     }
@@ -451,10 +464,19 @@ pub fn verify_business_sig(
         .ok_or_else(|| format!("{DETAIL_SIG_INVALID}: envelope missing sig_key_id"))?;
     let pk = state_at_position.pk_of(sig_key_id)
         .ok_or_else(|| format!("{DETAIL_TRUST_CHAIN}: signing key not enrolled: {sig_key_id}"))?;
-    // sig_trust_seq 声明（若在）：不得高于验证时点 trust_seq
-    if let Some(declared) = env.get("sig_trust_seq").and_then(|v| v.parse::<u64>().ok()) {
-        if declared > state_at_position.trust_seq {
-            return Err(format!("{DETAIL_TRUST_CHAIN}: sig_trust_seq {declared} > position trust_seq {}", state_at_position.trust_seq));
+    // sig_trust_seq 声明（若在）：规范十进制语法（终审#1）且不得高于验证时点 trust_seq；
+    // 声明了但语法非法=拒（不是静默跳过——防畸形声明混入）
+    if let Some(declared_raw) = env.get("sig_trust_seq") {
+        let canon = !declared_raw.is_empty()
+            && declared_raw.bytes().all(|b| b.is_ascii_digit())
+            && (declared_raw.len() == 1 || !declared_raw.starts_with('0'));
+        let declared = if canon { declared_raw.parse::<u64>().ok() } else { None };
+        match declared {
+            Some(d) if d <= state_at_position.trust_seq => {}
+            _ => return Err(format!(
+                "{DETAIL_TRUST_CHAIN}: sig_trust_seq invalid or ahead: {declared_raw} vs position trust_seq {}",
+                state_at_position.trust_seq
+            )),
         }
     }
     let pos_seq = state_at_position.trust_seq;
