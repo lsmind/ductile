@@ -260,6 +260,17 @@ impl LedgerRecord {
         f
     }
 
+    /// typed 帧 = u64be(N) ‖ 0x00 ‖ J ‖ 0x0A（ed25519 账本业务记录）。
+    pub fn frame_typed(&self) -> Vec<u8> {
+        let mut f = self.frame();
+        let mut out = Vec::with_capacity(f.len() + 1);
+        out.extend_from_slice(&f[..8]);
+        out.push(0x00);
+        out.extend_from_slice(&f[8..]);
+        f.clear();
+        out
+    }
+
     pub fn to_line(&self) -> String {
         String::from_utf8(self.frame()).unwrap()
     }
@@ -278,7 +289,7 @@ impl LedgerRecord {
 
 // 手写 codec：转义 + 微解析器（封闭类型：string/u64/null/扁平 string map）
 
-fn json_esc(s: &str) -> String {
+pub fn json_esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
@@ -445,7 +456,7 @@ fn parse_object(b: &[char], i: &mut usize, depth: u32) -> Result<BTreeMap<String
     }
 }
 
-fn parse_flat_object(b: &[char], i: &mut usize) -> Result<BTreeMap<String, String>, String> {
+pub fn parse_flat_object(b: &[char], i: &mut usize) -> Result<BTreeMap<String, String>, String> {
     let mut m = BTreeMap::new();
     if *i >= b.len() || b[*i] != '{' {
         return Err("expected {".into());
@@ -809,6 +820,13 @@ const LOCK_UN: i32 = 8;
 
 // ── 账本（init/append/replay/verify；原子提交）────────────────────
 
+/// 账本帧格式（ed25519 规格 §四.1.2：Typed=frame_type 字节在位）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FrameKind {
+    Legacy,
+    Typed,
+}
+
 #[derive(Debug)]
 pub struct MlvLedger {
     pub path: PathBuf,
@@ -830,6 +848,15 @@ impl MlvLedger {
 
     /// 显式 init：唯一可建账本的入口；LEDGER_INIT 首行；re-init 必拒。
     pub fn init(path: &Path, accepted_at_ns: u64) -> Result<(Self, String), String> {
+        Self::init_inner(path, accepted_at_ns, FrameKind::Legacy, None)
+    }
+
+    /// ed25519 模式 init（typed 帧格式；genesis payload 由调用方提供=auth 对象）。
+    pub fn init_typed(path: &Path, accepted_at_ns: u64, genesis_payload: &str) -> Result<(Self, String), String> {
+        Self::init_inner(path, accepted_at_ns, FrameKind::Typed, Some(genesis_payload))
+    }
+
+    fn init_inner(path: &Path, accepted_at_ns: u64, kind: FrameKind, custom_payload: Option<&str>) -> Result<(Self, String), String> {
         if path.exists() {
             return Err("ledger already initialized (re-init rejected)".into());
         }
@@ -846,11 +873,11 @@ impl MlvLedger {
             key_id: "genesis".into(), root_commitment: GENESIS_ROOT.into(),
             effect_key: INIT_EFFECT_KEY.into(),
             idempotency_scope: None, caller_id: None, request_key: None,
-            request_digest: domain_hash(DOMAIN_RECORD, format!("init|{accepted_at_ns}").as_bytes()),
+            request_digest: domain_hash(DOMAIN_RECORD, custom_payload.map(|s| s.to_string()).unwrap_or_else(|| format!("init|{accepted_at_ns}")).as_bytes()),
             binding_id: None, revision: None, from: None, to: None,
             before_record_hash: ZERO_HASH.into(), accepted_at_ns,
             nonce: None, envelope_digest: None, envelope: None,
-            payload: format!("init|{accepted_at_ns}"),
+            payload: custom_payload.map(|s| s.to_string()).unwrap_or_else(|| format!("init|{accepted_at_ns}")),
             registry_receipt: None,
             result: [("code".to_string(), "OK".to_string())].into_iter().collect(),
             record_hash: String::new(),
@@ -859,13 +886,70 @@ impl MlvLedger {
         let mut led = MlvLedger {
             path: path.to_path_buf(), lock_path, lock: Some(lock), tmp_counter: 0,
         };
-        led.commit_frame(&rec)?;
+        let _ = &mut led;
+        match kind {
+            FrameKind::Legacy => led.commit_frame(&rec)?,
+            FrameKind::Typed => led.commit_bytes(&rec.frame_typed())?,
+        }
         Ok((led, rec.record_hash.clone()))
+    }
+
+    /// 直接追加原始帧字节（typed 帧构造方：record_frame_typed / TrustFrame::to_frame_bytes）。
+    pub fn append_frame_raw(&mut self, frame: &[u8]) -> Result<(), String> {
+        let old = std::fs::read(&self.path).unwrap_or_default();
+        let mut new = old;
+        new.extend_from_slice(frame);
+        self.commit_bytes(&new)
+    }
+
+    /// 原子写全量字节（八步固定序复用）。
+    fn commit_bytes(&mut self, new: &[u8]) -> Result<(), String> {
+        self.tmp_counter += 1;
+        let tmp = self.path.with_file_name(format!(
+            "{}.tmp.{}.{}",
+            self.path.file_name().unwrap().to_string_lossy(),
+            std::process::id(),
+            self.tmp_counter
+        ));
+        #[cfg(feature = "mlv-failpoint")]
+        fn failpoint(tag: &str) {
+            if std::env::var("DUCTILE_MLV_FAILPOINT").as_deref() == Ok(tag) {
+                std::process::abort();
+            }
+        }
+        #[cfg(not(feature = "mlv-failpoint"))]
+        fn failpoint(_tag: &str) {}
+        let mut f = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp)
+            .map_err(|e| format!("create tmp: {e}"))?;
+        f.write_all(new).map_err(|e| format!("write tmp: {e}"))?;
+        failpoint("after_write");
+        f.sync_all().map_err(|e| format!("sync tmp: {e}"))?;
+        failpoint("after_sync");
+        drop(f);
+        failpoint("before_rename");
+        std::fs::rename(&tmp, &self.path).map_err(|e| format!("rename: {e}"))?;
+        failpoint("after_rename");
+        if let Some(parent) = self.path.parent() {
+            if let Ok(d) = std::fs::File::open(parent) {
+                let _ = d.sync_all();
+            }
+        }
+        failpoint("before_dirsync");
+        Ok(())
     }
 
     pub fn records(&self) -> Result<Vec<LedgerRecord>, String> {
         let data = std::fs::read(&self.path).map_err(|e| format!("read ledger: {e}"))?;
-        decode_frames(&data)
+        Ok(decode_frames_typed_aware(&data)?.0)
+    }
+
+    /// 业务记录 + 信任帧原始 JSON（typed 账本；legacy 第二项恒空）。
+    pub fn records_with_trust(&self) -> Result<(Vec<LedgerRecord>, Vec<String>), String> {
+        let data = std::fs::read(&self.path).map_err(|e| format!("read ledger: {e}"))?;
+        decode_frames_typed_aware(&data)
     }
 
     /// 原子追加（返回 record_hash）。
@@ -873,6 +957,14 @@ impl MlvLedger {
         let mut rec = rec;
         rec.record_hash = rec.compute_hash();
         self.commit_frame(&rec)?;
+        Ok(rec.record_hash.clone())
+    }
+
+    /// typed 帧原子追加（ed25519 账本业务记录；frame_type=0）。
+    pub fn append_typed(&mut self, rec: LedgerRecord) -> Result<String, String> {
+        let mut rec = rec;
+        rec.record_hash = rec.compute_hash();
+        self.append_frame_raw(&rec.frame_typed())?;
         Ok(rec.record_hash.clone())
     }
 
@@ -920,7 +1012,7 @@ impl MlvLedger {
 
     /// 当前 head（空账本=ZERO_HASH；不验链——验链走 replay）。
     pub fn head(&self) -> Result<String, String> {
-        let recs = self.records()?;
+        let (recs, _trusts) = self.records_with_trust()?;
         Ok(recs.last().map(|r| r.record_hash.clone()).unwrap_or_else(|| ZERO_HASH.to_string()))
     }
 }
@@ -928,6 +1020,51 @@ impl MlvLedger {
 fn lock_path_of(path: &Path) -> PathBuf {
     let name = path.file_name().unwrap().to_string_lossy().to_string();
     path.with_file_name(format!("{name}.lock"))
+}
+
+/// typed-aware 全量解码：返回 (业务记录, 信任帧原始 JSON)。
+/// 帧格式由首帧头字节裁定（0x00/0x01=typed：u64be(N)‖ft(1B)‖J‖LF；'{'=legacy），
+/// 全账本不得混用两种格式。信任帧 JSON 不在此解析（mlv_auth::TrustFrame::from_json 负责）。
+pub fn decode_frames_typed_aware(data: &[u8]) -> Result<(Vec<LedgerRecord>, Vec<String>), String> {
+    let mut recs = Vec::new();
+    let mut trusts = Vec::new();
+    let mut i = 0usize;
+    let mut typed: Option<bool> = None;
+    while i < data.len() {
+        if data.len() - i < 9 {
+            return Err("truncated frame header".into());
+        }
+        let n64 = u64::from_be_bytes(data[i..i + 8].try_into().unwrap());
+        let n = usize::try_from(n64).map_err(|_| "frame length overflow")?;
+        let head = data[i + 8];
+        let (is_typed, ft) = match head {
+            0x00 | 0x01 => (true, head),
+            b'{' => (false, 0u8),
+            _ => return Err("bad frame head (expected frame_type or '{')".into()),
+        };
+        match typed {
+            None => typed = Some(is_typed),
+            Some(prev) if prev != is_typed => {
+                return Err("frame format drift: typed/legacy mixed in one ledger".into());
+            }
+            _ => {}
+        }
+        let hdr = if is_typed { 9 } else { 8 };
+        let end = i.checked_add(hdr).and_then(|v| v.checked_add(n)).and_then(|v| v.checked_add(1))
+            .ok_or("frame boundary overflow")?;
+        if data.len() < end || data[end - 1] != 0x0A {
+            return Err("bad frame boundary".into());
+        }
+        let jstart = i + hdr;
+        let j = std::str::from_utf8(&data[jstart..jstart + n]).map_err(|e| e.to_string())?;
+        if is_typed && ft == 0x01 {
+            trusts.push(j.to_string());
+        } else {
+            recs.push(parse_record_json(j)?);
+        }
+        i = end;
+    }
+    Ok((recs, trusts))
 }
 
 pub fn decode_frames(data: &[u8]) -> Result<Vec<LedgerRecord>, String> {

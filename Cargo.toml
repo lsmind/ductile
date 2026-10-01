@@ -26,6 +26,8 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 ratatui = "0.29"
 crossterm = "0.28"
 libc = "0.2"
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["fast", "std", "zeroize"] }
+getrandom = "0.4.3"
 
 [profile.release]
 opt-level = 3

@@ -146,5 +146,17 @@ Pipeline("mlv", "v0.24 治理超图 v3.1：双轨 34 步（旧断言冻结+治�
     .desc("步23 f6 feature-off 生产面+可观察 race 栅栏（父持锁→观察阻塞→释放）")
     .needs(@fp-matrix)
 
+  .proc("auth-tests", run("cargo test --release --test mlv_auth_tests > /tmp/mlv_at.out 2>&1; if grep -q 'test result: ok' /tmp/mlv_at.out; then echo auth-16-green; else echo BAD-auth-tests; tail -30 /tmp/mlv_at.out; exit 1; fi"))
+    .desc("步24 ed25519 验收四件套（16 测试：原语/密钥文件/字节格式/轮换吊销迁移）")
+    .needs(@fp-race)
+
+  .proc("auth-golden", run("cp tests/golden/mlv_auth_v1.txt /tmp/golden_before.txt; bash scripts/gen_auth_golden.sh > /dev/null 2>&1; if diff -q /tmp/golden_before.txt tests/golden/mlv_auth_v1.txt > /dev/null; then echo golden-stable; else echo BAD-golden-drift; diff /tmp/golden_before.txt tests/golden/mlv_auth_v1.txt; exit 1; fi"))
+    .desc("步25 ed25519 golden 向量门（seed→root_key_id/H0 漂移即失败）")
+    .needs(@auth-tests)
+
+  .proc("auth-fp", run("bash scripts/mlv_auth_failpoint.sh > /tmp/mlv_afp.out 2>&1; if grep -q 'AUTH-FAILPOINT-PASS' /tmp/mlv_afp.out; then echo auth-failpoint-ok; else echo BAD-auth-fp; cat /tmp/mlv_afp.out; exit 1; fi"))
+    .desc("步26 ed25519 信任帧 failpoint 矩阵（5 位点×ROTATE/REVOKE=10 格，崩溃后 verify 全过）")
+    .needs(@auth-golden)
+
   .proc("deliver", run("echo MLV-V31-SUITE-PASS"))
-    .deliver(@verify-old, @fp-race)
+    .deliver(@verify-old, @auth-fp)

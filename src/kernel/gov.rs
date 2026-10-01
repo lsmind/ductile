@@ -6,6 +6,10 @@
 //! replay 时钟=accepted_at_ns（确定性）；live 时钟=now（由调用方传入）。
 
 use crate::kernel::mlv::*;
+use crate::kernel::mlv_auth::{
+    parse_auth_payload, verify_business_sig, TrustFrame, TrustState, LedgerFrame,
+    decode_frames_mixed, DETAIL_SIG_INVALID,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -70,6 +74,10 @@ pub struct GovRegistry {
     pub ledger: MlvLedger,
     pub proj: Projections,
     record_count: u64,
+    /// ed25519 模式信任态（legacy=TrustState::legacy()；规格 §四.4）。
+    pub trust: TrustState,
+    /// 账本帧格式（true=typed：业务帧 frame_type=0 + 信任帧 1；false=legacy 裸 J）。
+    pub frames_typed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -82,13 +90,62 @@ pub enum ApplyOutcome {
 
 impl GovRegistry {
     /// open=取锁+验链+全量重放（投影=可丢弃缓存，每次重建）。
+    /// ed25519 模式：混合帧解码→genesis auth 建信任态→信任帧逐帧应用→
+    /// 业务记录按其位置的历史信任前缀验签（确定性，无 wall clock）。
     pub fn open(path: &Path) -> Result<Self, GovErr> {
         let ledger = MlvLedger::open(path).map_err(map_ledger_err)?;
-        let records = ledger.records().map_err(|e| GovErr::Internal(e))?;
+        let data = std::fs::read(path).map_err(|e| GovErr::Internal(format!("read: {e}")))?;
+        let (typed, frames) = decode_frames_mixed(&data)
+            .map_err(|e| GovErr::Internal(format!("decode: {e}")))?;
+        // 首帧必须是 genesis 业务记录
+        let genesis = match frames.first() {
+            Some(LedgerFrame::Record(r)) if r.op == MlvOp::LedgerInit => r.clone(),
+            _ => return Err(GovErr::Internal("first frame must be LEDGER_INIT record".into())),
+        };
+        // 模式判定（规格 §五.4）：genesis payload 解析出 auth 对象 → ed25519（typed 账本必须满足）
+        let trust = if typed {
+            let auth = parse_auth_payload(&genesis.payload)
+                .ok_or_else(|| GovErr::EnvelopeInvalid("trust-chain-invalid: typed ledger genesis missing auth object".into()))?;
+            TrustState::from_genesis_auth(&auth).map_err(GovErr::EnvelopeInvalid)?
+        } else {
+            // legacy 账本不得带 auth 对象（带=混装）
+            if parse_auth_payload(&genesis.payload).is_some() {
+                return Err(GovErr::EnvelopeInvalid("signature-invalid: auth object in legacy (untyped) ledger rejected".into()));
+            }
+            TrustState::legacy()
+        };
+        let mut records: Vec<LedgerRecord> = vec![genesis];
+        let mut trust = trust;
+        // 按账本位置交错：信任帧改信任态；业务记录按当前位置信任前缀验签
+        for f in &frames[1..] {
+            match f {
+                LedgerFrame::Record(r) => {
+                    // 混装拒绝：typed 业务记录必须带 sig；legacy 记录不得带 sig
+                    let has_sig = r.envelope.as_ref().map(|e| e.contains_key("sig")).unwrap_or(false);
+                    if typed && !has_sig {
+                        return Err(GovErr::EnvelopeInvalid("signature-invalid: typed ledger record missing sig".into()));
+                    }
+                    if !typed && has_sig {
+                        return Err(GovErr::EnvelopeInvalid("signature-invalid: legacy ledger record must not carry sig (mixed modes rejected)".into()));
+                    }
+                    if typed {
+                        let env = r.envelope.as_ref()
+                            .ok_or_else(|| GovErr::EnvelopeInvalid("signature-invalid: envelope-required".into()))?;
+                        verify_business_sig(env, &trust).map_err(GovErr::EnvelopeInvalid)?;
+                    }
+                    records.push(r.clone());
+                }
+                LedgerFrame::Trust(tf) => {
+                    if !typed {
+                        return Err(GovErr::Internal("trust frame in legacy ledger".into()));
+                    }
+                    trust.apply_trust_frame(tf).map_err(GovErr::EnvelopeInvalid)?;
+                }
+            }
+        }
         verify_chain(&records).map_err(|e| GovErr::Internal(format!("verify: {e}")))?;
-        let mut reg = GovRegistry { ledger, proj: Projections::default(), record_count: 1 };
+        let mut reg = GovRegistry { ledger, proj: Projections::default(), record_count: 1, trust, frames_typed: typed };
         for rec in &records[1..] {
-            // replay：同 apply 语义路径，时钟=accepted_at_ns
             reg.apply_record(rec, rec.accepted_at_ns, false)
                 .map_err(|e| GovErr::Internal(format!("replay@{}: {e:?}", rec.seq)))?;
         }
@@ -98,11 +155,51 @@ impl GovRegistry {
     /// 显式 init（账本不存在时）。
     pub fn init(path: &Path, at: u64) -> Result<Self, GovErr> {
         let (ledger, _) = MlvLedger::init(path, at).map_err(map_ledger_err)?;
-        Ok(GovRegistry { ledger, proj: Projections::default(), record_count: 1 })
+        Ok(GovRegistry { ledger, proj: Projections::default(), record_count: 1, trust: TrustState::legacy(), frames_typed: false })
+    }
+
+    /// ed25519 模式显式 init：genesis payload=auth 对象，帧格式=typed。
+    pub fn init_ed25519(path: &Path, at: u64, signing_key: &std::path::Path) -> Result<(Self, String), GovErr> {
+        use crate::kernel::mlv_auth::{auth_object_json, compute_h0, key_id_of, load_signing_key};
+        let (sk, root_key_id) = load_signing_key(signing_key).map_err(GovErr::Internal)?;
+        let pk_hex: String = sk.verifying_key().to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        let h0 = compute_h0(&root_key_id, &pk_hex);
+        let auth = auth_object_json(&root_key_id, &pk_hex, &h0);
+        // genesis LEDGER_INIT（typed 帧）：payload=auth 对象
+        let mut rec = crate::kernel::mlv::LedgerRecord {
+            schema: 1, seq: 0, op: MlvOp::LedgerInit,
+            key_id: "genesis".into(), root_commitment: GENESIS_ROOT.into(),
+            effect_key: INIT_EFFECT_KEY.into(),
+            idempotency_scope: None, caller_id: None, request_key: None,
+            request_digest: domain_hash(DOMAIN_RECORD, format!("init|{at}").as_bytes()),
+            binding_id: None, revision: None, from: None, to: None,
+            before_record_hash: ZERO_HASH.into(), accepted_at_ns: at,
+            nonce: None, envelope_digest: None, envelope: None,
+            payload: auth, registry_receipt: None,
+            result: [("code".to_string(), "OK".to_string())].into_iter().collect(),
+            record_hash: String::new(),
+        };
+        rec.record_hash = rec.compute_hash();
+        // typed 帧落盘（frame_type=0）：init_inner 直接以 auth payload 建 genesis
+        let (led, _) = MlvLedger::init_typed(path, at, &rec.payload).map_err(map_ledger_err)?;
+        let trust = TrustState::from_genesis_auth(&parse_auth_payload(&rec.payload).unwrap())
+            .map_err(GovErr::EnvelopeInvalid)?;
+        Ok((
+            GovRegistry { ledger: led, proj: Projections::default(), record_count: 1, trust, frames_typed: true },
+            rec.record_hash.clone(),
+        ))
     }
 
     pub fn head(&self) -> Result<String, GovErr> {
         self.ledger.head().map_err(|e| GovErr::Internal(e))
+    }
+
+    /// 信任帧提交（CLI rotate/revoke）：先全量校验（链衔接/签发钥/单调），
+    /// 通过后 typed 帧落盘；失败=零写入。信任帧不入业务 seq 计数。
+    pub fn submit_trust_frame(&mut self, tf: crate::kernel::mlv_auth::TrustFrame) -> Result<(), GovErr> {
+        self.trust.apply_trust_frame(&tf).map_err(GovErr::EnvelopeInvalid)?;
+        self.ledger.append_frame_raw(&tf.to_frame_bytes()).map_err(GovErr::Internal)?;
+        Ok(())
     }
 
     /// 提交请求（live：t=now 由调用方传）。
@@ -115,12 +212,22 @@ impl GovRegistry {
             }
             return Err(GovErr::IdempotencyConflict);
         }
-        // ② MAC（终验阻塞②：变更记录信封强制——在场必验改为缺席即拒；
-        //    LEDGER_INIT 走显式 init 不经此路径，天然豁免）
+        // ② 认证分流（ed25519 规格 §三.1）：typed 账本=Ed25519 验签（含钥活跃/吊销/信任前缀）；
+        //    legacy=旧 MAC 路径零改动
         let env = rec.envelope.as_ref().ok_or_else(|| GovErr::EnvelopeInvalid(
             "envelope-required: mutation records must carry a MAC envelope (only LEDGER_INIT is exempt)".into(),
         ))?;
-        verify_envelope_mac(env).map_err(GovErr::EnvelopeInvalid)?;
+        if self.frames_typed {
+            verify_business_sig(env, &self.trust).map_err(GovErr::EnvelopeInvalid)?;
+        } else {
+            // legacy 账本：sig 字段在场=模式混装，先拒（规格 §三.6）
+            if env.contains_key("sig") {
+                return Err(GovErr::EnvelopeInvalid(format!(
+                    "{DETAIL_SIG_INVALID}: legacy ledger record must not carry sig (mixed modes rejected)"
+                )));
+            }
+            verify_envelope_mac(env).map_err(GovErr::EnvelopeInvalid)?;
+        }
         // 声明↔记录字段绑定：信封声称的内容必须与记录本体一致（防信封挪用）
         let bind = |k: &str, v: &str| -> Result<(), GovErr> {
             if env.get(k).map(|s| s.as_str()) != Some(v) {
@@ -150,8 +257,12 @@ impl GovRegistry {
         }
         // ④ 语义
         self.check_semantics(&rec, now_ns)?;
-        // ⑤ 持久化（append 内部=原子提交）
-        let rh = self.ledger.append(rec.clone()).map_err(|e| GovErr::Internal(e))?;
+        // ⑤ 持久化（append 内部=原子提交；typed 账本走 frame_type=0 帧）
+        let rh = if self.frames_typed {
+            self.ledger.append_typed(rec.clone()).map_err(|e| GovErr::Internal(e))?
+        } else {
+            self.ledger.append(rec.clone()).map_err(|e| GovErr::Internal(e))?
+        };
         // 提交成功：投影更新（与 apply_record 同一路径——此处直接调 apply 内部）
         let mut committed = rec;
         committed.record_hash = rh.clone();

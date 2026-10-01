@@ -398,12 +398,33 @@ fn cmd_kernel_reproduce(args: &[String]) -> Result<i32, String> {
 fn cmd_mlv(args: &[String]) -> Result<i32, String> {
     use crate::kernel::gov::{ApplyOutcome, GovErr, GovRegistry};
     use crate::kernel::mlv::{effect_key, LedgerRecord, MlvOp, MlvState, DEFAULT_SKEW_NS, DOMAIN_RECORD, domain_hash, GENESIS_ROOT, DOMAIN_RECEIPT};
+    use crate::kernel::mlv_auth;
     let ledger_path = std::path::PathBuf::from(&args[0]);
     let verb = args[1].as_str();
     let now_ns = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
+    // --signing-key 全动词扫描（ed25519 规格 §三.7/§六.3）
+    let signing_key_path: Option<std::path::PathBuf> = {
+        let mut p = None;
+        let mut i = 2;
+        while i < args.len() {
+            if args[i] == "--signing-key" && i + 1 < args.len() {
+                p = Some(std::path::PathBuf::from(&args[i + 1]));
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        p
+    };
+    let load_signer = || -> Result<Option<(ed25519_dalek::SigningKey, String)>, String> {
+        match &signing_key_path {
+            Some(p) => mlv_auth::load_signing_key(p).map(Some),
+            None => Ok(None),
+        }
+    };
 
     fn emit_outcome(r: Result<ApplyOutcome, GovErr>, label: &str, rev: u64) -> Result<i32, String> {
         match r {
@@ -422,11 +443,17 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
         }
     }
 
-    fn mkrec(seq: u64, op: MlvOp, binding: &str, rev: u64, from: Option<MlvState>, to: Option<MlvState>, prev: &str, request_key: &str, at: u64, payload: &str) -> LedgerRecord {
+    fn mkrec(seq: u64, op: MlvOp, binding: &str, rev: u64, from: Option<MlvState>, to: Option<MlvState>, prev: &str, request_key: &str, at: u64, payload: &str, signer: Option<&(ed25519_dalek::SigningKey, String)>, trust_seq: Option<u64>) -> LedgerRecord {
         // f7 冻结：request_digest=D(record域, op|request_key|payload)——payload 入 digest 不入 effect_key
         let digest = domain_hash(DOMAIN_RECORD, format!("{op:?}|{request_key}|{payload}").as_bytes());
-        let env = crate::kernel::mlv::make_envelope(&op, binding, rev, request_key, &digest, at);
-        let mac = env.get("mac").cloned().unwrap_or_default();
+        let mut env = crate::kernel::mlv::make_envelope(&op, binding, rev, request_key, &digest, at);
+        let mut env_digest = env.get("mac").cloned().unwrap_or_default();
+        if let Some((sk, kid)) = signer {
+            // ed25519 模式：mac 置空串，信封签名（规格 §二.2）
+            env.insert("mac".into(), String::new());
+            env_digest = String::new();
+            mlv_auth::sign_envelope(&mut env, sk, kid, trust_seq).unwrap();
+        }
         LedgerRecord {
             schema: 1, seq, op,
             key_id: "genesis".into(), root_commitment: GENESIS_ROOT.into(),
@@ -436,7 +463,7 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
             request_digest: digest,
             binding_id: Some(binding.into()), revision: Some(rev),
             from, to, before_record_hash: prev.into(), accepted_at_ns: at,
-            nonce: Some(format!("nonce-{seq}-{at}")), envelope_digest: Some(mac), envelope: Some(env),
+            nonce: Some(format!("nonce-{seq}-{at}")), envelope_digest: Some(env_digest), envelope: Some(env),
             payload: if payload.is_empty() { format!("{op:?}|{binding}|{rev}") } else { payload.to_string() }, registry_receipt: None,
             result: [("code".into(), "OK".into())].into_iter().collect(),
             record_hash: String::new(),
@@ -449,12 +476,125 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
 
     match verb {
         "init" => {
-            match GovRegistry::init(&ledger_path, now_ns) {
-                Ok(reg) => {
-                    let h = reg.ledger.head().unwrap_or_default();
-                    println!("OK init v1 head={h}");
+            // --mode legacy（默认）| ed25519 --root-key <file>（规格 §六.2）
+            let mode_ed25519 = args.iter().any(|a| a == "--mode" )
+                && args.iter().position(|a| a == "--mode")
+                    .and_then(|i| args.get(i + 1))
+                    .map(|v| v == "ed25519").unwrap_or(false);
+            if mode_ed25519 {
+                let root_key = args.iter().position(|a| a == "--root-key")
+                    .and_then(|i| args.get(i + 1))
+                    .map(std::path::PathBuf::from)
+                    .ok_or("init --mode ed25519 requires --root-key <file>")?;
+                match GovRegistry::init_ed25519(&ledger_path, now_ns, &root_key) {
+                    Ok((reg, h)) => {
+                        let head = reg.ledger.head().unwrap_or_default();
+                        println!("OK init mode=ed25519 head={head} genesis={h} root={}", reg.trust.root_key_id);
+                        Ok(0)
+                    }
+                    Err(e) => { eprintln!("{} {}", e.code(), e.detail()); Ok(1) }
+                }
+            } else {
+                // legacy 默认；显式 legacy 账本不得出现 --signing-key（规格 §三.7）
+                if signing_key_path.is_some() {
+                    eprintln!("ERR E423-env signature-invalid: --signing-key not valid for legacy ledger");
+                    return Ok(1);
+                }
+                match GovRegistry::init(&ledger_path, now_ns) {
+                    Ok(reg) => {
+                        let h = reg.ledger.head().unwrap_or_default();
+                        println!("OK init v1 head={h}");
+                        Ok(0)
+                    }
+                    Err(e) => { eprintln!("{} {}", e.code(), e.detail()); Ok(1) }
+                }
+            }
+        }
+        "keygen" => {
+            // 独立动词（规格 §六.1）：ductile mlv <ledger> keygen [--out DIR]
+            let out_dir = args.iter().position(|a| a == "--out")
+                .and_then(|i| args.get(i + 1))
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| ledger_path.parent().map(|p| p.to_path_buf().join("mlv-keys"))
+                    .unwrap_or_else(|| std::path::PathBuf::from("mlv-keys")));
+            match mlv_auth::keygen_write(&out_dir) {
+                Ok((key_id, secret, public)) => {
+                    println!("OK keygen key_id={key_id}");
+                    println!("secret={}", secret.display());
+                    println!("public={}", public.display());
                     Ok(0)
                 }
+                Err(e) => { eprintln!("ERR keygen: {e}"); Ok(1) }
+            }
+        }
+        "rotate" => {
+            // TRUST_ROTATE（规格 §六.4）：rotate --new-key <file> --signing-key <file>
+            let new_key = args.iter().position(|a| a == "--new-key")
+                .and_then(|i| args.get(i + 1))
+                .map(std::path::PathBuf::from)
+                .ok_or("rotate requires --new-key <file>")?;
+            let signer = load_signer()?.ok_or("rotate requires --signing-key <file>")?;
+            let mut reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
+            if !reg.frames_typed {
+                eprintln!("ERR E423-env trust-chain-invalid: rotate on legacy ledger rejected");
+                return Ok(1);
+            }
+            let new_pk_hex = {
+                let b = std::fs::read(&new_key.with_extension("pub"))
+                    .or_else(|_| std::fs::read(&new_key))
+                    .map_err(|e| format!("read new-key: {e}"))?;
+                if b.len() == 32 {
+                    b.iter().map(|x| format!("{x:02x}")).collect::<String>()
+                } else if b.len() == 64 {
+                    String::from_utf8(b).map_err(|_| "new-key pub must be 32B raw or 64-hex")?
+                } else {
+                    return Err("new-key pub must be 32B raw or 64-hex".into());
+                }
+            };
+            let (new_key_id, _) = {
+                let mut pk = [0u8; 32];
+                for i in 0..32 {
+                    pk[i] = u8::from_str_radix(&new_pk_hex[i*2..i*2+2], 16).map_err(|_| "bad hex")?;
+                }
+                mlv_auth::key_id_of(&pk)
+            };
+            let mut tf = mlv_auth::TrustFrame {
+                kind: "TRUST_ROTATE".into(),
+                key_id: signer.1.clone(),
+                new_key_id, new_pk: new_pk_hex,
+                trust_seq: reg.trust.trust_seq + 1,
+                sig: String::new(),
+                prev_trust_hash: reg.trust.chain_hash.clone(),
+            };
+            mlv_auth::sign_trust_frame(&mut tf, &signer.0)?;
+            match reg.submit_trust_frame(tf) {
+                Ok(()) => { println!("OK rotate trust_seq={}", reg.trust.trust_seq); Ok(0) }
+                Err(e) => { eprintln!("{} {}", e.code(), e.detail()); Ok(1) }
+            }
+        }
+        "revoke" if args.iter().any(|a| a == "--key-id") => {
+            // TRUST_REVOKE（规格 §六.5）：revoke --key-id K --signing-key <file>
+            let target = args.iter().position(|a| a == "--key-id")
+                .and_then(|i| args.get(i + 1))
+                .cloned()
+                .ok_or("revoke --key-id requires value")?;
+            let signer = load_signer()?.ok_or("revoke requires --signing-key <file>")?;
+            let mut reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
+            if !reg.frames_typed {
+                eprintln!("ERR E423-env trust-chain-invalid: revoke on legacy ledger rejected");
+                return Ok(1);
+            }
+            let mut tf = mlv_auth::TrustFrame {
+                kind: "TRUST_REVOKE".into(),
+                key_id: target.clone(),
+                new_key_id: String::new(), new_pk: String::new(),
+                trust_seq: reg.trust.trust_seq + 1,
+                sig: String::new(),
+                prev_trust_hash: reg.trust.chain_hash.clone(),
+            };
+            mlv_auth::sign_trust_frame(&mut tf, &signer.0)?;
+            match reg.submit_trust_frame(tf) {
+                Ok(()) => { println!("OK revoke key_id={target} trust_seq={}", reg.trust.trust_seq); Ok(0) }
                 Err(e) => { eprintln!("{} {}", e.code(), e.detail()); Ok(1) }
             }
         }
@@ -465,7 +605,12 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
             let mut reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
             let prev = reg.head().map_err(|e| e.to_string())?;
             let seq = reg.record_count();
-            let rec = mkrec(seq, MlvOp::CreateProposal, &binding, rev, None, Some(MlvState::Proposed), &prev, &rk, now_ns, "");
+            let signer = load_signer()?;
+            if reg.frames_typed && signer.is_none() {
+                eprintln!("ERR E423-env signature-invalid: --signing-key required for ed25519 ledger");
+                return Ok(1);
+            }
+            let rec = mkrec(seq, MlvOp::CreateProposal, &binding, rev, None, Some(MlvState::Proposed), &prev, &rk, now_ns, "", signer.as_ref(), Some(reg.trust.trust_seq));
             emit_outcome(reg.submit(rec, now_ns), "create", rev)
         }
         "append" => {
@@ -497,7 +642,12 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
             let prev = reg.head().map_err(|e| e.to_string())?;
             let seq = reg.record_count();
             let (from, to) = crate::kernel::gov::derive_edge(op, &binding, rev, &reg);
-            let rec = mkrec(seq, op, &binding, rev, from, to, &prev, &rk, at, &payload);
+            let signer = load_signer()?;
+            if reg.frames_typed && signer.is_none() {
+                eprintln!("ERR E423-env signature-invalid: --signing-key required for ed25519 ledger");
+                return Ok(1);
+            }
+            let rec = mkrec(seq, op, &binding, rev, from, to, &prev, &rk, at, &payload, signer.as_ref(), Some(reg.trust.trust_seq));
             emit_outcome(reg.submit(rec, at), op.name().to_lowercase().as_str(), rev)
         }
         "registry-confirm" => {
@@ -507,7 +657,12 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
             let mut reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
             let prev = reg.head().map_err(|e| e.to_string())?;
             let seq = reg.record_count();
-            let mut rec = mkrec(seq, MlvOp::RegistryConfirm, &binding, rev, None, None, &prev, "rk-confirm", now_ns, "");
+            let signer = load_signer()?;
+            if reg.frames_typed && signer.is_none() {
+                eprintln!("ERR E423-env signature-invalid: --signing-key required for ed25519 ledger");
+                return Ok(1);
+            }
+            let mut rec = mkrec(seq, MlvOp::RegistryConfirm, &binding, rev, None, None, &prev, "rk-confirm", now_ns, "", signer.as_ref(), Some(reg.trust.trust_seq));
             let mut rcpt = std::collections::BTreeMap::new();
             rcpt.insert("receipt_id".into(), format!("rcpt-{binding}-{rev}-{now_ns}"));
             rcpt.insert("issued_at_ns".into(), now_ns.to_string());
@@ -522,7 +677,12 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
             let mut reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
             let prev = reg.head().map_err(|e| e.to_string())?;
             let seq = reg.record_count();
-            let rec = mkrec(seq, MlvOp::ActivateBegin, &binding, rev, Some(MlvState::Decided), Some(MlvState::Activating), &prev, "rk-begin", now_ns, "");
+            let signer = load_signer()?;
+            if reg.frames_typed && signer.is_none() {
+                eprintln!("ERR E423-env signature-invalid: --signing-key required for ed25519 ledger");
+                return Ok(1);
+            }
+            let rec = mkrec(seq, MlvOp::ActivateBegin, &binding, rev, Some(MlvState::Decided), Some(MlvState::Activating), &prev, "rk-begin", now_ns, "", signer.as_ref(), Some(reg.trust.trust_seq));
             emit_outcome(reg.submit(rec, now_ns), "begin", rev)
         }
         "commit" | "activate-commit" => {
@@ -532,7 +692,12 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
             let prev = reg.head().map_err(|e| e.to_string())?;
             let seq = reg.record_count();
             let (from, to) = crate::kernel::gov::derive_edge(MlvOp::ActivateCommit, &binding, rev, &reg);
-            let rec = mkrec(seq, MlvOp::ActivateCommit, &binding, rev, from, to, &prev, "rk-commit", now_ns, "");
+            let signer = load_signer()?;
+            if reg.frames_typed && signer.is_none() {
+                eprintln!("ERR E423-env signature-invalid: --signing-key required for ed25519 ledger");
+                return Ok(1);
+            }
+            let rec = mkrec(seq, MlvOp::ActivateCommit, &binding, rev, from, to, &prev, "rk-commit", now_ns, "", signer.as_ref(), Some(reg.trust.trust_seq));
             emit_outcome(reg.submit(rec, now_ns), "commit", rev)
         }
         "abandon" => {
@@ -541,7 +706,12 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
             let mut reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
             let prev = reg.head().map_err(|e| e.to_string())?;
             let seq = reg.record_count();
-            let rec = mkrec(seq, MlvOp::Abandon, &binding, rev, Some(MlvState::Activating), Some(MlvState::Decided), &prev, "rk-abandon", now_ns, "");
+            let signer = load_signer()?;
+            if reg.frames_typed && signer.is_none() {
+                eprintln!("ERR E423-env signature-invalid: --signing-key required for ed25519 ledger");
+                return Ok(1);
+            }
+            let rec = mkrec(seq, MlvOp::Abandon, &binding, rev, Some(MlvState::Activating), Some(MlvState::Decided), &prev, "rk-abandon", now_ns, "", signer.as_ref(), Some(reg.trust.trust_seq));
             emit_outcome(reg.submit(rec, now_ns), "abandon", rev)
         }
         "revoke" | "terminal" | "quarantine" | "investigate" | "repair" | "grant" | "decide" | "decision" => {
@@ -552,7 +722,12 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
             let prev = reg.head().map_err(|e| e.to_string())?;
             let seq = reg.record_count();
             let (from, to) = crate::kernel::gov::derive_edge(op, &binding, rev, &reg);
-            let rec = mkrec(seq, op, &binding, rev, from, to, &prev, &format!("rk-{verb}"), now_ns, "");
+            let signer = load_signer()?;
+            if reg.frames_typed && signer.is_none() {
+                eprintln!("ERR E423-env signature-invalid: --signing-key required for ed25519 ledger");
+                return Ok(1);
+            }
+            let rec = mkrec(seq, op, &binding, rev, from, to, &prev, &format!("rk-{verb}"), now_ns, "", signer.as_ref(), Some(reg.trust.trust_seq));
             emit_outcome(reg.submit(rec, now_ns), if verb == "decide" { "decision" } else { verb }, rev)
         }
         "verify" => {

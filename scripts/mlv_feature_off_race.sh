@@ -55,12 +55,45 @@ def on_flock(w):
     # flock 系统调用的内核等待点：locks_lock_inode_wait（不同内核版本亦见 flock_ 等）
     return "lock_inode" in w or "flock" in w
 
+def lock_inode_of(pid, lock_path):
+    """跨内核核验：被等待锁的文件标识——扫 /proc/<pid>/fd 的符号链接，
+    找到指向目标 .lock 文件路径的 fd，读回其 /proc/<pid>/fdinfo/<n> 或
+    用 os.stat 取 inode。返回 inode 号或 None。"""
+    import os
+    try:
+        real = os.path.realpath(lock_path)
+        for fd in os.listdir(f"/proc/{pid}/fd"):
+            try:
+                target = os.path.realpath(f"/proc/{pid}/fd/{fd}")
+                if target == real:
+                    return os.stat(f"/proc/{pid}/fd/{fd}").st_ino
+            except (FileNotFoundError, PermissionError, OSError):
+                continue
+    except (FileNotFoundError, PermissionError, OSError):
+        pass
+    return None
+
 deadline = time.time() + 15
 observed = False
+lock_path = ledger + ".lock"
+# 父进程自己持有的锁 fd 即权威 inode
+parent_ino = None
+import os as _os
+try:
+    parent_ino = _os.fstat(f.fileno()).st_ino
+except Exception:
+    pass
 while time.time() < deadline:
     wa, wb = wchan(a.pid), wchan(b.pid)
     if on_flock(wa) and on_flock(wb):
         observed = True        # 可观察的并发争用证据：两进程同时等同一把锁
+        # 锁标识核验：两子进程等待的必须是父进程持有的同一 inode
+        if parent_ino is not None:
+            ia, ib = lock_inode_of(a.pid, lock_path), lock_inode_of(b.pid, lock_path)
+            if ia != parent_ino or ib != parent_ino:
+                print(f"BAD-race-barrier: children blocked on wrong lock inode "
+                      f"(parent={parent_ino} a={ia} b={ib})")
+                sys.exit(1)
         break
     if a.poll() is not None and b.poll() is not None:
         break                  # 有进程已退出（异常路径，交由后续断言报红）

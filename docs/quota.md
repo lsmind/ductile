@@ -13,9 +13,12 @@
 
 ## 二、E406 ResourceQuota 三维
 
-- **内存**：maxrss 事后判定（rlimit 模式）
-- **PID/文件**：nofile + nproc
-- **输出体积**：上限硬拒
+- **内存**：maxrss（KiB，ru_maxrss 语义；rlimit 模式事后判定）
+- **PID/文件**：nofile+nproc（个数，rlimit 先置）
+- **输出体积**：bytes（累积计数，超限硬拒）
+
+测量时点：maxrss=进程退出后；nofile/nproc=执行前置；输出=写入时累积。
+继承范围：rlimit 经 fork 继承至全部子进程（递归覆盖）；maxrss 仅主进程（子进程核算待 PO0）。
 
 ## 三、script 传参校验（§6 wrapper 契约）
 

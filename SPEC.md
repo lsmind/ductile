@@ -179,7 +179,23 @@ Pipeline("name", "desc", cwd="...", env=["K=V", ...])
 | `verify` | 全量链校验（哈希链+重放） |
 | `status <b>` | 投影查询（current_rev/state/stop_gen） |
 
-语义要点：`ACTIVATE_COMMIT` 双径——ACTIVATING→ACTIVE 需有效回执，VERIFIED→ACTIVE 为修复链回径免回执；phase 唯一键 `(binding,rev,op,from)`=每条边每修订恰一次。错误面：`E422 illegal-edge` / `E423-env` / `E423-nonce-reuse` / `E425 idempotency-conflict` / `receipt-required` / `ledger-missing` / `ERR terminal`。安全边界见 docs/mlv-security.md（本地）。门禁管线 `./mlv.pipeline`（34 步：冻结断言+协议串+failpoint 矩阵+可观察 race 栅栏）。
+动词首选拼写：`begin`/`commit`/`decide`（`activate-begin`/`activate-commit`/`decision` 为兼容别名）。
+
+ed25519 模式（v0.24，冻结规格 docs/sonet_mlv_ed25519_spec.md v1.1，本地）：`init --mode legacy|ed25519 --root-key <f>`（默认 legacy）；`keygen [--out DIR]`（.secret 0600/.pub 0644/目录 0700 原子发布）；`rotate --new-key <f> --signing-key <f>`（TRUST_ROTATE 信任帧，version=trust_seq+1 单调）；`revoke --key-id K --signing-key <f>`（TRUST_REVOKE tombstone；按参数形状与业务 `revoke <b> <rev>` 分发）；业务动词 ed25519 账本必带 `--signing-key`（缺失/未入册/已吊销=E423-env 硬错）。信任帧=独立帧类型（u64be(N)‖frame_type(1B)‖J‖LF，0=业务/1=信任；legacy 帧无此字节天然拒）；信封 sig/sig_key_id/sig_trust_seq 住内层不进 23 字段表；mac 字段保留置空串。错误 detail 三分列：`signature-invalid`/`signature-key-revoked`/`trust-chain-invalid`（均 E423-env）。
+
+错误码表（触发条件｜可重试性）：
+
+| 错误码 | 触发条件 | 可重试 |
+|---|---|---|
+| `E422 illegal-edge` | 边表外转移/状态不匹配/伪造来源 | 否（换请求语义） |
+| `E423-env` | 信封字段篡改（MAC mismatch/声明与记录域不符） | 否 |
+| `E423-nonce-reuse` | nonce 重复 | 是（换 nonce 重构信封） |
+| `E425 idempotency-conflict` | 同 effect_key 异 request_digest | 否（新请求须新 key） |
+| `receipt-required` | ACTIVATING 路径 COMMIT 无有效回执 | 是（登记回执后重提） |
+| `ledger-missing` | 账本不存在（init 专属路径外） | 是（先 init） |
+| `ERR terminal` | 终态后复活尝试 | 否（新 rev 走 CREATE） |
+
+语义要点：`ACTIVATE_COMMIT` 双径——ACTIVATING→ACTIVE 需有效回执，VERIFIED→ACTIVE 为修复链回径免回执；phase 唯一键 `(binding,rev,op,from)`=每条边每修订恰一次。安全边界见 docs/mlv-security.md（本地）。门禁管线 `./mlv.pipeline`（37 步：冻结断言+协议串+failpoint 矩阵+race 栅栏+ed25519 四件套/golden/信任帧崩溃矩阵）。
 
 
 ### 2.2 检索与复用
