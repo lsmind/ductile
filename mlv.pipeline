@@ -133,5 +133,17 @@ Pipeline("mlv", "v0.24 治理超图 v3.1：双轨 25 步（旧断言冻结+新�
     .desc("步20 kill -9 半提交恢复（RECOVERED）")
     .needs(@concurrent)
 
+  .proc("fp-build", run("cd /home/beef/projects/ductile && if [ ! -x target/failpoint/release/ductile ] || [ src/kernel/gov.rs -nt target/failpoint/release/ductile ] || [ src/kernel/mlv.rs -nt target/failpoint/release/ductile ]; then cargo build --release --features mlv-failpoint --target-dir target/failpoint > /tmp/mlv_fpbuild.out 2>&1; fi; if [ -x target/failpoint/release/ductile ]; then echo fp-build-ok; else echo BAD-fp-build; tail -20 /tmp/mlv_fpbuild.out; exit 1; fi"))
+    .desc("步21 f6 failpoint 构建门（按需增量，生产 target/ 不动）")
+    .needs(@kill9)
+
+  .proc("fp-matrix", run("bash scripts/mlv_failpoint_matrix.sh > /tmp/mlv_fpm.out 2>&1; if grep -q 'F6-CRASH-MATRIX-PASS' /tmp/mlv_fpm.out; then echo failpoint-matrix-ok; else echo BAD-fp-matrix; cat /tmp/mlv_fpm.out; exit 1; fi"))
+    .desc("步22 f6 五点位 failpoint 矩阵（abort→老本/新本+verify）")
+    .needs(@fp-build)
+
+  .proc("fp-race", run("bash scripts/mlv_feature_off_race.sh > /tmp/mlv_fpr.out 2>&1; if grep -q 'F6-OFF-AND-RACE-PASS' /tmp/mlv_fpr.out; then echo feature-off-and-race-ok; else echo BAD-fp-race; cat /tmp/mlv_fpr.out; exit 1; fi"))
+    .desc("步23 f6 feature-off 生产面+可观察 race 栅栏（父持锁→观察阻塞→释放）")
+    .needs(@fp-matrix)
+
   .proc("deliver", run("echo MLV-V31-SUITE-PASS"))
-    .deliver(@verify-old, @kill9)
+    .deliver(@verify-old, @fp-race)

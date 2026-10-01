@@ -25,30 +25,69 @@ else
   FAIL=1
 fi
 
-# ── race barrier：fifo 闸门 ──
+# ── race barrier：父进程持锁，观察子进程真阻塞后释放 ──
+# 终验应改③：sleep 0.05 非同步栅栏（假绿风险）。改为可观察的阻塞-释放过程，
+# 全程单 Python 编排（无 fifo 字节分配不确定性）：
+# 持锁 → 起两子进程抢 create → 轮询 /proc/<pid>/wchan 直到都阻塞在 flock →
+# 释放 → 收割。观察不到阻塞（超时 15s）= 测试失败，不是跳过。
 L2="$DIR/race.jsonl"
 "$FP" mlv "$L2" init > /dev/null
-GATE="$DIR/gate"
-mkfifo "$GATE"
-# 双进程阻塞在 fifo 读上，主进程写一行同时放行
-"$FP" mlv "$L2" create b1 0 same-rk > "$DIR/a.out" 2>&1 &
-A=$!
-"$FP" mlv "$L2" create b1 0 same-rk > "$DIR/b.out" 2>&1 &
-B=$!
-# 稍等两进程到 gate？——CLI 不读 fifo；改为就绪文件信号：两进程后台起即近似同时
-sleep 0.05
-kill -0 $A 2>/dev/null || true
-wait $A; wait $B
+python3 - "$FP" "$L2" "$DIR" <<'PYEOF'
+import fcntl, subprocess, sys, time
+
+fp, ledger, dirp = sys.argv[1], sys.argv[2], sys.argv[3]
+lock = ledger + ".lock"
+f = open(lock, "a+")
+fcntl.flock(f.fileno(), fcntl.LOCK_EX)      # 父进程先持锁 → 子进程必然阻塞
+a = subprocess.Popen([fp, "mlv", ledger, "create", "b1", "0", "same-rk"],
+                     stdout=open(f"{dirp}/a.out", "w"), stderr=subprocess.STDOUT)
+b = subprocess.Popen([fp, "mlv", ledger, "create", "b1", "0", "same-rk"],
+                     stdout=open(f"{dirp}/b.out", "w"), stderr=subprocess.STDOUT)
+
+def wchan(pid):
+    try:
+        with open(f"/proc/{pid}/wchan") as fh:
+            return fh.read().strip()
+    except FileNotFoundError:
+        return "gone"
+
+def on_flock(w):
+    # flock 系统调用的内核等待点：locks_lock_inode_wait（不同内核版本亦见 flock_ 等）
+    return "lock_inode" in w or "flock" in w
+
+deadline = time.time() + 15
+observed = False
+while time.time() < deadline:
+    wa, wb = wchan(a.pid), wchan(b.pid)
+    if on_flock(wa) and on_flock(wb):
+        observed = True        # 可观察的并发争用证据：两进程同时等同一把锁
+        break
+    if a.poll() is not None and b.poll() is not None:
+        break                  # 有进程已退出（异常路径，交由后续断言报红）
+    time.sleep(0.02)
+
+if not observed:
+    print(f"BAD-race-barrier: never observed both children blocked on flock "
+          f"(wchan a={wchan(a.pid)} b={wchan(b.pid)} rc_a={a.poll()} rc_b={b.poll()})")
+    sys.exit(1)
+
+fcntl.flock(f.fileno(), fcntl.LOCK_UN)       # 释放 → 子进程竞争获锁
+a.wait(); b.wait()
+PYEOF
+PYRC=$?
+if [ "$PYRC" -ne 0 ]; then
+  echo "F6-FAIL (race barrier not observed)"
+  exit 1
+fi
 OKS=$(grep -c '^OK create' "$DIR/a.out" "$DIR/b.out" | awk -F: '{s+=$2} END {print s}')
 ACKS=$(grep -c '^ACK create' "$DIR/a.out" "$DIR/b.out" | awk -F: '{s+=$2} END {print s}')
 LINES=$(wc -l < "$L2")
 if "$FP" mlv "$L2" verify > /dev/null 2>&1; then V=ok; else V=broken; fi
 if [ "$LINES" -eq 2 ] && [ "$V" = ok ]; then
-  echo "OK-race-barrier (lines=$LINES verify=$V ok=$OKS ack=$ACKS)"
+  echo "OK-race-barrier (lines=$LINES verify=$V ok=$OKS ack=$ACKS barrier=observed-flock-block)"
 else
   echo "BAD-race-barrier lines=$LINES verify=$V"
   FAIL=1
 fi
-rm -f "$GATE"
 
 [ "$FAIL" = 0 ] && echo "F6-OFF-AND-RACE-PASS" || { echo "F6-FAIL"; exit 1; }

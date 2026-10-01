@@ -55,7 +55,10 @@ impl GovErr {
 pub struct Projections {
     pub states: BTreeMap<(String, u64), MlvState>,
     pub current: BTreeMap<String, u64>,
-    pub phase_ops: BTreeSet<(String, u64, &'static str)>, // (binding, rev, op)
+    /// (binding, rev, op, from)——终验阻塞②修复：键含源态。修复链回径
+    /// VERIFIED→ACTIVE 的二次 ACTIVATE_COMMIT（from=VERIFIED）不再与首次
+    /// （from=ACTIVATING）撞键；语义=每条边每修订恰一次。
+    pub phase_ops: BTreeSet<(String, u64, &'static str, Option<MlvState>)>,
     pub effect_index: BTreeMap<String, (String, BTreeMap<String, String>)>, // key → (request_digest, result)
     pub nonce_set: BTreeSet<String>,
     pub stop_gen: BTreeMap<String, u64>,
@@ -263,7 +266,7 @@ impl GovRegistry {
                 }
             }
         }
-        // phase_ops 唯一（除 RegistryConfirm 可多回执/Abandon 后重 begin）
+        // phase_ops 唯一（键含 from；RegistryConfirm 不入表可多回执；Abandon 后可重 begin）
         let opname: &'static str = match rec.op {
             MlvOp::Grant => "GRANT",
             MlvOp::Decision => "DECISION",
@@ -274,11 +277,11 @@ impl GovRegistry {
             _ => "",
         };
         if !opname.is_empty()
-            && self.proj.phase_ops.contains(&(binding.clone(), rev, opname))
+            && self.proj.phase_ops.contains(&(binding.clone(), rev, opname, rec.from))
             && rec.op != MlvOp::ActivateBegin // begin 在 abandon 后可重新提出
             && rec.op != MlvOp::Abandon
         {
-            return Err(GovErr::Internal(format!("phase op duplicate: {opname}")));
+            return Err(GovErr::Internal(format!("phase op duplicate: {opname} from={:?}", rec.from)));
         }
         // replay 模式下重算 result 比对（P8：result=审计冗余，重算比对）
         Ok(())
@@ -326,7 +329,7 @@ impl GovRegistry {
             _ => "",
         };
         if !opname.is_empty() {
-            self.proj.phase_ops.insert((binding.clone(), rev, opname));
+            self.proj.phase_ops.insert((binding.clone(), rev, opname, rec.from));
         }
         match rec.op {
             MlvOp::RegistryConfirm => {
@@ -609,8 +612,8 @@ mod tests {
             | MlvState::Terminal | MlvState::Quarantined | MlvState::Investigating | MlvState::Repairing => {
                 let h = reg.head().unwrap();
                 reg.submit(s(MlvOp::ActivateBegin, Some(MlvState::Decided), Some(MlvState::Activating), "r1", seq + 3, &h), 100).ok()?;
-                if target == MlvState::Activating { return Some(0); }
-                // receipt
+                // receipt（ACTIVATING 夹具即含——矩阵 (ACTIVATE_COMMIT, ACTIVATING) 格
+                // = 回执在场的正向对照；无回执拒绝路径由 t12 覆盖）
                 let h = reg.head().unwrap();
                 let mut rc = s(MlvOp::RegistryConfirm, None, None, "rc", seq + 4, &h);
                 rc.registry_receipt = Some({
@@ -620,6 +623,7 @@ mod tests {
                     m
                 });
                 reg.submit(rc, 100).ok()?;
+                if target == MlvState::Activating { return Some(0); }
                 let h = reg.head().unwrap();
                 reg.submit(s(MlvOp::ActivateCommit, Some(MlvState::Activating), Some(MlvState::Active), "r1", seq + 5, &h), 100).ok()?;
                 match target {
@@ -651,27 +655,33 @@ mod tests {
 
     #[test]
     fn f5_matrix() {
-        // 14 op × 可达 from-state 逐格断言：合法转移 or IllegalEdge（硬编码 oracle）
+        // 14 op 全集（mlv.rs MLV_OPS 同序）：LedgerInit, CreateProposal, Grant,
+        // Decision, ActivateBegin, ActivateCommit, RegistryConfirm, Abandon, Revoke,
+        // Quarantine, Investigate, Repair, Verify, Terminal。
+        // 排除映射：LedgerInit 不入矩阵——init 仅经显式 init 路径（提交路径上的
+        // LEDGER_INIT 在 check_semantics 直接 Internal "only via explicit init"），
+        // 无 from-state 维度，其行为由 MlvLedger::init/t01 专属测试覆盖。
+        // 覆盖格数 = 13 op × 11 state = 143。
         let ops = [
             MlvOp::CreateProposal, MlvOp::Grant, MlvOp::Decision, MlvOp::ActivateBegin,
             MlvOp::ActivateCommit, MlvOp::RegistryConfirm, MlvOp::Abandon, MlvOp::Revoke,
             MlvOp::Quarantine, MlvOp::Investigate, MlvOp::Repair, MlvOp::Verify,
+            MlvOp::Terminal,
         ];
         let states = [
             MlvState::Proposed, MlvState::Granted, MlvState::Decided, MlvState::Activating,
             MlvState::Active, MlvState::Quarantined, MlvState::Investigating, MlvState::Repairing,
             MlvState::Verified, MlvState::Revoked, MlvState::Terminal,
         ];
-        // oracle：op × state → Some(to) 合法 / None 拒（LedgerInit 不入——init 专属）
+        // 合法性 oracle：op × state → Some(to) 合法 / None 拒
         fn oracle(op: &MlvOp, from: &MlvState) -> Option<Option<MlvState>> {
             use MlvState::*;
             match (op, from) {
-                (MlvOp::CreateProposal, _) => None,                 // 既有 binding 非终态上新 CREATE=IllegalEdge（from=null 专属规则另测 t01）
                 (MlvOp::Grant, Proposed) => Some(Some(Granted)),
                 (MlvOp::Decision, Granted) => Some(Some(Decided)),
                 (MlvOp::ActivateBegin, Decided) => Some(Some(Activating)),
-                (MlvOp::ActivateCommit, Activating) => Some(Some(Active)), // 回执另测
-                (MlvOp::ActivateCommit, Verified) => Some(Some(Active)),   // 修复链回径免回执
+                (MlvOp::ActivateCommit, Activating) => Some(Some(Active)), // 回执在场（reach 夹具已登记）——回执缺失对照见 t12
+                (MlvOp::ActivateCommit, Verified) => Some(Some(Active)),   // 修复链回径免回执（f5_repair_loop_return_path 回归）
                 (MlvOp::Abandon, Activating) => Some(Some(Decided)),
                 (MlvOp::Revoke, s) if !s.is_terminal() => Some(Some(Revoked)),
                 (MlvOp::Terminal, s) if !s.is_terminal() => Some(Some(Terminal)),
@@ -679,8 +689,15 @@ mod tests {
                 (MlvOp::Investigate, Quarantined) => Some(Some(Investigating)),
                 (MlvOp::Repair, Investigating) => Some(Some(Repairing)),
                 (MlvOp::Verify, Repairing) => Some(Some(Verified)),
-                (MlvOp::RegistryConfirm, _) => Some(None),          // 无状态边（回执门禁另测）
                 _ => None,
+            }
+        }
+        // 拒绝格精确错误码 oracle：终验应改⑤——逐格断言稳定错误码，禁代表性抽样
+        fn expect_reject_code(op: &MlvOp, from: &MlvState) -> GovErr {
+            match (op, from) {
+                (MlvOp::Revoke, s) | (MlvOp::Terminal, s) if s.is_terminal() => GovErr::Terminal,
+                (MlvOp::RegistryConfirm, _) => GovErr::ReceiptRequired, // 探针无回执（有回执=合法，t12 正向对照）
+                _ => GovErr::IllegalEdge,
             }
         }
         let mut legal = 0usize;
@@ -696,27 +713,73 @@ mod tests {
                 let mut reg = GovRegistry::open(&p).unwrap();
                 let h = reg.head().unwrap();
                 let seq = reg.record_count();
+                let before = std::fs::read(&p).unwrap();
                 let expect = oracle(op, target_state);
                 // from 推导：state_edge/commit_target/动态源集
                 let (from, to) = crate::kernel::gov::derive_edge(op.clone(), "b1", 0, &reg);
-                let rec = {
-                    let mut r = mk_rec(seq, op.clone(), "b1", 0, from, to, &h, &format!("probe-{:?}-{:?}", target_state, op));
-                    // ACTIVATE_COMMIT from ACTIVATING 需回执：夹具已含（reach 路径有 receipt）
-                    r
-                };
+                let rec = mk_rec(seq, op.clone(), "b1", 0, from, to, &h, &format!("probe-{:?}-{:?}", target_state, op));
                 let outcome = reg.submit(rec, 100);
                 match (expect, &outcome) {
                     (Some(_), Ok(_)) => legal += 1,
-                    (None, Err(GovErr::IllegalEdge)) | (None, Err(GovErr::Terminal)) => rejected += 1,
-                    (Some(None), Err(GovErr::ReceiptRequired)) => rejected += 1, // RegistryConfirm 无回执
-                    (Some(Some(_)), Err(GovErr::ReceiptRequired)) => rejected += 1, // ACTIVATE_COMMIT from=ACTIVATING 无回执（回执门禁另测 t12/f5_reject_bytes）
-                    (Some(Some(_)), Err(GovErr::Internal(m))) if m.contains("phase op duplicate") => rejected += 1, // VERIFIED 夹具必经 commit——再 commit 撞 phase 唯一性（修复链回径已消费该 op）
+                    (None, Err(e)) => {
+                        // 逐格精确错误码 + 拒绝后账本字节不变（终验应改⑤）
+                        let want = expect_reject_code(op, target_state);
+                        assert_eq!(e, &want, "cell op={op:?} from={target_state:?} wrong reject code");
+                        let after = std::fs::read(&p).unwrap();
+                        assert_eq!(after, before, "ledger bytes changed after rejection: op={op:?} from={target_state:?}");
+                        rejected += 1;
+                    }
                     (a, b) => panic!("matrix cell op={op:?} from={target_state:?} oracle={a:?} got={b:?}"),
                 }
             }
         }
-        // 全 132 格都有明确归宿（无 panic 即证逐格断言）
-        assert!(legal + rejected >= 132);
+        // 143 格全归宿 + 分类计数钉死（合法 29 = 6 静态边 + REVOKE×9 + TERMINAL×9 +
+        // QUARANTINE×2 + INVESTIGATE/REPAIR/VERIFY×3；拒绝 114 = RegistryConfirm×11
+        // ReceiptRequired + 终态源×4 Terminal + IllegalEdge×99）
+        assert_eq!(legal, 29, "legal cell count drift");
+        assert_eq!(rejected, 114, "rejected cell count drift");
+        assert_eq!(legal + rejected, 143);
+    }
+
+    #[test]
+    fn f5_repair_loop_return_path() {
+        // 终验阻塞②回归：修复链全回路 ACTIVE→QUARANTINED→INVESTIGATING→
+        // REPAIRING→VERIFIED→ACTIVE 全程 rev=0；二次 ACTIVATE_COMMIT(from=VERIFIED)
+        // 必须合法（phase 唯一键含 from 后不再与首次 from=ACTIVATING 撞键）。
+        let d = tmp("f5rl"); let p = d.join("l.jsonl");
+        reach(&p, "b1", MlvState::Active).unwrap();
+        let mut reg = GovRegistry::open(&p).unwrap();
+        let mut next = reg.record_count(); // record_count = 下一个期望 seq（init 行 seq=0 起）
+        for (op, from, to) in [
+            (MlvOp::Quarantine, MlvState::Active, MlvState::Quarantined),
+            (MlvOp::Investigate, MlvState::Quarantined, MlvState::Investigating),
+            (MlvOp::Repair, MlvState::Investigating, MlvState::Repairing),
+            (MlvOp::Verify, MlvState::Repairing, MlvState::Verified),
+        ] {
+            let h = reg.head().unwrap();
+            let r = mk_rec(next, op, "b1", 0, Some(from), Some(to), &h, "rl");
+            assert!(reg.submit(r, 100).is_ok(), "repair-loop step {op:?} failed");
+            next += 1;
+        }
+        let h = reg.head().unwrap();
+        let c = mk_rec(next, MlvOp::ActivateCommit, "b1", 0, Some(MlvState::Verified), Some(MlvState::Active), &h, "rl");
+        match reg.submit(c, 100) {
+            Ok(ApplyOutcome::Committed { to, .. }) => assert_eq!(to, Some(MlvState::Active)),
+            other => panic!("repair-return commit rejected (phase-key bug regressed?): {other:?}"),
+        }
+        assert_eq!(reg.state_of("b1"), Some((0, MlvState::Active)));
+        // 落盘可重放：open=全量重放走同一语义路径（作用域收口防同进程 flock 重入）
+        drop(reg);
+        {
+            let reg2 = GovRegistry::open(&p).unwrap();
+            assert_eq!(reg2.state_of("b1"), Some((0, MlvState::Active)));
+        }
+        // 回径已消费：ACTIVE 上再施 ACTIVATE_COMMIT → IllegalEdge（状态先拒）
+        let mut reg3 = GovRegistry::open(&p).unwrap();
+        let h = reg3.head().unwrap();
+        let n3 = reg3.record_count();
+        let c2 = mk_rec(n3, MlvOp::ActivateCommit, "b1", 0, Some(MlvState::Verified), Some(MlvState::Active), &h, "rl2");
+        assert!(matches!(reg3.submit(c2, 100), Err(GovErr::IllegalEdge)));
     }
 
     #[test]

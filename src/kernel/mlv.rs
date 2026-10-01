@@ -1272,6 +1272,68 @@ mod tests {
     }
 
     #[test]
+    fn f4_escaped_key_order_differential() {
+        // 终验可留⑥：转义键序差分——转义后与规范键等价的键（"\u0073chema"=="schema"）
+        // 必须出现在规范位置，任何非规范位置（无论转义与否）一律拒。
+        // 构造：把内层某个非首位字段名转义改写（字段集与值不变、键序不变）——
+        // 若解析器对转义键放行（等价键回到 canonical 位）则 canonical 向量本身必须仍合法；
+        // 再把该转义键挪到非规范位置（与 schema 交换）→ 必拒。
+        let d = tmpdir("f4e");
+        let p = d.join("ledger.jsonl");
+        let (_led, _) = MlvLedger::init(&p, 7).unwrap();
+        let data = std::fs::read(&p).unwrap();
+        let n = u64::from_be_bytes(data[0..8].try_into().unwrap()) as usize;
+        let j = String::from_utf8(data[8..8 + n].to_vec()).unwrap();
+
+        // (a) canonical 位上的转义等价键：把 "seq" 改写为 "\u0073eq"（位置不变）。
+        // 语义等价（解析后同键同值同序）→ 必须被接受（证明拒绝只针对位置，不针对拼写）。
+        let escaped_canonical = j.replacen("\"seq\"", "\"\\u0073eq\"", 1);
+        assert_eq!(
+            parse_record_json(&escaped_canonical).unwrap().seq,
+            recs_seq_of(&data),
+            "escaped-equivalent key at canonical position must parse to same record"
+        );
+
+        // (b) 非规范位置："\u0073eq"（=seq，canon 序在后段）挪到首位（accepted_at_ns 之前）
+        // → 与把 "seq" 挪到首位等价 → 必拒（canonical 序即合法性，转义不绕序）。
+        if let Some(pos) = escaped_canonical.find("\"\\u0073eq\"") {
+            let inner = &escaped_canonical[1..escaped_canonical.len() - 1];
+            let seg_start = inner.find("\"\\u0073eq\"").unwrap();
+            let _ = pos;
+            let seg_end = inner[seg_start..].find(',').map(|v| seg_start + v).unwrap_or(inner.len());
+            let seg = &inner[seg_start..seg_end];
+            let rest = format!("{},{}", &inner[..seg_start], &inner[seg_end + 1..]);
+            let reordered = format!("{{{},{}}}", seg, rest);
+            assert!(parse_record_json(&reordered).is_err(), "escaped key moved to non-canonical position accepted");
+        }
+
+        // (c) 对照组：未转义的 "seq" 挪到首位 → 同样必拒（基线，证明 (b) 非误伤）
+        if let Some(pos) = j.find("\"seq\"") {
+            let inner = &j[1..j.len() - 1];
+            let _ = pos;
+            let seg_end = inner.find("\"seq\"").unwrap() + "\"seq\"".len();
+            // 取整段键值（到下一个逗号）
+            let seg_end = inner[seg_end..].find(',').map(|v| seg_end + v).unwrap_or(inner.len());
+            let seg_start = inner.find("\"seq\"").unwrap();
+            let seg = &inner[seg_start..seg_end];
+            let rest = format!("{},{}", &inner[..seg_start], &inner[seg_end + 1..]);
+            let reordered = format!("{{{},{}}}", seg, rest);
+            assert!(parse_record_json(&reordered).is_err(), "plain key moved to non-canonical position accepted (baseline)");
+        }
+    }
+
+    /// 从帧字节取 seq 字段值（测试帮手：避免与被测解析器共用实现路径）。
+    fn recs_seq_of(data: &[u8]) -> u64 {
+        let n = u64::from_be_bytes(data[0..8].try_into().unwrap()) as usize;
+        let j = String::from_utf8(data[8..8 + n].to_vec()).unwrap();
+        let m = parse_json_closed(&j).unwrap();
+        match m.get("seq") {
+            Some(crate::kernel::mlv::JVal::N(v)) => *v,
+            other => panic!("seq not numeric: {other:?}"),
+        }
+    }
+
+    #[test]
     fn effect_key_rules() {
         let a = effect_key(MlvOp::Grant, "b1", 0, "rk1").unwrap();
         let b = effect_key(MlvOp::Grant, "b1", 0, "rk1").unwrap();
