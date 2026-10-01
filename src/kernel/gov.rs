@@ -783,6 +783,36 @@ mod tests {
     }
 
     #[test]
+    fn f5_forged_origin_rejected() {
+        // 复验加固池①：同 op 同 rev 伪造异来源负测——phase 键含 from 不是绕过面。
+        // 安全边界=from 必须与锁内实际前置态一致（check_semantics 的 states 比对先拒）。
+        let d = tmp("f5fo"); let p = d.join("l.jsonl");
+        reach(&p, "b1", MlvState::Granted).unwrap();
+        let mut reg = GovRegistry::open(&p).unwrap();
+        let before = std::fs::read(&p).unwrap();
+        let h = reg.head().unwrap();
+        let n = reg.record_count();
+        // (a1) 消费边的真源重放：from=Proposed 二次 GRANT → IllegalEdge
+        let a1 = mk_rec(n, MlvOp::Grant, "b1", 0, Some(MlvState::Proposed), Some(MlvState::Granted), &h, "fo1");
+        assert!(matches!(reg.submit(a1, 100), Err(GovErr::IllegalEdge)), "true-origin replay must be rejected");
+        // (a2) 伪造异源：from=Granted 的 GRANT（不撞已消费 phase 键）→ IllegalEdge
+        let a2 = mk_rec(n, MlvOp::Grant, "b1", 0, Some(MlvState::Granted), Some(MlvState::Granted), &h, "fo2");
+        assert!(matches!(reg.submit(a2, 100), Err(GovErr::IllegalEdge)), "forged different-from must be rejected");
+        assert_eq!(std::fs::read(&p).unwrap(), before, "ledger bytes changed after forged-origin rejections");
+
+        // (b) ACTIVE 态冒用 VERIFIED 免回执径：from=VERIFIED 但实际前置=ACTIVE → IllegalEdge
+        let d2 = tmp("f5fo2"); let p2 = d2.join("l.jsonl");
+        reach(&p2, "b1", MlvState::Active).unwrap();
+        let mut reg2 = GovRegistry::open(&p2).unwrap();
+        let before2 = std::fs::read(&p2).unwrap();
+        let h2 = reg2.head().unwrap();
+        let n2 = reg2.record_count();
+        let b1r = mk_rec(n2, MlvOp::ActivateCommit, "b1", 0, Some(MlvState::Verified), Some(MlvState::Active), &h2, "fo3");
+        assert!(matches!(reg2.submit(b1r, 100), Err(GovErr::IllegalEdge)), "receipt-free path cannot be forged from ACTIVE");
+        assert_eq!(std::fs::read(&p2).unwrap(), before2);
+    }
+
+    #[test]
     fn f5_receipt_boundary() {
         // 四等号边界：issued-skew≤t（含等号）/ t<expires+skew（严格）
         let skew = DEFAULT_SKEW_NS;

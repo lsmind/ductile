@@ -133,8 +133,8 @@ Pipeline("mlv", "v0.24 治理超图 v3.1：双轨 25 步（旧断言冻结+新�
     .desc("步20 kill -9 半提交恢复（RECOVERED）")
     .needs(@concurrent)
 
-  .proc("fp-build", run("cd /home/beef/projects/ductile && if [ ! -x target/failpoint/release/ductile ] || [ src/kernel/gov.rs -nt target/failpoint/release/ductile ] || [ src/kernel/mlv.rs -nt target/failpoint/release/ductile ]; then cargo build --release --features mlv-failpoint --target-dir target/failpoint > /tmp/mlv_fpbuild.out 2>&1; fi; if [ -x target/failpoint/release/ductile ]; then echo fp-build-ok; else echo BAD-fp-build; tail -20 /tmp/mlv_fpbuild.out; exit 1; fi"))
-    .desc("步21 f6 failpoint 构建门（按需增量，生产 target/ 不动）")
+  .proc("fp-build", run("cd /home/beef/projects/ductile && HASH=$(cat src/kernel/gov.rs src/kernel/mlv.rs Cargo.toml | sha256sum | cut -c1-16); STAMP=target/failpoint/.src-hash; if [ ! -x target/failpoint/release/ductile ] || [ $(cat $STAMP 2>/dev/null) != $HASH ]; then cargo build --release --features mlv-failpoint --target-dir target/failpoint > /tmp/mlv_fpbuild.out 2>&1 && echo $HASH > $STAMP; fi; if [ -x target/failpoint/release/ductile ]; then echo fp-build-ok; else echo BAD-fp-build; tail -20 /tmp/mlv_fpbuild.out; exit 1; fi"))
+    .desc("步21 f6 failpoint 构建门（源内容摘要判增量——mtime 保留时间戳恢复会复用旧二进制；生产 target/ 不动）")
     .needs(@kill9)
 
   .proc("fp-matrix", run("bash scripts/mlv_failpoint_matrix.sh > /tmp/mlv_fpm.out 2>&1; if grep -q 'F6-CRASH-MATRIX-PASS' /tmp/mlv_fpm.out; then echo failpoint-matrix-ok; else echo BAD-fp-matrix; cat /tmp/mlv_fpm.out; exit 1; fi"))
