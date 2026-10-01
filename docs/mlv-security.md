@@ -19,6 +19,16 @@ MAC mismatch 先拦声明篡改，信封声明与记录域绑定校验拦重签�
 `LEDGER_INIT` 仅当账本文件**不存在**时方可写入首行；账本已存在且非空时，
 `init` 必须拒绝执行（t 系测试与 `mlv.pipeline` 步 1 覆盖）。
 
+## 二b、phase 唯一键与伪造异来源（g 轮加固，2026-10-04）
+
+phase 唯一键为 `(binding, rev, op, from)`——语义=**每条边每修订恰一次**（非
+每 op 每修订一次）。该键含 from 是为放行修复链回径
+VERIFIED→ACTIVE 的二次 `ACTIVATE_COMMIT`（首次 from=ACTIVATING 不撞键），
+**不构成绕过面**：安全边界=from 必须与锁内实际前置态一致，由
+check_semantics 的 states 比对先行强制（伪造异来源 → `E422 illegal-edge`）。
+`f5_forged_origin_rejected` 三臂负测钉死：真源重放拒 / 伪造异源拒 /
+ACTIVE 态冒用 VERIFIED 免回执径拒，且拒绝后账本字节不变。
+
 ## 三、持久化与崩溃一致性
 
 追加路径：write→sync→rename→dirsync，五点位 failpoint 矩阵

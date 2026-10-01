@@ -1,12 +1,13 @@
 #!/usr/bin/env -S ductile run
-// mlv.pipeline — v0.24 自组织治理超图 v3.1（外援终审「可施工」版实施）。
+// mlv.pipeline — v0.24 自组织治理超图 v3.1（外援终审「可施工」版实施；g 轮复验「验收通过」+加固池清零）。
 //
-// 双轨：旧 12 步（kernel-binding 冻结字节断言）+ 新 13 步（mlv 治理内核协议串）。
+// 双轨：旧 12 步（kernel-binding 冻结字节断言）+ 新 22 步（mlv 治理内核协议串，含 f6 三步：
+// fp-build 源内容摘要增量→fp-matrix 五点位 failpoint→fp-race feature-off+可观察 race 栅栏）。
 // 新步负例走独立夹具账本：harness 显式 ductile mlv <path> init 后直路径 append（f3 冻结规格：生产 CLI 无 fixture 语法）。
-// kill 步=父进程注入 SIGKILL 后重启验证（RECOVERED count=N）。
+// kill 步=父进程注入 SIGKILL 后重启验证（RECOVERED count=N）；race 栅栏=父持 flock 观察双子进程 wchan 阻塞后释放。
 // 链式 .needs() 排序（run() 裸文本无字段，.when 门禁必假——skill 坑#9）。
 
-Pipeline("mlv", "v0.24 治理超图 v3.1：双轨 25 步（旧断言冻结+新治理协议）", cwd="${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)}")
+Pipeline("mlv", "v0.24 治理超图 v3.1：双轨 34 步（旧断言冻结+治理协议串+f6 failpoint/race 门禁）", cwd="${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)}")
 
   // ── 旧轨：kernel-binding 冻结断言（字节不变）────────────────────
   .proc("clean", run("rm -rf target/mlv target/mlv-unpacked target/mlv-bundle.tar.zst target/mlv-fx && mkdir -p target/mlv"))

@@ -164,6 +164,24 @@ Pipeline("name", "desc", cwd="...", env=["K=V", ...])
 | `ductile import <dir\|file>` | 批量导入 .pipeline 到库（目录递归） |
 | `ductile version save/log/diff` | 管线版本快照（`~/.local/share/ductile/versions/<name>/`） |
 
+### 2.1.1 治理账本（MLV，v0.24）
+
+`ductile mlv <ledger> <verb> …` — 自组织治理超图 v3.1 内核：14-Op 封闭词表、11 态状态机（终态 REVOKED/TERMINAL）、23 字段哈希链账本（帧=u64be(N)‖J‖LF，canonical 字段序即合法性）、幂等 ACK、域分隔信封、跨进程 flock、崩溃后老本/新本二择。
+
+| 动词 | 动作 |
+|---|---|
+| `init` | 显式建账（文件已存在且非空必拒；`LEDGER_INIT` 仅此路径） |
+| `create <b> <rev>` | CREATE_PROPOSAL（from=null 专属） |
+| `append --op O --binding b --rev N --rk k [--at t] [--payload p]` | 生产直路径追加（无 fixture 语法） |
+| `grant/decide/begin/commit/abandon <b> <rev>` | 治理链状态转移 |
+| `registry-confirm <b> <rev>` | 回执登记（ACTIVATING 路径 COMMIT 前置） |
+| `revoke/terminal/quarantine/investigate/repair <b> <rev>` | 停止/隔离/修复链 |
+| `verify` | 全量链校验（哈希链+重放） |
+| `status <b>` | 投影查询（current_rev/state/stop_gen） |
+
+语义要点：`ACTIVATE_COMMIT` 双径——ACTIVATING→ACTIVE 需有效回执，VERIFIED→ACTIVE 为修复链回径免回执；phase 唯一键 `(binding,rev,op,from)`=每条边每修订恰一次。错误面：`E422 illegal-edge` / `E423-env` / `E423-nonce-reuse` / `E425 idempotency-conflict` / `receipt-required` / `ledger-missing` / `ERR terminal`。安全边界见 docs/mlv-security.md（本地）。门禁管线 `./mlv.pipeline`（34 步：冻结断言+协议串+failpoint 矩阵+可观察 race 栅栏）。
+
+
 ### 2.2 检索与复用
 
 | 命令 | 动作 |
