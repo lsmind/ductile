@@ -5,6 +5,7 @@
 //! 每条管线固定 language_version，禁同管线混用。
 
 pub mod types;
+pub mod mlv_toon;
 pub mod toon;
 pub mod golden;
 pub mod ast;

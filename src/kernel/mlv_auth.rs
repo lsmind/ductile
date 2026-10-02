@@ -186,7 +186,7 @@ pub fn verify_envelope_sig(
     Ok(())
 }
 
-fn hex_decode64(s: &str) -> Option<[u8; 64]> {
+pub fn hex_decode64(s: &str) -> Option<[u8; 64]> {
     if s.len() != 128 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
@@ -195,6 +195,11 @@ fn hex_decode64(s: &str) -> Option<[u8; 64]> {
         out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
     }
     Some(out)
+}
+
+/// mlv_toon v2 路径复用（同一实现的 pub 别名）。
+pub fn hex_decode64_pub(s: &str) -> Option<[u8; 64]> {
+    hex_decode64(s)
 }
 
 fn hex_decode32(s: &str) -> Option<[u8; 32]> {

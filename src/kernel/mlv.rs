@@ -194,7 +194,7 @@ pub struct LedgerRecord {
 }
 
 /// canonical 字段序（UTF-8 字节序=F 条 BTreeMap 序）。
-const CANON_ORDER: &[&str] = &[
+pub const CANON_ORDER: &[&str] = &[
     "accepted_at_ns", "before_record_hash", "binding_id", "caller_id", "effect_key",
     "envelope", "envelope_digest", "from", "idempotency_scope", "key_id", "nonce",
     "op", "payload", "record_hash", "registry_receipt", "request_digest",
@@ -831,8 +831,8 @@ pub enum FrameKind {
 pub struct MlvLedger {
     pub path: PathBuf,
     pub lock_path: PathBuf,
-    lock: Option<MlvLock>,
-    tmp_counter: u64,
+    pub(crate) lock: Option<MlvLock>,
+    pub(crate) tmp_counter: u64,
 }
 
 impl MlvLedger {
@@ -1017,7 +1017,7 @@ impl MlvLedger {
     }
 }
 
-fn lock_path_of(path: &Path) -> PathBuf {
+pub fn lock_path_of(path: &Path) -> PathBuf {
     let name = path.file_name().unwrap().to_string_lossy().to_string();
     path.with_file_name(format!("{name}.lock"))
 }

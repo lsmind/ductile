@@ -1,0 +1,11 @@
+#!/usr/bin/env -S ductile run
+// round-report.pipeline — Phase 收口战报门（DCP 协议 §4 四要素）
+// 用法: ./workflows/round-report.pipeline "P2 边界账：动=…；没动=…；下口=…"
+// 模式：脚本即门（fail-closed exit 0/3/4）；run() 无字段路由，不设 .when 二级门
+//       （坑 #9：run 结果裸文本，@ref 门必假——收口走 exit code）
+// 产物: target/round-report/report.md（出品人验收底稿；尾行 ROUND-REPORT-READY=四账全绿）
+Pipeline("round-report", "Phase 收口战报四要素底稿（IPD DCP 协议）", cwd="${DUCTILE_ROOT:-$(git rev-parse --show-toplevel)}")
+  .proc("report", run("bash scripts/round_report.sh '{topic}'"))
+    .desc("测试/golden/ship/边界四账落盘；exit 3=测试红 4=golden 漂移")
+  .proc("deliver")
+    .deliver(@report)
