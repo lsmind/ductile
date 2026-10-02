@@ -141,6 +141,11 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             let drs_only = args.len() >= 5 && args[4] == "--drs";
             cmd_explore(&args[2], &args[3], drs_only)
         }
+        // v0.23 T17：TOON closed parser 调试口（bridge/测试单一裁判源）。
+        // stdin 全文 → parse_toon_closed → canonical 重编码 stdout；
+        // 拒绝=stderr 一行原因 + exit 1（fail-closed，不回显原文）。
+        "toon" if args.len() >= 4 && args[2] == "--schema" => cmd_toon_stdin_schema(&args[3]),
+        "toon" => cmd_toon_stdin(),
         "version" if args.len() >= 5 && args[2] == "save" => cmd_version_save(&args[3], &args[4]),
         "archive" if args.len() >= 2 => cmd_archive(),
         "version" if args.len() >= 4 && args[2] == "log" => cmd_version_log(&args[3]),
@@ -2851,6 +2856,82 @@ fn explore_report_toon(r: &ExploreReport) -> String {
         ("deep_steps_run".to_string(), TVal::Num(r.deep_steps_run as u64)),
     ].into_iter().collect());
     String::from_utf8(toon_canonical(&obj).unwrap_or_default()).unwrap_or_default()
+}
+
+
+/// T17（规格 §五.4）：TOON closed parser 调试口。
+/// stdin → closed parse（词法→闭合→canonical 逐字节比对）→ canonical 重编码。
+/// 成功：stdout=canonical 字节 + exit 0；失败：stderr=拒绝原因 + exit 1。
+/// bridge 与测试都走这里——单一裁判源，杜绝 Python 镜像实现漂移。
+/// T17 闭输出门的 schema 白名单模式：`ductile toon --schema k1,k2`。
+/// 未知键 = E461 拒（规格 §五.4「只输出 schema 允许字段」）。
+/// 白名单以逗号切分；空串=无白名单（退回纯 closed 语义）。
+fn cmd_toon_stdin_schema(allow: &str) -> Result<i32, String> {
+    use std::io::Read;
+    let allow: Vec<String> = allow
+        .split(',')
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .collect();
+    let mut buf = Vec::new();
+    if let Err(e) = std::io::stdin().read_to_end(&mut buf) {
+        eprintln!("ERR toon: stdin read: {e}");
+        return Ok(1);
+    }
+    let v = match crate::kernel::toon::parse_toon_closed(&buf) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("ERR toon: {e}");
+            return Ok(1);
+        }
+    };
+    // 键白名单（只检顶层——schema 契约是顶层键集）
+    if let crate::kernel::toon::TVal::Obj(map) = &v {
+        for k in map.keys() {
+            if !allow.iter().any(|a| a == k) {
+                eprintln!("ERR E461 toon: unknown field '{k}' (schema closed set: {})", allow.join(","));
+                return Ok(1);
+            }
+        }
+    } else {
+        eprintln!("ERR toon: root must be an object");
+        return Ok(1);
+    }
+    let enc = match crate::kernel::toon::toon_canonical(&v) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("ERR toon: encode: {e}");
+            return Ok(1);
+        }
+    };
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = out.write_all(&enc);
+    let _ = out.flush();
+    Ok(0)
+}
+
+fn cmd_toon_stdin() -> Result<i32, String> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    if let Err(e) = std::io::stdin().read_to_end(&mut buf) {
+        eprintln!("ERR toon: stdin read: {e}");
+        return Ok(1);
+    }
+    match crate::kernel::toon::parse_toon_closed(&buf) {
+        Ok(v) => {
+            let enc = crate::kernel::toon::toon_canonical(&v).map_err(|e| format!("encode: {e}"))?;
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            let _ = out.write_all(&enc);
+            let _ = out.flush();
+            Ok(0)
+        }
+        Err(e) => {
+            eprintln!("ERR toon: {e}");
+            Ok(1)
+        }
+    }
 }
 
 fn cmd_explore(path: &str, topic: &str, drs_only: bool) -> Result<i32, String> {

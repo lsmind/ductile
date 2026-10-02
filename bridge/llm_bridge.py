@@ -19,6 +19,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
+import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -180,26 +184,6 @@ def chat_completions(base: str, key: str, model: str, messages: list, timeout: i
     return content, meta
 
 
-def extract_json_object(text: str):
-    text = text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    try:
-        obj = json.loads(text)
-        return obj if isinstance(obj, dict) else None
-    except json.JSONDecodeError:
-        pass
-    m = re.search(r"\{[\s\S]*\}", text)
-    if not m:
-        return None
-    try:
-        obj = json.loads(m.group(0))
-        return obj if isinstance(obj, dict) else None
-    except json.JSONDecodeError:
-        return None
-
-
 def build_messages(prompt: str, system: str, template: str, schema: str | None) -> list:
     sys_parts = []
     if system:
@@ -207,10 +191,16 @@ def build_messages(prompt: str, system: str, template: str, schema: str | None) 
     if template:
         sys_parts.append(f"Style/template hint: {template}")
     if schema:
+        # T17（规格 §五.3/五.4 TOON-CLOSED-1）：契约卡只教 TOON——
+        # 无 JSON 对照、无 pretty 样例泄漏。closed 裁判=ductile toon（Rust 本尊）。
+        keys = [k.strip() for k in schema.split(",") if k.strip()]
+        example = "\n".join(f'{k}: "..."' for k in keys)
         sys_parts.append(
-            "Extract structured data from the user text. "
-            "Reply with a single JSON object only (no markdown). "
-            "Required keys: " + schema
+            "Extract structured data. Output ONLY a TOON document (no markdown, no code fences, no explanations):\n"
+            + example
+            + "\nRules: two-space indent for nested objects; one entry per line as `key: value`; "
+            "quote strings that contain spaces or punctuation; numbers bare; booleans true/false; null. "
+            "No extra keys."
         )
     messages = []
     if sys_parts:
@@ -245,6 +235,61 @@ def emit_dsl_result(fields: dict, raw: str, meta: dict | None = None) -> None:
     print("##DSL_END")
 
 
+def _ductile_toon_bin() -> str:
+    here = os.path.dirname(os.path.abspath(__file__))
+    cand = os.path.join(here, "..", "target", "release", "ductile")
+    if os.path.exists(cand):
+        return os.path.abspath(cand)
+    return shutil.which("ductile") or ""
+
+
+def _toon_judge(text: str, schema: str = ""):
+    """ductile toon = closed parser 单一裁判源。schema 非空 → 传 --schema 白名单
+    （未知字段 E461 拒，规格 §五.4「只输出 schema 允许字段」）。"""
+    bin_ = _ductile_toon_bin()
+    if not bin_:
+        return None, "ductile binary not found (closed judge unavailable)"
+    cmd = [bin_, "toon"]
+    if schema:
+        cmd += ["--schema", schema]
+    try:
+        p = subprocess.run(
+            cmd, input=text.encode("utf-8"),
+            capture_output=True, timeout=30,
+        )
+    except Exception as e:  # noqa: BLE001
+        return None, f"judge subprocess failed: {e}"
+    if p.returncode != 0:
+        return None, p.stderr.decode("utf-8", "replace").strip()
+    canonical = p.stdout.decode("utf-8")
+    fields = {}
+    for line in canonical.split("\n"):
+        if not line or line.startswith("  "):
+            continue
+        m = re.match(r'^("?)([^":]+)\1: (.*)$', line)
+        if m:
+            fields[m.group(2)] = m.group(3)
+    return fields, canonical
+
+
+def closed_toon_fields(content: str, schema: str = ""):
+    """T17 闭环：首判 →（拒则）一次修复 → 终判。fail-closed。"""
+    text = content.strip() + "\n"
+    fields, canonical = _toon_judge(text, schema)
+    if fields is not None:
+        return fields, canonical, False
+    err = canonical or "rejected"
+    repaired_text = re.sub(r"^```[a-zA-Z]*\s*", "", content)
+    repaired_text = re.sub(r"\s*```$", "", repaired_text)
+    repaired_text = repaired_text.strip() + "\n"
+    if repaired_text == text:
+        return None, err, True
+    fields2, canonical2 = _toon_judge(repaired_text, schema)
+    if fields2 is not None:
+        return fields2, canonical2, True
+    return None, err, True
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     if argv and not argv[0].startswith("-"):
         return argparse.Namespace(
@@ -266,12 +311,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _self_test() -> None:
-    assert extract_json_object('{"a":1}') == {"a": 1}
-    assert extract_json_object('```json\n{"b":2}\n```') == {"b": 2}
-    assert extract_json_object('noise {"c": 3} trail') == {"c": 3}
-    assert extract_json_object("nope") is None
+    f, canon, rep = closed_toon_fields('title: "x"\ncount: 2\n')
+    assert f is not None and f["title"] == "x" and f["count"] == "2", f
+    f2, canon2, rep2 = closed_toon_fields('```\ntitle: "y"\n```')
+    assert f2 is not None and rep2 is True, (f2, rep2)
+    f3, _, _ = closed_toon_fields("total garbage no colons")
+    assert f3 is None
+    # 未知字段：无 schema 过；带 schema E461 拒（fail-closed）
+    f4, _, _ = closed_toon_fields('title: x\nextra: 1\n', schema="title,count")
+    assert f4 is None, f4
+    f5, _, _ = closed_toon_fields('title: x\ncount: 2\n', schema="title,count")
+    assert f5 is not None and f5["count"] == "2", f5
     msgs = build_messages("hi", "sys", "tmpl", "title,url")
-    assert msgs[0]["role"] == "system" and "title,url" in msgs[0]["content"]
+    assert msgs[0]["role"] == "system" and 'title: "..."' in msgs[0]["content"] and "JSON" not in msgs[0]["content"]
     assert msgs[1] == {"role": "user", "content": "hi"}
     secs = parse_toml_sections(
         '[llm]\nbase_url = "http://x/v1"\napi_key = "k"\nmodel = \'m\'\n# c\n'
@@ -299,15 +351,19 @@ def main(argv: list[str] | None = None) -> int:
     messages = build_messages(prompt, args.system or "", args.template or "", schema)
     content, meta = chat_completions(base, key, model, messages, timeout=timeout)
     if schema:
-        obj = extract_json_object(content)
-        if not obj:
+        # T17（规格 §五.4）：closed parser 裁判=Rust 本尊（ductile toon）。
+        # 无 constrained decoding 供应商 → 最多修复一次；修复后仍失败 fail-closed。
+        fields, raw_canonical, repaired = closed_toon_fields(content, schema=args.schema or "")
+        if fields is None:
             print(content)
             print(
-                "llm bridge: schema requested but no JSON object in model output",
+                "llm bridge: schema requested but model output failed closed TOON parse (one repair attempted)",
                 file=sys.stderr,
             )
             return 1
-        emit_dsl_result(obj, content, meta=meta)
+        emit_dsl_result(fields, raw_canonical, meta=meta)
+        if repaired:
+            print("meta_repaired=1", flush=True)
     else:
         print(content.rstrip())
         print()

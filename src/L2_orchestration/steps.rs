@@ -427,14 +427,16 @@ impl NodeCtx {
                 }
                 // 6. 输出契约 + 示例
                 if !schema.is_empty() {
+                    // T17（规格 §五.3/五.4 TOON-CLOSED-1）：契约卡只教 TOON，
+                    // 无 JSON 对照/pretty 样例泄漏。closed 裁判=ductile toon。
                     let fields: Vec<&str> = schema.split(',').map(|s| s.trim()).collect();
                     let example = fields
                         .iter()
-                        .map(|f| format!("  \"{}\": \"...\"", f))
+                        .map(|f| format!("{f}: ..."))
                         .collect::<Vec<_>>()
-                        .join(",\n");
+                        .join("\n");
                     b.push(format!(
-                        "# 输出契约\n只输出一个 JSON 对象，包含且仅包含这些字段：{}。\n示例：\n{{\n{}\n}}\n不要输出 JSON 以外的任何文字。",
+                        "# 输出契约（TOON-CLOSED-1）\n只输出一个 TOON 文档，包含且仅包含这些字段：{}。\n示例：\n{}\n规则：每行一条 `键: 值`；含空格或标点的字符串值加双引号；数字裸写；布尔 true/false；null。禁止 markdown 代码围栏、解释文字、多余字段。",
                         schema, example
                     ));
                 }
@@ -1388,8 +1390,8 @@ fn exec_llm_core(
         // 层不在权重里：模型只发自报信号，信不信由引擎校准。
         partial_note = format!(
             "\n\n# 能力自评协议（可选）\n如果你在作答过程中判断本任务超出你的能力（例如需要更长的多步推理、\
-更专业的领域知识、或你对答案没有把握），在输出的 JSON 对象中额外加入字段：\n\
-\"escalate\": true\n\"partial\": \"<你已完成的推理过程或已确定的字段，尽量具体>\"\n\
+更专业的领域知识、或你对答案没有把握），在输出的 TOON 文档中额外加入两个字段：\n\
+escalate: true\npartial: \"<你已完成的推理过程或已确定的字段，尽量具体>\"\n\
 其余字段照常输出。不需要求助时不要输出这两个字段。partial 会被转交给\
 更强的模型续做——写得越具体，续做质量越高，你已完成的工作不会被浪费。"
         );
