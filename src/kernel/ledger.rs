@@ -381,3 +381,114 @@ mod tests {
         }
     }
 }
+
+// ── MANIFEST.toon（TOON P3b；规格 §四.3）─────────────────────────
+//
+// 唯一产品路径=MANIFEST.toon（canonical TOON，原子 tmp→fsync→rename 沿用）。
+// 旧 MANIFEST.json 只读识别（显式迁移用）；不得创建 JSON 新文件。
+
+/// MANIFEST.toon 内容：帧流——首帧 header（FT=2），后每文件一帧（FT=3）。
+/// 帧式定界消除行切分歧义（嵌套缩进 vs 下一文档顶层行不可区分——P3b 实证）。
+pub fn manifest_toon(entries: &[ManifestEntry]) -> Vec<u8> {
+    use crate::kernel::toon::{encode_frame_v2, toon_canonical, TVal};
+    let mut out = Vec::new();
+    let header = TVal::SchemaObj(vec![
+        ("kind".into(), TVal::Str("reproduce_manifest".into())),
+        ("version".into(), TVal::SchemaObj(vec![
+            ("crate".into(), TVal::Str(env!("CARGO_PKG_VERSION").into())),
+            ("build".into(), TVal::Str(option_env!("DUCTILE_BUILD_HASH").unwrap_or("dev").into())),
+            ("module".into(), TVal::Str("kernel::ledger".into())),
+        ])),
+    ]);
+    out.extend_from_slice(&encode_frame_v2(2, &toon_canonical(&header).unwrap_or_default()));
+    for e in entries {
+        let t = TVal::Obj([
+            ("bytes".to_string(), TVal::Num(e.bytes)),
+            ("path".to_string(), TVal::Str(e.path.clone())),
+            ("sha256".to_string(), TVal::Str(e.sha256.clone())),
+        ].into_iter().collect());
+        out.extend_from_slice(&encode_frame_v2(3, &toon_canonical(&t).unwrap_or_default()));
+    }
+    out
+}
+
+/// 写 MANIFEST.toon（原子：tmp→write→fsync→rename；已存在=拒）。
+pub fn write_manifest_toon(dir: &Path, entries: &[ManifestEntry]) -> Result<(), String> {
+    let mpath = dir.join("MANIFEST.toon");
+    if mpath.exists() {
+        return Err("MANIFEST.toon already exists (explicit migration only)".into());
+    }
+    let tmp = dir.join(format!(".MANIFEST.toon.tmp.{}", std::process::id()));
+    let content = manifest_toon(entries);
+    std::fs::write(&tmp, &content).map_err(|e| format!("write tmp: {e}"))?;
+    let f = std::fs::File::open(&tmp).map_err(|e| e.to_string())?;
+    f.sync_all().map_err(|e| e.to_string())?;
+    drop(f);
+    std::fs::rename(&tmp, &mpath).map_err(|e| format!("rename: {e}"))?;
+    Ok(())
+}
+
+/// 读 MANIFEST.toon（闭合解析；逐文件 sha256 比对）。格式坏=Err。
+pub fn verify_manifest_toon(dir: &Path) -> Result<Vec<ManifestEntry>, String> {
+    use crate::kernel::toon::{parse_toon_closed, TVal};
+    let mpath = dir.join("MANIFEST.toon");
+    let data = std::fs::read(&mpath).map_err(|e| format!("read: {e}"))?;
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    let mut header_ok = false;
+    while i < data.len() {
+        if data.len() - i < 10 { return Err("truncated manifest frame".into()); }
+        let n64 = u64::from_be_bytes(data[i..i+8].try_into().unwrap());
+        let n = usize::try_from(n64).map_err(|_| "overflow")?;
+        let end = i.checked_add(10).and_then(|v| v.checked_add(n)).and_then(|v| v.checked_add(1))
+            .ok_or("overflow")?;
+        if data.len() < end || data[end-1] != b'\n' { return Err("bad manifest frame boundary".into()); }
+        let ft = data[i+8];
+        if data[i+9] != 0x02 { return Err("manifest codec slot".into()); }
+        let t = &data[i+10..i+10+n];
+        match ft {
+            2 => {
+                let v = parse_toon_closed(t).map_err(|e| format!("header: {e}"))?;
+                // parse 侧返回动态 Obj（字节序）——kind 键在场即 header 合法
+                let has_kind = match &v {
+                    TVal::Obj(m) => m.contains_key("kind"),
+                    TVal::SchemaObj(f) => f.iter().any(|(k, _)| k == "kind"),
+                    _ => false,
+                };
+                if has_kind { header_ok = true; }
+            }
+            3 => {
+                let v = parse_toon_closed(t).map_err(|e| format!("entry: {e}"))?;
+                if let TVal::Obj(m) = &v {
+                    let getn = |k: &str| match m.get(k) {
+                        Some(TVal::Num(nn)) => Ok(*nn),
+                        _ => Err(format!("manifest entry missing {k}")),
+                    };
+                    let gets = |k: &str| match m.get(k) {
+                        Some(TVal::Str(ss)) => Ok(ss.clone()),
+                        _ => Err(format!("manifest entry missing {k}")),
+                    };
+                    out.push(ManifestEntry {
+                        path: gets("path")?,
+                        sha256: gets("sha256")?,
+                        bytes: getn("bytes")?,
+                    });
+                } else {
+                    return Err("manifest entry must be Obj".into());
+                }
+            }
+            _ => return Err(format!("unknown manifest FT {ft}")),
+        }
+        i = end;
+    }
+    if !header_ok { return Err("MANIFEST.toon missing version header".into()); }
+    for e in &out {
+        let p = dir.join(&e.path);
+        let fd = std::fs::read(&p).map_err(|_| format!("manifest file missing: {}", e.path))?;
+        let h = crate::kernel::hash::sha256_hex(&fd);
+        if h != e.sha256 {
+            return Err(format!("manifest sha256 mismatch: {}", e.path));
+        }
+    }
+    Ok(out)
+}

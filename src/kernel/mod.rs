@@ -7,6 +7,7 @@
 pub mod types;
 pub mod mlv_toon;
 pub mod toon;
+pub mod wal_toon;
 pub mod golden;
 pub mod ast;
 pub mod check;
