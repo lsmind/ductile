@@ -1,0 +1,8 @@
+class: subtitle
+card_id: subtitle-18
+schema: "start_sec,duration_sec,speaker,line"
+input: "字幕条：624 秒起，时长 3 秒，方淮说：把东西交出来"
+expect_start_sec: "624"
+expect_duration_sec: "3"
+expect_speaker: 方淮
+expect_line: 把东西交出来

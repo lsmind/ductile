@@ -1,0 +1,7 @@
+class: review
+card_id: review-22
+schema: "keep,drop,tone"
+input: 审校意见：保留项=主角特写；删除项=冗长铺垫；色调=高对比。
+expect_keep: 主角特写
+expect_drop: 冗长铺垫
+expect_tone: 高对比

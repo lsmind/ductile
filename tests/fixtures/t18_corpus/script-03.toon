@@ -1,0 +1,8 @@
+class: script
+card_id: script-03
+schema: "scene_no,scene_title,lead_role,mood"
+input: 场次记录：第20场「雪地追凶」。苏晚在中央车站与对手周旋，整体情绪基调释然。导演要求本场以苏晚的独白收尾。
+expect_scene_no: "20"
+expect_scene_title: 雪地追凶
+expect_lead_role: 苏晚
+expect_mood: 释然

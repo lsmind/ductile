@@ -1,0 +1,8 @@
+class: audit
+card_id: audit-16
+schema: "shot_id,verdict,score,reason"
+input: "质检结果：镜头 shot_426 判定 PASS，得分 93，原因：场景锚匹配。"
+expect_shot_id: shot_426
+expect_verdict: PASS
+expect_score: "93"
+expect_reason: 场景锚匹配

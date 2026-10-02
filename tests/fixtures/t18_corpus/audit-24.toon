@@ -1,0 +1,8 @@
+class: audit
+card_id: audit-24
+schema: "shot_id,verdict,score,reason"
+input: "质检结果：镜头 shot_747 判定 FAIL，得分 69，原因：无闪烁。"
+expect_shot_id: shot_747
+expect_verdict: FAIL
+expect_score: "69"
+expect_reason: 无闪烁

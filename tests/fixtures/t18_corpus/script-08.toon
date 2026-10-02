@@ -1,0 +1,8 @@
+class: script
+card_id: script-08
+schema: "scene_no,scene_title,lead_role,mood"
+input: 场次记录：第8场「雨夜追踪」。方淮在地下车库与对手周旋，整体情绪基调讥讽。导演要求本场以方淮的独白收尾。
+expect_scene_no: "8"
+expect_scene_title: 雨夜追踪
+expect_lead_role: 方淮
+expect_mood: 讥讽

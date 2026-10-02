@@ -1,0 +1,7 @@
+class: review
+card_id: review-09
+schema: "keep,drop,tone"
+input: 审校意见：保留项=结尾留白；删除项=重复闪回；色调=低饱和。
+expect_keep: 结尾留白
+expect_drop: 重复闪回
+expect_tone: 低饱和

@@ -1,0 +1,8 @@
+class: script
+card_id: script-07
+schema: "scene_no,scene_title,lead_role,mood"
+input: 场次记录：第14场「天台谈判」。周野在废弃工厂与对手周旋，整体情绪基调愤怒。导演要求本场以周野的独白收尾。
+expect_scene_no: "14"
+expect_scene_title: 天台谈判
+expect_lead_role: 周野
+expect_mood: 愤怒

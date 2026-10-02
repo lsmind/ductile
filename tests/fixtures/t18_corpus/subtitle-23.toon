@@ -1,0 +1,8 @@
+class: subtitle
+card_id: subtitle-23
+schema: "start_sec,duration_sec,speaker,line"
+input: "字幕条：393 秒起，时长 5 秒，沈砚说：这不是你的战场"
+expect_start_sec: "393"
+expect_duration_sec: "5"
+expect_speaker: 沈砚
+expect_line: 这不是你的战场

@@ -1,0 +1,8 @@
+class: subtitle
+card_id: subtitle-05
+schema: "start_sec,duration_sec,speaker,line"
+input: "字幕条：946 秒起，时长 2 秒，方淮说：来不及了，走"
+expect_start_sec: "946"
+expect_duration_sec: "2"
+expect_speaker: 方淮
+expect_line: 来不及了，走

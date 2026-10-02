@@ -1,0 +1,8 @@
+class: subtitle
+card_id: subtitle-06
+schema: "start_sec,duration_sec,speaker,line"
+input: "字幕条：226 秒起，时长 4 秒，周野说：别回头"
+expect_start_sec: "226"
+expect_duration_sec: "4"
+expect_speaker: 周野
+expect_line: 别回头

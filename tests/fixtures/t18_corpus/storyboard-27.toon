@@ -1,0 +1,8 @@
+class: storyboard
+card_id: storyboard-27
+schema: "shot_type,subject,duration_sec,location"
+input: 镜头指示：景别=手持跟拍，主体=白汐，场景=废弃工厂，时长=12秒，镜头随主体移动缓慢推进，无切分。
+expect_shot_type: 手持跟拍
+expect_subject: 白汐
+expect_duration_sec: "12"
+expect_location: 废弃工厂

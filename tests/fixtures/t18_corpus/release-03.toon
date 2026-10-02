@@ -1,0 +1,8 @@
+class: release
+card_id: release-03
+schema: "drama_title,episode,platform,hour"
+input: "发布单：短剧《零点行动》第 12 集发布至 xhs，定档 9 点整。"
+expect_drama_title: 零点行动
+expect_episode: "12"
+expect_platform: xhs
+expect_hour: "9"

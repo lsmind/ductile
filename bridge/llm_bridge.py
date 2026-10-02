@@ -243,9 +243,19 @@ def _ductile_toon_bin() -> str:
     return shutil.which("ductile") or ""
 
 
+def _toon_table_row(line: str, cols: list[str]) -> list[str]:
+    """表行 `  v1,v2` → 值列表（TOON 表行值逗号后禁空格，见 toon 裁判）。"""
+    return line.strip().split(",")
+
+
 def _toon_judge(text: str, schema: str = ""):
     """ductile toon = closed parser 单一裁判源。schema 非空 → 传 --schema 白名单
-    （未知字段 E461 拒，规格 §五.4「只输出 schema 允许字段」）。"""
+    （未知字段 E461 拒，规格 §五.4「只输出 schema 允许字段」）。
+
+    字段提取（§四.5 内部传输统一）：
+    - 标量键 `k: v` → fields[k]=v
+    - 表键 `k[N]{c1,c2}:` → fields[k] = JSON 行数组（读侧 parse_missing_json
+      本就找 [..] JSON 兼容；单值列也成 dict——列名即键）。"""
     bin_ = _ductile_toon_bin()
     if not bin_:
         return None, "ductile binary not found (closed judge unavailable)"
@@ -262,13 +272,30 @@ def _toon_judge(text: str, schema: str = ""):
     if p.returncode != 0:
         return None, p.stderr.decode("utf-8", "replace").strip()
     canonical = p.stdout.decode("utf-8")
-    fields = {}
+    fields: dict[str, str] = {}
+    pending_cols: dict[str, list[str]] = {}
+    rows: dict[str, list[dict]] = {}
     for line in canonical.split("\n"):
-        if not line or line.startswith("  "):
+        if not line:
+            continue
+        t = re.match(r'^(\"?)([^\"\[\]:]+)\1\[(\d+)\]\{([^}]*)\}:\s*$', line)
+        if t:
+            tkey = t.group(2)
+            cols = [c.strip() for c in t.group(4).split(",") if c.strip()]
+            pending_cols.setdefault(tkey, cols)
+            rows.setdefault(tkey, [])
+            continue
+        if line.startswith("  "):
+            for tkey in list(rows):
+                if tkey in pending_cols:
+                    vals = _toon_table_row(line, pending_cols[tkey])
+                    rows[tkey].append(dict(zip(pending_cols[tkey], vals)))
             continue
         m = re.match(r'^("?)([^":]+)\1: (.*)$', line)
         if m:
             fields[m.group(2)] = m.group(3)
+    for tkey, rlist in rows.items():
+        fields[tkey] = json.dumps(rlist, ensure_ascii=False)
     return fields, canonical
 
 
@@ -305,7 +332,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--model", default="")
     ap.add_argument("--system", default="")
     ap.add_argument("--template", default="")
-    ap.add_argument("--schema", default="", help="JSON object or key list describing output fields")
+    ap.add_argument("--schema", default="", help="comma-separated key list describing output fields (TOON closed output)")
     ap.add_argument("--count", default="5", help="legacy unused hint")
     return ap.parse_args(argv)
 

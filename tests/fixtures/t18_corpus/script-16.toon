@@ -1,0 +1,8 @@
+class: script
+card_id: script-16
+schema: "scene_no,scene_title,lead_role,mood"
+input: 场次记录：第10场「码头交接」。白汐在老城区巷子与对手周旋，整体情绪基调讥讽。导演要求本场以白汐的独白收尾。
+expect_scene_no: "10"
+expect_scene_title: 码头交接
+expect_lead_role: 白汐
+expect_mood: 讥讽

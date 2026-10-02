@@ -1,0 +1,8 @@
+class: script
+card_id: script-20
+schema: "scene_no,scene_title,lead_role,mood"
+input: 场次记录：第7场「地铁逃亡」。林澈在废弃工厂与对手周旋，整体情绪基调释然。导演要求本场以林澈的独白收尾。
+expect_scene_no: "7"
+expect_scene_title: 地铁逃亡
+expect_lead_role: 林澈
+expect_mood: 释然

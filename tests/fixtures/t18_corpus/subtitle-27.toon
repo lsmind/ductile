@@ -1,0 +1,8 @@
+class: subtitle
+card_id: subtitle-27
+schema: "start_sec,duration_sec,speaker,line"
+input: "字幕条：830 秒起，时长 4 秒，陈默说：这不是你的战场"
+expect_start_sec: "830"
+expect_duration_sec: "4"
+expect_speaker: 陈默
+expect_line: 这不是你的战场

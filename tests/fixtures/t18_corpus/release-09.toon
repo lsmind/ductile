@@ -1,0 +1,8 @@
+class: release
+card_id: release-09
+schema: "drama_title,episode,platform,hour"
+input: "发布单：短剧《雨夜追踪》第 19 集发布至 b站，定档 12 点整。"
+expect_drama_title: 雨夜追踪
+expect_episode: "19"
+expect_platform: b站
+expect_hour: "12"

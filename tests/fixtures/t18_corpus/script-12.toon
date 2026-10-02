@@ -1,0 +1,8 @@
+class: script
+card_id: script-12
+schema: "scene_no,scene_title,lead_role,mood"
+input: 场次记录：第18场「地铁逃亡」。赵一鸣在美术馆与对手周旋，整体情绪基调决绝。导演要求本场以赵一鸣的独白收尾。
+expect_scene_no: "18"
+expect_scene_title: 地铁逃亡
+expect_lead_role: 赵一鸣
+expect_mood: 决绝

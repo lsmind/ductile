@@ -1,0 +1,8 @@
+class: ledger
+card_id: ledger-21
+schema: "seq,binding_id,op,revision"
+input: "账本事件：seq=741 的记录对绑定 b008 执行 Grant，修订号 rev=1，由 cli 发起，结果 OK。"
+expect_seq: "741"
+expect_binding_id: b008
+expect_op: Grant
+expect_revision: "1"

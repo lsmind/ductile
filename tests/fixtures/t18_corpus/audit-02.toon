@@ -1,0 +1,8 @@
+class: audit
+card_id: audit-02
+schema: "shot_id,verdict,score,reason"
+input: "质检结果：镜头 shot_129 判定 PASS，得分 73，原因：角色一致。"
+expect_shot_id: shot_129
+expect_verdict: PASS
+expect_score: "73"
+expect_reason: 角色一致

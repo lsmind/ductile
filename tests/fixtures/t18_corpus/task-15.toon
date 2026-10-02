@@ -1,0 +1,8 @@
+class: task
+card_id: task-15
+schema: "task_kind,priority,owner,est_hours"
+input: "任务登记：任务类型=场景图，优先级 P0，负责人 白汐，预计 25 小时。"
+expect_task_kind: 场景图
+expect_priority: P0
+expect_owner: 白汐
+expect_est_hours: "25"

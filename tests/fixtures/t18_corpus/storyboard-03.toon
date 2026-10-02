@@ -1,0 +1,8 @@
+class: storyboard
+card_id: storyboard-03
+schema: "shot_type,subject,duration_sec,location"
+input: 镜头指示：景别=过肩，主体=周野，场景=废弃工厂，时长=15秒，镜头随主体移动缓慢推进，无切分。
+expect_shot_type: 过肩
+expect_subject: 周野
+expect_duration_sec: "15"
+expect_location: 废弃工厂

@@ -1,0 +1,8 @@
+class: subtitle
+card_id: subtitle-04
+schema: "start_sec,duration_sec,speaker,line"
+input: "字幕条：348 秒起，时长 4 秒，赵一鸣说：把东西交出来"
+expect_start_sec: "348"
+expect_duration_sec: "4"
+expect_speaker: 赵一鸣
+expect_line: 把东西交出来

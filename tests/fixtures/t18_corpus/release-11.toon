@@ -1,0 +1,8 @@
+class: release
+card_id: release-11
+schema: "drama_title,episode,platform,hour"
+input: "发布单：短剧《零点行动》第 12 集发布至 dy，定档 9 点整。"
+expect_drama_title: 零点行动
+expect_episode: "12"
+expect_platform: dy
+expect_hour: "9"

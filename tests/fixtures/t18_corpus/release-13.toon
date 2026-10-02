@@ -1,0 +1,8 @@
+class: release
+card_id: release-13
+schema: "drama_title,episode,platform,hour"
+input: "发布单：短剧《归档者》第 21 集发布至 dy，定档 13 点整。"
+expect_drama_title: 归档者
+expect_episode: "21"
+expect_platform: dy
+expect_hour: "13"

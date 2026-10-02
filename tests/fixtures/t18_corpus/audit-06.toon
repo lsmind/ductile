@@ -1,0 +1,8 @@
+class: audit
+card_id: audit-06
+schema: "shot_id,verdict,score,reason"
+input: "质检结果：镜头 shot_980 判定 FAIL，得分 90，原因：帧率达标。"
+expect_shot_id: shot_980
+expect_verdict: FAIL
+expect_score: "90"
+expect_reason: 帧率达标

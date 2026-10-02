@@ -1,0 +1,8 @@
+class: ledger
+card_id: ledger-02
+schema: "seq,binding_id,op,revision"
+input: "账本事件：seq=894 的记录对绑定 b005 执行 CreateProposal，修订号 rev=2，由 cli 发起，结果 OK。"
+expect_seq: "894"
+expect_binding_id: b005
+expect_op: CreateProposal
+expect_revision: "2"

@@ -1,0 +1,8 @@
+class: ledger
+card_id: ledger-29
+schema: "seq,binding_id,op,revision"
+input: "账本事件：seq=894 的记录对绑定 b015 执行 Verify，修订号 rev=1，由 cli 发起，结果 OK。"
+expect_seq: "894"
+expect_binding_id: b015
+expect_op: Verify
+expect_revision: "1"

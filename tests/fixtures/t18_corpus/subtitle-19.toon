@@ -1,0 +1,8 @@
+class: subtitle
+card_id: subtitle-19
+schema: "start_sec,duration_sec,speaker,line"
+input: "字幕条：927 秒起，时长 5 秒，赵一鸣说：来不及了，走"
+expect_start_sec: "927"
+expect_duration_sec: "5"
+expect_speaker: 赵一鸣
+expect_line: 来不及了，走

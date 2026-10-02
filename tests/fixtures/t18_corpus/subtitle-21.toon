@@ -1,0 +1,8 @@
+class: subtitle
+card_id: subtitle-21
+schema: "start_sec,duration_sec,speaker,line"
+input: "字幕条：41 秒起，时长 5 秒，周野说：把东西交出来"
+expect_start_sec: "41"
+expect_duration_sec: "5"
+expect_speaker: 周野
+expect_line: 把东西交出来

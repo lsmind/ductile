@@ -1,0 +1,8 @@
+class: storyboard
+card_id: storyboard-12
+schema: "shot_type,subject,duration_sec,location"
+input: 镜头指示：景别=全景，主体=赵一鸣，场景=公司顶层，时长=15秒，镜头随主体移动缓慢推进，无切分。
+expect_shot_type: 全景
+expect_subject: 赵一鸣
+expect_duration_sec: "15"
+expect_location: 公司顶层

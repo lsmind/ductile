@@ -1,0 +1,8 @@
+class: release
+card_id: release-28
+schema: "drama_title,episode,platform,hour"
+input: "发布单：短剧《归档者》第 3 集发布至 xhs，定档 22 点整。"
+expect_drama_title: 归档者
+expect_episode: "3"
+expect_platform: xhs
+expect_hour: "22"

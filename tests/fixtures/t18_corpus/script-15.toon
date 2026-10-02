@@ -1,0 +1,8 @@
+class: script
+card_id: script-15
+schema: "scene_no,scene_title,lead_role,mood"
+input: 场次记录：第15场「车库伏击」。程霜在中央车站与对手周旋，整体情绪基调紧张。导演要求本场以程霜的独白收尾。
+expect_scene_no: "15"
+expect_scene_title: 车库伏击
+expect_lead_role: 程霜
+expect_mood: 紧张

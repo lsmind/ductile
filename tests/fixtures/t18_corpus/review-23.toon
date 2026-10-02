@@ -1,0 +1,7 @@
+class: review
+card_id: review-23
+schema: "keep,drop,tone"
+input: "审校意见：保留项=前 3 秒钩子；删除项=过场空镜；色调=低饱和。"
+expect_keep: "前 3 秒钩子"
+expect_drop: 过场空镜
+expect_tone: 低饱和

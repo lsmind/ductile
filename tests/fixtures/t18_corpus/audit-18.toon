@@ -1,0 +1,8 @@
+class: audit
+card_id: audit-18
+schema: "shot_id,verdict,score,reason"
+input: "质检结果：镜头 shot_192 判定 PASS，得分 88，原因：无场景入侵。"
+expect_shot_id: shot_192
+expect_verdict: PASS
+expect_score: "88"
+expect_reason: 无场景入侵

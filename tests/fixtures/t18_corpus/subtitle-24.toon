@@ -1,0 +1,8 @@
+class: subtitle
+card_id: subtitle-24
+schema: "start_sec,duration_sec,speaker,line"
+input: "字幕条：1573 秒起，时长 3 秒，苏晚说：你从一开始就知道，对吧"
+expect_start_sec: "1573"
+expect_duration_sec: "3"
+expect_speaker: 苏晚
+expect_line: 你从一开始就知道，对吧

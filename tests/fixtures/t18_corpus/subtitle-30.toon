@@ -1,0 +1,8 @@
+class: subtitle
+card_id: subtitle-30
+schema: "start_sec,duration_sec,speaker,line"
+input: "字幕条：1498 秒起，时长 4 秒，苏晚说：别回头"
+expect_start_sec: "1498"
+expect_duration_sec: "4"
+expect_speaker: 苏晚
+expect_line: 别回头

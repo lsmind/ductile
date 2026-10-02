@@ -1,0 +1,8 @@
+class: audit
+card_id: audit-30
+schema: "shot_id,verdict,score,reason"
+input: "质检结果：镜头 shot_753 判定 FAIL，得分 60，原因：角色一致。"
+expect_shot_id: shot_753
+expect_verdict: FAIL
+expect_score: "60"
+expect_reason: 角色一致

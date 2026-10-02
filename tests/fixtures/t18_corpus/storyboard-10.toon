@@ -1,0 +1,8 @@
+class: storyboard
+card_id: storyboard-10
+schema: "shot_type,subject,duration_sec,location"
+input: 镜头指示：景别=中景，主体=苏晚，场景=老城区巷子，时长=5秒，镜头随主体移动缓慢推进，无切分。
+expect_shot_type: 中景
+expect_subject: 苏晚
+expect_duration_sec: "5"
+expect_location: 老城区巷子

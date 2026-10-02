@@ -1,0 +1,8 @@
+class: script
+card_id: script-30
+schema: "scene_no,scene_title,lead_role,mood"
+input: 场次记录：第6场「屋顶告别」。苏晚在公司顶层与对手周旋，整体情绪基调惊恐。导演要求本场以苏晚的独白收尾。
+expect_scene_no: "6"
+expect_scene_title: 屋顶告别
+expect_lead_role: 苏晚
+expect_mood: 惊恐

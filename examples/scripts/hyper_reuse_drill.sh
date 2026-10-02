@@ -29,33 +29,33 @@ OUT1="$TMP/ductile_hyper_drill_1.pipeline"
 OUT2="$TMP/ductile_hyper_drill_2.pipeline"
 
 echo "[1] hyper parse"
-"$BIN" hyper parse examples/hyper/unstructured_extract.hyper | grep -q gate
+"$BIN" hyper parse examples/hyper/unstructured_extract.hyper > "$TMP/drill_o" 2>&1; grep -q gate "$TMP/drill_o"
 
 echo "[2] hyper build + check"
 "$BIN" hyper build examples/hyper/unstructured_extract.hyper -o "$OUT1"
 "$BIN" hyper build examples/hyper/unstructured_extract.hyper -o "$OUT2"
-"$BIN" check "$OUT1" | grep -qi pass
+"$BIN" check "$OUT1" > "$TMP/drill_o" 2>&1; grep -qi pass "$TMP/drill_o"
 
 echo "[3] hyper check vs hand pipeline"
-"$BIN" hyper check examples/hyper/unstructured_extract.hyper examples/scripts/unstructured-extract.pipeline | grep -qi pass
+"$BIN" hyper check examples/hyper/unstructured_extract.hyper examples/scripts/unstructured-extract.pipeline > "$TMP/drill_o" 2>&1; grep -qi pass "$TMP/drill_o"
 
 echo "[4] workflow similar ISO (two emits)"
-"$BIN" hyper similar "$OUT1" --json "$TMP" | grep -q '"isomorphic":true'
+"$BIN" hyper similar "$OUT1" --json "$TMP" > "$TMP/drill_o" 2>&1; grep -q '"isomorphic":true' "$TMP/drill_o"
 
 echo "[5] workflow similar near hand pipeline"
-"$BIN" hyper similar examples/hyper/unstructured_extract.hyper --json examples/hyper examples/scripts | grep -q adapt_topology
+"$BIN" hyper similar examples/hyper/unstructured_extract.hyper --json examples/hyper examples/scripts > "$TMP/drill_o" 2>&1; grep -q adapt_topology "$TMP/drill_o"
 
 echo "[6] node similar extract → llm"
-"$BIN" hyper nodes examples/scripts/unstructured-extract.pipeline:extract --json examples/scripts examples/hyper | grep -q 'op=llm'
+"$BIN" hyper nodes examples/scripts/unstructured-extract.pipeline:extract --json examples/scripts examples/hyper > "$TMP/drill_o" 2>&1; grep -q 'op=llm' "$TMP/drill_o"
 
 echo "[7] node filter judge+run"
-"$BIN" hyper nodes --role judge --op run --json examples/scripts | grep -q gate
+"$BIN" hyper nodes --role judge --op run --json examples/scripts > "$TMP/drill_o" 2>&1; grep -q gate "$TMP/drill_o"
 
 echo "[8] node ISO fixtures"
-"$BIN" hyper nodes examples/hyper/node_reuse_a.pipeline:load --json examples/hyper | grep -q '"isomorphic":true'
+"$BIN" hyper nodes examples/hyper/node_reuse_a.pipeline:load --json examples/hyper > "$TMP/drill_o" 2>&1; grep -q '"isomorphic":true' "$TMP/drill_o"
 
 echo "[9] cargo test hyper::"
-cargo test --lib hyper:: -- --test-threads=4 2>&1 | grep '^test result' | grep -q '0 failed'
+cargo test --lib hyper:: -- --test-threads=4 > "$TMP/drill_o" 2>&1; grep '^test result' "$TMP/drill_o" | grep -q '0 failed'
 
 echo "[10] hyper semantics drill"
 bash examples/scripts/hyper_semantics_drill.sh

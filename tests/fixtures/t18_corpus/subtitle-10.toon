@@ -1,0 +1,8 @@
+class: subtitle
+card_id: subtitle-10
+schema: "start_sec,duration_sec,speaker,line"
+input: "字幕条：1519 秒起，时长 2 秒，方淮说：别回头"
+expect_start_sec: "1519"
+expect_duration_sec: "2"
+expect_speaker: 方淮
+expect_line: 别回头

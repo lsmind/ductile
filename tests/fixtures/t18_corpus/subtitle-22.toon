@@ -1,0 +1,8 @@
+class: subtitle
+card_id: subtitle-22
+schema: "start_sec,duration_sec,speaker,line"
+input: "字幕条：821 秒起，时长 5 秒，周野说：来不及了，走"
+expect_start_sec: "821"
+expect_duration_sec: "5"
+expect_speaker: 周野
+expect_line: 来不及了，走

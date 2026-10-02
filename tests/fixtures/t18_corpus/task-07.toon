@@ -1,0 +1,8 @@
+class: task
+card_id: task-07
+schema: "task_kind,priority,owner,est_hours"
+input: "任务登记：任务类型=剪辑合成，优先级 P0，负责人 顾岚，预计 48 小时。"
+expect_task_kind: 剪辑合成
+expect_priority: P0
+expect_owner: 顾岚
+expect_est_hours: "48"

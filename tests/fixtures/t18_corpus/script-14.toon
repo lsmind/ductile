@@ -1,0 +1,8 @@
+class: script
+card_id: script-14
+schema: "scene_no,scene_title,lead_role,mood"
+input: 场次记录：第23场「屋顶告别」。赵一鸣在中央车站与对手周旋，整体情绪基调温柔。导演要求本场以赵一鸣的独白收尾。
+expect_scene_no: "23"
+expect_scene_title: 屋顶告别
+expect_lead_role: 赵一鸣
+expect_mood: 温柔

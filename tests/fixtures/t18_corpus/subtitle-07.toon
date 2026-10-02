@@ -1,0 +1,8 @@
+class: subtitle
+card_id: subtitle-07
+schema: "start_sec,duration_sec,speaker,line"
+input: "字幕条：958 秒起，时长 2 秒，沈砚说：你从一开始就知道，对吧"
+expect_start_sec: "958"
+expect_duration_sec: "2"
+expect_speaker: 沈砚
+expect_line: 你从一开始就知道，对吧

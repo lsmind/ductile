@@ -1,0 +1,8 @@
+class: audit
+card_id: audit-17
+schema: "shot_id,verdict,score,reason"
+input: "质检结果：镜头 shot_744 判定 PASS，得分 70，原因：帧率达标。"
+expect_shot_id: shot_744
+expect_verdict: PASS
+expect_score: "70"
+expect_reason: 帧率达标

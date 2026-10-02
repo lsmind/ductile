@@ -1,0 +1,8 @@
+class: storyboard
+card_id: storyboard-06
+schema: "shot_type,subject,duration_sec,location"
+input: 镜头指示：景别=过肩，主体=陈默，场景=江边码头，时长=5秒，镜头随主体移动缓慢推进，无切分。
+expect_shot_type: 过肩
+expect_subject: 陈默
+expect_duration_sec: "5"
+expect_location: 江边码头

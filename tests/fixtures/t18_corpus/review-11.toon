@@ -1,0 +1,7 @@
+class: review
+card_id: review-11
+schema: "keep,drop,tone"
+input: 审校意见：保留项=雨夜转场；删除项=第二段独白；色调=偏暖。
+expect_keep: 雨夜转场
+expect_drop: 第二段独白
+expect_tone: 偏暖

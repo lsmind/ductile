@@ -1,0 +1,8 @@
+class: task
+card_id: task-23
+schema: "task_kind,priority,owner,est_hours"
+input: "任务登记：任务类型=配音合成，优先级 P2，负责人 方淮，预计 18 小时。"
+expect_task_kind: 配音合成
+expect_priority: P2
+expect_owner: 方淮
+expect_est_hours: "18"

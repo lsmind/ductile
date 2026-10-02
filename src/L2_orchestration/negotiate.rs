@@ -32,9 +32,15 @@ pub struct RoundSummary {
 /// 协议注入文本：告诉模型可以声明缺口（无它模型不知道有此通道）。
 /// 只注入一次（prompt_0 追加，后续轮次继承在场）。
 pub fn protocol_note() -> String {
+    // T17/§四.5：内部传输对象统一 TOON——协商协议不再教 JSON。
+    // missing 结构用 TOON 表数组表达：
+    //   missing[N]{ref,why}:
+    //     "<引用>", "<一句话用途>"
     "\n\n# 上下文协商协议\n\
-如果你判断当前信息不足以产出高质量结果，可以在输出的 JSON 对象中只输出：\n\
-{\"enough\": false, \"missing\": [{\"ref\": \"<引用>\", \"why\": \"<一句话用途>\"}]}\n\
+如果你判断当前信息不足以产出高质量结果，可以在输出的 TOON 文档中只输出：\n\
+enough: false\n\
+missing[N]{ref,why}:\n\
+  \"<引用>\",\"<一句话用途>\"\n\
 可用的引用形态：\n\
 - @proc.field —— 上游节点的结构化字段（如 @req.constraints）\n\
 - @proc —— 上游节点的完整输出文本\n\

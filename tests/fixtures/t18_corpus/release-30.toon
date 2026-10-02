@@ -1,0 +1,8 @@
+class: release
+card_id: release-30
+schema: "drama_title,episode,platform,hour"
+input: "发布单：短剧《第七层协议》第 13 集发布至 xhs，定档 17 点整。"
+expect_drama_title: 第七层协议
+expect_episode: "13"
+expect_platform: xhs
+expect_hour: "17"

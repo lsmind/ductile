@@ -1,0 +1,8 @@
+class: script
+card_id: script-25
+schema: "scene_no,scene_title,lead_role,mood"
+input: 场次记录：第24场「实验室对峙」。方淮在医院天台与对手周旋，整体情绪基调紧张。导演要求本场以方淮的独白收尾。
+expect_scene_no: "24"
+expect_scene_title: 实验室对峙
+expect_lead_role: 方淮
+expect_mood: 紧张

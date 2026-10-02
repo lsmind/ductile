@@ -1,0 +1,8 @@
+class: release
+card_id: release-08
+schema: "drama_title,episode,platform,hour"
+input: "发布单：短剧《第七层协议》第 5 集发布至 ks，定档 14 点整。"
+expect_drama_title: 第七层协议
+expect_episode: "5"
+expect_platform: ks
+expect_hour: "14"

@@ -1,0 +1,8 @@
+class: ledger
+card_id: ledger-08
+schema: "seq,binding_id,op,revision"
+input: "账本事件：seq=782 的记录对绑定 b035 执行 Decision，修订号 rev=6，由 cli 发起，结果 OK。"
+expect_seq: "782"
+expect_binding_id: b035
+expect_op: Decision
+expect_revision: "6"

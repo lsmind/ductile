@@ -1,0 +1,8 @@
+class: script
+card_id: script-04
+schema: "scene_no,scene_title,lead_role,mood"
+input: 场次记录：第10场「屋顶告别」。林澈在医院天台与对手周旋，整体情绪基调悲伤。导演要求本场以林澈的独白收尾。
+expect_scene_no: "10"
+expect_scene_title: 屋顶告别
+expect_lead_role: 林澈
+expect_mood: 悲伤

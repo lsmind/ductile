@@ -1,0 +1,7 @@
+class: review
+card_id: review-10
+schema: "keep,drop,tone"
+input: 审校意见：保留项=主角特写；删除项=第二段独白；色调=低饱和。
+expect_keep: 主角特写
+expect_drop: 第二段独白
+expect_tone: 低饱和

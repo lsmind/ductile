@@ -1,0 +1,8 @@
+class: ledger
+card_id: ledger-04
+schema: "seq,binding_id,op,revision"
+input: "账本事件：seq=462 的记录对绑定 b005 执行 Grant，修订号 rev=6，由 cli 发起，结果 OK。"
+expect_seq: "462"
+expect_binding_id: b005
+expect_op: Grant
+expect_revision: "6"

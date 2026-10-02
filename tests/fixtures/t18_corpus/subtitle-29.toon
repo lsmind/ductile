@@ -1,0 +1,8 @@
+class: subtitle
+card_id: subtitle-29
+schema: "start_sec,duration_sec,speaker,line"
+input: "字幕条：1604 秒起，时长 5 秒，沈砚说：把东西交出来"
+expect_start_sec: "1604"
+expect_duration_sec: "5"
+expect_speaker: 沈砚
+expect_line: 把东西交出来

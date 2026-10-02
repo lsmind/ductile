@@ -1,0 +1,8 @@
+class: audit
+card_id: audit-14
+schema: "shot_id,verdict,score,reason"
+input: "质检结果：镜头 shot_169 判定 FAIL，得分 83，原因：场景锚匹配。"
+expect_shot_id: shot_169
+expect_verdict: FAIL
+expect_score: "83"
+expect_reason: 场景锚匹配

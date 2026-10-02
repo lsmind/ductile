@@ -1,0 +1,8 @@
+class: storyboard
+card_id: storyboard-24
+schema: "shot_type,subject,duration_sec,location"
+input: 镜头指示：景别=全景，主体=林澈，场景=地下车库，时长=8秒，镜头随主体移动缓慢推进，无切分。
+expect_shot_type: 全景
+expect_subject: 林澈
+expect_duration_sec: "8"
+expect_location: 地下车库

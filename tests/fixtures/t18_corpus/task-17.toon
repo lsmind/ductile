@@ -1,0 +1,8 @@
+class: task
+card_id: task-17
+schema: "task_kind,priority,owner,est_hours"
+input: "任务登记：任务类型=质检，优先级 P2，负责人 程霜，预计 22 小时。"
+expect_task_kind: 质检
+expect_priority: P2
+expect_owner: 程霜
+expect_est_hours: "22"

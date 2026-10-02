@@ -1,0 +1,8 @@
+class: ledger
+card_id: ledger-18
+schema: "seq,binding_id,op,revision"
+input: "账本事件：seq=133 的记录对绑定 b016 执行 Verify，修订号 rev=6，由 cli 发起，结果 OK。"
+expect_seq: "133"
+expect_binding_id: b016
+expect_op: Verify
+expect_revision: "6"

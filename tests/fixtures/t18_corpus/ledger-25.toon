@@ -1,0 +1,8 @@
+class: ledger
+card_id: ledger-25
+schema: "seq,binding_id,op,revision"
+input: "账本事件：seq=208 的记录对绑定 b030 执行 ActivateBegin，修订号 rev=0，由 cli 发起，结果 OK。"
+expect_seq: "208"
+expect_binding_id: b030
+expect_op: ActivateBegin
+expect_revision: "0"

@@ -1,0 +1,8 @@
+class: task
+card_id: task-20
+schema: "task_kind,priority,owner,est_hours"
+input: "任务登记：任务类型=发布，优先级 P0，负责人 方淮，预计 45 小时。"
+expect_task_kind: 发布
+expect_priority: P0
+expect_owner: 方淮
+expect_est_hours: "45"

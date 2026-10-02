@@ -1,0 +1,8 @@
+class: ledger
+card_id: ledger-10
+schema: "seq,binding_id,op,revision"
+input: "账本事件：seq=123 的记录对绑定 b040 执行 Decision，修订号 rev=3，由 cli 发起，结果 OK。"
+expect_seq: "123"
+expect_binding_id: b040
+expect_op: Decision
+expect_revision: "3"

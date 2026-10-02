@@ -1,0 +1,7 @@
+class: review
+card_id: review-05
+schema: "keep,drop,tone"
+input: 审校意见：保留项=雨夜转场；删除项=过场空镜；色调=高对比。
+expect_keep: 雨夜转场
+expect_drop: 过场空镜
+expect_tone: 高对比

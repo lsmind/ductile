@@ -1,0 +1,8 @@
+class: release
+card_id: release-14
+schema: "drama_title,episode,platform,hour"
+input: "发布单：短剧《雨夜追踪》第 21 集发布至 ks，定档 12 点整。"
+expect_drama_title: 雨夜追踪
+expect_episode: "21"
+expect_platform: ks
+expect_hour: "12"

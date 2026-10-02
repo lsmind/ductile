@@ -2970,7 +2970,7 @@ fn cmd_explore(path: &str, topic: &str, drs_only: bool) -> Result<i32, String> {
     let mut curriculum =
         |r: &ExploreReport| -> Result<crate::L4_structure::explore::CurriculumOutput, String> {
             let mut ctx = format!(
-                "{}\n\n已探索: 波 {} / 深步 {} / 题数 {}\n上轮缺口: {}\n\n产出下一批探针 JSON。",
+                "{}\n\n已探索: 波 {} / 深步 {} / 题数 {}\n上轮缺口: {}\n\n产出下一批探针（TOON 文档）。",
                 header,
                 r.waves_run,
                 r.deep_steps_run,

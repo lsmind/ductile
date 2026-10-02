@@ -1,0 +1,7 @@
+class: review
+card_id: review-29
+schema: "keep,drop,tone"
+input: "审校意见：保留项=前 3 秒钩子；删除项=重复闪回；色调=偏暖。"
+expect_keep: "前 3 秒钩子"
+expect_drop: 重复闪回
+expect_tone: 偏暖

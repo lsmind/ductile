@@ -1,0 +1,8 @@
+class: subtitle
+card_id: subtitle-09
+schema: "start_sec,duration_sec,speaker,line"
+input: "字幕条：320 秒起，时长 2 秒，林澈说：……原来是这样"
+expect_start_sec: "320"
+expect_duration_sec: "2"
+expect_speaker: 林澈
+expect_line: ……原来是这样

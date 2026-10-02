@@ -1,0 +1,8 @@
+class: subtitle
+card_id: subtitle-14
+schema: "start_sec,duration_sec,speaker,line"
+input: "字幕条：1400 秒起，时长 2 秒，顾岚说：来不及了，走"
+expect_start_sec: "1400"
+expect_duration_sec: "2"
+expect_speaker: 顾岚
+expect_line: 来不及了，走

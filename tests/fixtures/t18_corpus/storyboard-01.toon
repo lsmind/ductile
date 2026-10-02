@@ -1,0 +1,8 @@
+class: storyboard
+card_id: storyboard-01
+schema: "shot_type,subject,duration_sec,location"
+input: 镜头指示：景别=特写，主体=程霜，场景=医院天台，时长=12秒，镜头随主体移动缓慢推进，无切分。
+expect_shot_type: 特写
+expect_subject: 程霜
+expect_duration_sec: "12"
+expect_location: 医院天台

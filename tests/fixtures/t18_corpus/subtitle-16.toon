@@ -1,0 +1,8 @@
+class: subtitle
+card_id: subtitle-16
+schema: "start_sec,duration_sec,speaker,line"
+input: "字幕条：605 秒起，时长 4 秒，顾岚说：你从一开始就知道，对吧"
+expect_start_sec: "605"
+expect_duration_sec: "4"
+expect_speaker: 顾岚
+expect_line: 你从一开始就知道，对吧

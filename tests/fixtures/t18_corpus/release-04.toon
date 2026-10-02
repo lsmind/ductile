@@ -1,0 +1,8 @@
+class: release
+card_id: release-04
+schema: "drama_title,episode,platform,hour"
+input: "发布单：短剧《回声》第 4 集发布至 xhs，定档 20 点整。"
+expect_drama_title: 回声
+expect_episode: "4"
+expect_platform: xhs
+expect_hour: "20"

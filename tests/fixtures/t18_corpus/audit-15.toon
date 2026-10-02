@@ -1,0 +1,8 @@
+class: audit
+card_id: audit-15
+schema: "shot_id,verdict,score,reason"
+input: "质检结果：镜头 shot_413 判定 PASS，得分 78，原因：无闪烁。"
+expect_shot_id: shot_413
+expect_verdict: PASS
+expect_score: "78"
+expect_reason: 无闪烁

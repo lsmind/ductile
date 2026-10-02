@@ -1,0 +1,8 @@
+class: storyboard
+card_id: storyboard-21
+schema: "shot_type,subject,duration_sec,location"
+input: 镜头指示：景别=手持跟拍，主体=林澈，场景=地下车库，时长=5秒，镜头随主体移动缓慢推进，无切分。
+expect_shot_type: 手持跟拍
+expect_subject: 林澈
+expect_duration_sec: "5"
+expect_location: 地下车库
