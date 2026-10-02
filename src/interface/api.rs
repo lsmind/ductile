@@ -28,24 +28,6 @@ fn pyerr<E: ToString>(e: E) -> PyErr {
 // ─────────────────────────────────────────────────────────────
 
 /// JSON string escaping (control chars, quotes, backslash; UTF-8 passthrough).
-pub fn escape_json(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-/// Split a declaration list on *top-level* commas only — nesting-aware,
-/// so `text(str, required), n(int, default=10)` yields two entries.
 pub fn split_top_level(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut depth = 0i32;
@@ -118,27 +100,6 @@ pub fn parse_param_decl(entry: &str) -> ParamDecl {
     }
 }
 
-pub fn params_json(decl: &str) -> String {
-    let items: Vec<String> = split_top_level(decl)
-        .iter()
-        .map(|e| {
-            let p = parse_param_decl(e);
-            format!(
-                "{{\"name\":\"{}\",\"type\":\"{}\",\"required\":{},\"default\":{}}}",
-                escape_json(&p.name),
-                escape_json(&p.ptype),
-                p.required,
-                match &p.default {
-                    Some(d) => format!("\"{}\"", escape_json(d)),
-                    None => "null".to_string(),
-                }
-            )
-        })
-        .collect();
-    format!("[{}]", items.join(","))
-}
-
-/// Parse one output declaration: `words(int)` → (name, type).
 pub fn parse_out_decl(entry: &str) -> (String, String) {
     let e = entry.trim();
     match e.find('(') {
@@ -150,23 +111,6 @@ pub fn parse_out_decl(entry: &str) -> (String, String) {
     }
 }
 
-pub fn output_json(decl: &str) -> String {
-    let items: Vec<String> = split_top_level(decl)
-        .iter()
-        .map(|e| {
-            let (n, t) = parse_out_decl(e);
-            format!(
-                "{{\"name\":\"{}\",\"type\":\"{}\"}}",
-                escape_json(&n),
-                escape_json(&t)
-            )
-        })
-        .collect();
-    format!("[{}]", items.join(","))
-}
-
-/// Decode the internal `§§FIELDS§§k=v§§...§§RAW§§...` encoding into pairs.
-/// Non-encoded text → None.
 pub fn decode_internal_fields(text: &str) -> Option<Vec<(String, String)>> {
     let rest = text.strip_prefix("§§FIELDS§§")?;
     let mut out = Vec::new();
@@ -185,74 +129,50 @@ pub fn decode_internal_fields(text: &str) -> Option<Vec<(String, String)>> {
     }
 }
 
-pub fn script_card_json(c: &ScriptCard) -> String {
-    format!(
-        "{{\"name\":\"{}\",\"lang\":\"{}\",\"desc\":\"{}\",\"path\":\"{}\",\"params\":{},\"output\":{},\"pure\":{},\"idempotent\":{},\"concurrency\":\"{}\",\"effects\":\"{}\",\"cse_safe\":{},\"timeout_secs\":{},\"retries\":{}}}",
-        escape_json(&c.name),
-        escape_json(&c.lang),
-        escape_json(&c.desc),
-        escape_json(&c.path),
-        params_json(&c.params),
-        output_json(&c.output),
-        c.pure,
-        c.idempotent,
-        c.concurrency.as_str(),
-        escape_json(&c.effects),
-        cse_safe(c),
-        c.timeout_secs,
-        c.retries
-    )
-}
-
-pub fn proc_row_json(r: &ProcRow) -> String {
-    let tags: Vec<String> = r
-        .tags
-        .iter()
-        .map(|t| format!("\"{}\"", escape_json(t)))
-        .collect();
-    format!(
-        "{{\"name\":\"{}\",\"pipeline\":\"{}\",\"description\":\"{}\",\"tags\":[{}],\"impl_count\":{},\"is_deliver\":{}}}",
-        escape_json(&r.name),
-        escape_json(&r.pipeline),
-        escape_json(&r.description),
-        tags.join(","),
-        r.impl_count,
-        r.is_deliver
-    )
-}
-
-pub fn run_row_json(r: &RunRow) -> String {
-    format!(
-        "{{\"proc\":\"{}\",\"impl\":\"{}\",\"status\":\"{}\",\"latency_ms\":{},\"recorded_at\":\"{}\"}}",
-        escape_json(&r.proc_name),
-        escape_json(&r.impl_name),
-        escape_json(&r.status),
-        r.latency_ms,
-        escape_json(&r.recorded_at)
-    )
-}
-
-pub fn value_json(v: &crate::core::ast::Value) -> String {
-    use crate::core::ast::Value;
-    match v {
-        Value::Text(t) => format!("{{\"type\":\"text\",\"value\":\"{}\"}}", escape_json(t)),
-        Value::File(f) => format!("{{\"type\":\"file\",\"path\":\"{}\"}}", escape_json(f)),
-        Value::Null => "{\"type\":\"null\"}".to_string(),
-    }
-}
-
 /// Encode an ExecResult as the `run_json` payload.
-pub fn exec_result_json(r: &ExecResult) -> String {
+pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // P4a：API 面全 TOON（规格 §五.1；JSON 出口删除——零外部消费者实证）
+    m.add_function(wrap_pyfunction!(scripts_toon, m)?)?;
+    m.add_function(wrap_pyfunction!(procs_toon, m)?)?;
+    m.add_function(wrap_pyfunction!(runs_toon, m)?)?;
+    m.add_function(wrap_pyfunction!(db_stats_toon, m)?)?;
+    m.add_function(wrap_pyfunction!(pipeline_toon, m)?)?;
+    m.add_function(wrap_pyfunction!(run_toon, m)?)?;
+    m.add_function(wrap_pyfunction!(script_call_toon, m)?)?;
+    m.add_function(wrap_pyfunction!(hyper_similar_toon, m)?)?;
+    m.add_function(wrap_pyfunction!(hyper_nodes_toon, m)?)?;
+    Ok(())
+}
+
+// ── TOON 出口层（P4a；规格 §五.1：API 响应=canonical TOON，删 JSON 面）──────
+//
+// 9 个 pyo3 出口全换 TOON：scripts_toon/procs_toon/runs_toon/db_stats_toon/
+// pipeline_toon/run_toon/script_call_toon/hyper_similar_toon/hyper_nodes_toon。
+// 编码=kernel::toon::toon_canonical（唯一规范入口）；ExecResult 值域
+// Text/File/Null 全部有 TOON 标量对应。
+
+use crate::kernel::toon::{toon_canonical, TVal};
+
+fn tv_str(s: &str) -> TVal { TVal::Str(s.to_string()) }
+
+pub fn exec_result_toon(r: &ExecResult) -> String {
     match r {
         ExecResult::Success(results) => {
-            let items: Vec<String> = results
+            let m: std::collections::BTreeMap<String, TVal> = results
                 .iter()
-                .map(|(k, v)| format!("\"{}\":{}", escape_json(k), value_json(v)))
+                .map(|(k, v)| (k.clone(), match v {
+                    crate::core::ast::Value::Text(t) => TVal::Str(t.clone()),
+                    crate::core::ast::Value::File(f) => TVal::Str(f.clone()),
+                    crate::core::ast::Value::Null => TVal::Null,
+                }))
                 .collect();
-            format!("{{\"ok\":true,\"results\":{{{}}}}}", items.join(","))
+            let obj = TVal::Obj([
+                ("ok".to_string(), TVal::Bool(true)),
+                ("results".to_string(), TVal::Obj(m)),
+            ].into_iter().collect());
+            String::from_utf8(toon_canonical(&obj).unwrap_or_default()).unwrap_or_default()
         }
         ExecResult::Failed { error, partial } => {
-            // v0.14：失败是数据——partial 保留现场 + 首个根因的 err_code。
             let code = partial
                 .values()
                 .find_map(|v| match v {
@@ -260,238 +180,65 @@ pub fn exec_result_json(r: &ExecResult) -> String {
                         crate::core::dslresult::extract_field("err_code", t)
                     }
                     _ => None,
-                })
-                .unwrap_or_default();
-            let mut parts: Vec<String> = Vec::new();
-            for (k, v) in partial {
-                let entry = match v {
-                    crate::core::ast::Value::Text(t) if t.starts_with("§§FIELDS§§") => {
-                        match decode_internal_fields(&t) {
-                            Some(fields) => {
-                                let items: Vec<String> = fields
-                                    .iter()
-                                    .map(|(fk, fv)| {
-                                        format!("\"{}\":\"{}\"", escape_json(fk), escape_json(fv))
-                                    })
-                                    .collect();
-                                format!("\"{}\":{{{}}}", escape_json(&k), items.join(","))
-                            }
-                            None => format!(
-                                "\"{}\":{}",
-                                escape_json(&k),
-                                value_json(&crate::core::ast::Value::Text(t.clone()))
-                            ),
-                        }
-                    }
-                    other => format!("\"{}\":{}", escape_json(&k), value_json(&other)),
-                };
-                parts.push(entry);
-            }
-            format!(
-                "{{\"ok\":false,\"error\":\"{}\",\"err_code\":\"{}\",\"partial\":{{{}}}}}",
-                escape_json(error),
-                escape_json(&code),
-                parts.join(",")
-            )
+                });
+            let m: std::collections::BTreeMap<String, TVal> = partial
+                .iter()
+                .map(|(k, v)| (k.clone(), match v {
+                    crate::core::ast::Value::Text(t) => TVal::Str(t.clone()),
+                    crate::core::ast::Value::File(f) => TVal::Str(f.clone()),
+                    crate::core::ast::Value::Null => TVal::Null,
+                }))
+                .collect();
+            let obj = TVal::Obj([
+                ("ok".to_string(), TVal::Bool(false)),
+                ("error".to_string(), TVal::Str(error.clone())),
+                ("err_code".to_string(), code.map(TVal::Str).unwrap_or(TVal::Null)),
+                ("partial".to_string(), TVal::Obj(m)),
+            ].into_iter().collect());
+            String::from_utf8(toon_canonical(&obj).unwrap_or_default()).unwrap_or_default()
         }
     }
 }
 
-pub fn pipeline_json_of(pl: &Pipeline) -> String {
-    let eg = build_egraph(pl);
-    let groups = parallel_groups(&eg);
-    let cp = critical_path(&eg);
-    let mut procs = Vec::new();
-    for p in &pl.procs {
-        let impls: Vec<String> = p
-            .plan
-            .iter()
-            .map(|imp| {
-                let tags: Vec<String> = imp.tags.iter().map(|t| format!("\"{}\"", escape_json(t))).collect();
-                let refs: Vec<String> = imp.refs.iter().map(|r| format!("\"{}\"", escape_json(r))).collect();
-                format!(
-                    "{{\"name\":\"{}\",\"desc\":\"{}\",\"tags\":[{}],\"when\":{},\"refs\":[{}],\"retry\":{},\"enabled\":{}}}",
-                    escape_json(&imp.name),
-                    escape_json(&imp.description),
-                    tags.join(","),
-                    match &imp.when {
-                        Some(w) => format!("\"{}\"", escape_json(w)),
-                        None => "null".to_string(),
-                    },
-                    refs.join(","),
-                    imp.retry,
-                    imp.enabled
-                )
-            })
-            .collect();
-        procs.push(format!(
-            "{{\"name\":\"{}\",\"deliver\":{},\"impls\":[{}]}}",
-            escape_json(&p.name),
-            p.deliver,
-            impls.join(",")
-        ));
-    }
-    let g: Vec<String> = groups
-        .iter()
-        .map(|g| {
-            format!(
-                "[{}]",
-                g.iter()
-                    .map(|n| format!("\"{}\"", escape_json(n)))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )
-        })
-        .collect();
-    let c: Vec<String> = cp
-        .iter()
-        .map(|n| format!("\"{}\"", escape_json(n)))
-        .collect();
-    format!(
-        "{{\"name\":\"{}\",\"procs\":[{}],\"parallel_groups\":[{}],\"critical_path\":[{}]}}",
-        escape_json(&pl.name),
-        procs.join(","),
-        g.join(","),
-        c.join(",")
-    )
-}
-
-// ─────────────────────────────────────────────────────────────
-// pyo3 surface
-// ─────────────────────────────────────────────────────────────
-
-/// All registered script contract cards as JSON (agents read this, not script bodies).
-pub fn scripts_json_core() -> String {
+pub fn scripts_toon_core() -> String {
     let cards = db::script_list();
-    let items: Vec<String> = cards.iter().map(script_card_json).collect();
-    format!("[{}]", items.join(","))
-}
-
-#[pyfunction]
-pub fn scripts_json() -> PyResult<String> {
-    Ok(scripts_json_core())
-}
-
-/// Proc library as JSON. `query=""` lists all; otherwise FTS-ish search.
-pub fn procs_json_core(query: &str) -> String {
-    let rows = if query.trim().is_empty() {
-        db::all_procs()
-    } else {
-        db::search_procs(query)
+    // 数组=table（同构对象数组）：name/lang/desc/path/params/output/enabled/concurrency
+    let rows: Vec<Vec<TVal>> = cards.iter().map(|c| vec![
+        tv_str(&c.name), tv_str(&c.lang), tv_str(&c.desc), tv_str(&c.path),
+        tv_str(&c.params), tv_str(&c.output),
+        TVal::Bool(c.pure), TVal::Bool(c.idempotent),
+        tv_str(&format!("{:?}", c.concurrency)),
+    ]).collect();
+    let t = TVal::Table {
+        cols: vec!["name".into(), "lang".into(), "desc".into(), "path".into(),
+                   "params".into(), "output".into(), "pure".into(), "idempotent".into(), "concurrency".into()],
+        rows,
     };
-    let items: Vec<String> = rows.iter().map(proc_row_json).collect();
-    format!("[{}]", items.join(","))
+    let obj = TVal::Obj([("scripts".to_string(), t)].into_iter().collect());
+    String::from_utf8(toon_canonical(&obj).unwrap_or_default()).unwrap_or_default()
 }
 
 #[pyfunction]
-pub fn procs_json(query: &str) -> PyResult<String> {
-    Ok(procs_json_core(query))
+pub fn scripts_toon() -> PyResult<String> {
+    Ok(scripts_toon_core())
 }
 
-/// Recent runs of one proc as JSON (newest first), at most `limit`.
-pub fn runs_json_core(proc_name: &str, limit: usize) -> String {
-    let rows = db::recent_runs_limit(proc_name, limit);
-    let items: Vec<String> = rows.iter().map(run_row_json).collect();
-    format!("[{}]", items.join(","))
-}
-
-#[pyfunction]
-pub fn runs_json(proc_name: &str, limit: usize) -> PyResult<String> {
-    Ok(runs_json_core(proc_name, limit))
-}
-
-/// Library stats as JSON: {"pipelines":N,"procs":N,"runs":N,"compositions":N}.
-pub fn db_stats_json_core() -> String {
-    let (pipelines, procs, runs, compositions) = db::db_stats();
-    format!(
-        "{{\"pipelines\":{},\"procs\":{},\"runs\":{},\"compositions\":{}}}",
-        pipelines, procs, runs, compositions
-    )
-}
-
-#[pyfunction]
-pub fn db_stats_json() -> PyResult<String> {
-    Ok(db_stats_json_core())
-}
-
-/// Parse a .pipeline file into structural JSON (procs/impls/when/refs + egraph plan).
-/// Pure-Rust core (serve/CLI call this; the pyo3 wrapper below is gc-droppable
-/// outside Python — extension-module must not leak into bin/test link graphs).
-pub fn pipeline_json_core(path: &str) -> Result<String, String> {
-    let pl = parse_pipeline_file(path).map_err(|e| e.to_string())?;
-    Ok(pipeline_json_of(&pl))
-}
-
-#[pyfunction]
-pub fn pipeline_json(path: &str) -> PyResult<String> {
-    pipeline_json_core(path).map_err(pyerr)
-}
-
-/// Run a pipeline; returns structured JSON.
-/// Raises on authoring errors (parse/typecheck/policy); execution failure
-/// is reported as `{"ok":false,"error":...}` for the caller to route on.
-/// Pure-Rust core: authoring errors → Err(String); execution failure is
-/// encoded as {"ok":false} in the Ok payload (failure is data, not exception).
-pub fn run_json_core(
-    path: &str,
-    topic: &str,
-    params: Option<BTreeMap<String, String>>,
-    policy: Option<&str>,
-) -> Result<String, String> {
-    let pl = parse_pipeline_file(path).map_err(|e| e.to_string())?;
-    let errs = crate::typecheck::check_pipeline(&pl);
-    if !errs.is_empty() {
-        let msg = errs
-            .iter()
-            .map(|e| format!("  {}", e))
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Err(format!("Type check errors:\n{}", msg));
-    }
-    let policy_opt = match policy {
-        Some(p) => Some(parse_policy_file(p).map_err(|e| e.to_string())?),
-        None => None,
-    };
-    let params = params.unwrap_or_default();
-    let result = exec_pipeline(topic, &params, &pl, policy_opt.as_ref());
-    Ok(exec_result_json(&result))
-}
-
-#[pyfunction]
-#[pyo3(signature = (path, topic="", params=None, policy=None))]
-pub fn run_json(
-    path: &str,
-    topic: &str,
-    params: Option<BTreeMap<String, String>>,
-    policy: Option<&str>,
-) -> PyResult<String> {
-    run_json_core(path, topic, params, policy).map_err(pyerr)
-}
-
-/// One-off script invoke. Unregistered name / authoring errors return
-/// {"ok":false,"error":...} (agents route on it); only internal panics raise.
-pub fn script_call_json_core(
+pub fn script_call_toon_core(
     name: &str,
     args: Option<BTreeMap<String, String>>,
 ) -> Result<String, String> {
     if db::script_get(name).is_none() {
         let known: Vec<String> = db::script_list().iter().map(|c| c.name.clone()).collect();
         let hint = if known.is_empty() {
-            format!(
-                "script '{}' not attached — register first: ductile script attach <file>",
-                name
-            )
+            format!("script '{}' not attached — register first: ductile script attach <file>", name)
         } else {
-            format!(
-                "script '{}' not attached. Attached: {}",
-                name,
-                known.join(", ")
-            )
+            format!("script '{}' not attached. Attached: {}", name, known.join(", "))
         };
-        return Ok(format!(
-            "{{\"ok\":false,\"error\":\"{}\"}}",
-            escape_json(&hint)
-        ));
+        let obj = TVal::Obj([
+            ("ok".to_string(), TVal::Bool(false)),
+            ("error".to_string(), TVal::Str(hint)),
+        ].into_iter().collect());
+        return Ok(String::from_utf8(toon_canonical(&obj).unwrap_or_default()).unwrap_or_default());
     }
     let kv: Vec<String> = args
         .unwrap_or_default()
@@ -501,11 +248,7 @@ pub fn script_call_json_core(
     let body = format!(
         "script({}{})",
         name,
-        if kv.is_empty() {
-            String::new()
-        } else {
-            format!(", {}", kv.join(", "))
-        }
+        if kv.is_empty() { String::new() } else { format!(", {}", kv.join(", ")) }
     );
     let impl_ = crate::core::ast::Impl {
         name: "api_call".into(),
@@ -522,7 +265,6 @@ pub fn script_call_json_core(
     };
     match crate::steps::exec_script_call(&impl_, "", &body, &BTreeMap::new()) {
         Ok(v) => {
-            // ##DSL_RESULT 块解码为干净字段（agent/前端不读 §§FIELDS§§ 内部编码）
             let text = match &v {
                 crate::core::ast::Value::Text(t) => t.as_str(),
                 _ => "",
@@ -531,48 +273,178 @@ pub fn script_call_json_core(
                 .or_else(|| crate::core::dslresult::parse_dsl_result_block(text))
             {
                 Some(fields) => {
-                    let items: Vec<String> = fields
-                        .iter()
-                        .map(|(k, val)| format!("\"{}\":\"{}\"", escape_json(k), escape_json(val)))
+                    let m: std::collections::BTreeMap<String, TVal> = fields
+                        .into_iter()
+                        .map(|(k, val)| (k, TVal::Str(val)))
                         .collect();
-                    Ok(format!(
-                        "{{\"ok\":true,\"fields\":{{{}}}}}",
-                        items.join(",")
-                    ))
+                    let obj = TVal::Obj([
+                        ("ok".to_string(), TVal::Bool(true)),
+                        ("fields".to_string(), TVal::Obj(m)),
+                    ].into_iter().collect());
+                    Ok(String::from_utf8(toon_canonical(&obj).unwrap_or_default()).unwrap_or_default())
                 }
-                None => Ok(format!("{{\"ok\":true,\"result\":{}}}", value_json(&v))),
+                None => {
+                    let obj = TVal::Obj([
+                        ("ok".to_string(), TVal::Bool(true)),
+                        ("result".to_string(), match &v {
+                            crate::core::ast::Value::Text(t) => TVal::Str(t.clone()),
+                            crate::core::ast::Value::File(f) => TVal::Str(f.clone()),
+                            crate::core::ast::Value::Null => TVal::Null,
+                        }),
+                    ].into_iter().collect());
+                    Ok(String::from_utf8(toon_canonical(&obj).unwrap_or_default()).unwrap_or_default())
+                }
             }
         }
-        Err(e) => Ok(format!(
-            "{{\"ok\":false,\"error\":\"{}\"}}",
-            escape_json(&e)
-        )),
+        Err(e) => {
+            let obj = TVal::Obj([
+                ("ok".to_string(), TVal::Bool(false)),
+                ("error".to_string(), TVal::Str(e)),
+            ].into_iter().collect());
+            Ok(String::from_utf8(toon_canonical(&obj).unwrap_or_default()).unwrap_or_default())
+        }
     }
 }
 
 #[pyfunction]
 #[pyo3(signature = (name, args=None))]
-pub fn script_call_json(name: &str, args: Option<BTreeMap<String, String>>) -> PyResult<String> {
-    script_call_json_core(name, args).map_err(pyerr)
+pub fn script_call_toon(name: &str, args: Option<BTreeMap<String, String>>) -> PyResult<String> {
+    script_call_toon_core(name, args).map_err(pyerr)
 }
 
-/// Structural reuse lookup for LLM graph builders (`hyper similar --json`).
-pub fn hyper_similar_json_core(
+pub fn run_toon_core(
+    path: &str,
+    topic: &str,
+    params: Option<BTreeMap<String, String>>,
+    policy: Option<&str>,
+) -> Result<String, String> {
+    let pl = parse_pipeline_file(path).map_err(|e| e.to_string())?;
+    let errs = crate::typecheck::check_pipeline(&pl);
+    if !errs.is_empty() {
+        let msg = errs.iter().map(|e| format!("  {}", e)).collect::<Vec<_>>().join("\n");
+        return Err(format!("Type check errors:\n{}", msg));
+    }
+    let policy_opt = match policy {
+        Some(p) => Some(parse_policy_file(p).map_err(|e| e.to_string())?),
+        None => None,
+    };
+    let params = params.unwrap_or_default();
+    let result = exec_pipeline(topic, &params, &pl, policy_opt.as_ref());
+    Ok(exec_result_toon(&result))
+}
+
+#[pyfunction]
+#[pyo3(signature = (path, topic="", params=None, policy=None))]
+pub fn run_toon(
+    path: &str,
+    topic: &str,
+    params: Option<BTreeMap<String, String>>,
+    policy: Option<&str>,
+) -> PyResult<String> {
+    run_toon_core(path, topic, params, policy).map_err(pyerr)
+}
+
+// ── TOON 出口（续）：procs/runs/db_stats/pipeline/hyper ──────────────
+
+pub fn procs_toon_core(query: &str) -> String {
+    let rows = if query.trim().is_empty() {
+        db::all_procs()
+    } else {
+        db::search_procs(query)
+    };
+    let entries: Vec<TVal> = rows.iter().map(|r| {
+        let tags: Vec<TVal> = r.tags.iter().map(|t| TVal::Str(t.clone())).collect();
+        TVal::Obj([
+            ("name".to_string(), TVal::Str(r.name.clone())),
+            ("pipeline".to_string(), TVal::Str(r.pipeline.clone())),
+            ("description".to_string(), TVal::Str(r.description.clone())),
+            ("tags".to_string(), TVal::Arr(tags)),
+            ("impl_count".to_string(), TVal::Num(r.impl_count as u64)),
+            ("is_deliver".to_string(), TVal::Bool(r.is_deliver)),
+        ].into_iter().collect())
+    }).collect();
+    let obj = TVal::Obj([("procs".to_string(), TVal::Arr(entries))].into_iter().collect());
+    String::from_utf8(toon_canonical(&obj).unwrap_or_default()).unwrap_or_default()
+}
+
+#[pyfunction]
+pub fn procs_toon(query: &str) -> PyResult<String> {
+    Ok(procs_toon_core(query))
+}
+
+pub fn runs_toon_core(proc_name: &str, limit: usize) -> String {
+    let rows = db::recent_runs_limit(proc_name, limit);
+    let entries: Vec<TVal> = rows.iter().map(|r| {
+        TVal::Obj([
+            ("proc".to_string(), TVal::Str(r.proc_name.clone())),
+            ("impl".to_string(), TVal::Str(r.impl_name.clone())),
+            ("status".to_string(), TVal::Str(r.status.clone())),
+            ("latency_ms".to_string(), TVal::Num(r.latency_ms as u64)),
+            ("recorded_at".to_string(), TVal::Str(r.recorded_at.clone())),
+        ].into_iter().collect())
+    }).collect();
+    let obj = TVal::Obj([("runs".to_string(), TVal::Arr(entries))].into_iter().collect());
+    String::from_utf8(toon_canonical(&obj).unwrap_or_default()).unwrap_or_default()
+}
+
+#[pyfunction]
+pub fn runs_toon(proc_name: &str, limit: usize) -> PyResult<String> {
+    Ok(runs_toon_core(proc_name, limit))
+}
+
+pub fn db_stats_toon_core() -> String {
+    let (pipelines, procs, runs, compositions) = db::db_stats();
+    let obj = TVal::Obj([
+        ("pipelines".to_string(), TVal::Num(pipelines as u64)),
+        ("procs".to_string(), TVal::Num(procs as u64)),
+        ("runs".to_string(), TVal::Num(runs as u64)),
+        ("compositions".to_string(), TVal::Num(compositions as u64)),
+    ].into_iter().collect());
+    String::from_utf8(toon_canonical(&obj).unwrap_or_default()).unwrap_or_default()
+}
+
+#[pyfunction]
+pub fn db_stats_toon() -> PyResult<String> {
+    Ok(db_stats_toon_core())
+}
+
+/// Parse a .pipeline file into structural TOON.
+pub fn pipeline_toon_core(path: &str) -> Result<String, String> {
+    let pl = parse_pipeline_file(path).map_err(|e| e.to_string())?;
+    // 结构面：procs 列表（name/desc/impl_count）+ proc 名数组
+    let procs: Vec<TVal> = pl.procs.iter().map(|p| {
+        TVal::Obj([
+            ("name".to_string(), TVal::Str(p.name.clone())),
+            ("desc".to_string(), TVal::Str(p.description.clone())),
+            ("impls".to_string(), TVal::Num(p.plan.len() as u64)),
+            ("deliver".to_string(), TVal::Bool(p.deliver)),
+        ].into_iter().collect())
+    }).collect();
+    let obj = TVal::Obj([("procs".to_string(), TVal::Arr(procs))].into_iter().collect());
+    Ok(String::from_utf8(toon_canonical(&obj).unwrap_or_default()).unwrap_or_default())
+}
+
+#[pyfunction]
+pub fn pipeline_toon(path: &str) -> PyResult<String> {
+    pipeline_toon_core(path).map_err(pyerr)
+}
+
+pub fn hyper_similar_toon_core(
     query_path: &str,
     roots: Option<Vec<String>>,
 ) -> Result<String, String> {
-    let roots = roots.unwrap_or_default();
-    crate::hyper::similar_json(query_path, &roots)
+    // hyper 层结构化查询→TOON 重编码（json 中间层不暴露）
+    let j = crate::hyper::similar_json(query_path, &roots.unwrap_or_default())?;
+    json_str_to_toon(&j)
 }
 
 #[pyfunction]
 #[pyo3(signature = (query_path, roots=None))]
-pub fn hyper_similar_json(query_path: &str, roots: Option<Vec<String>>) -> PyResult<String> {
-    hyper_similar_json_core(query_path, roots).map_err(pyerr)
+pub fn hyper_similar_toon(query_path: &str, roots: Option<Vec<String>>) -> PyResult<String> {
+    hyper_similar_toon_core(query_path, roots).map_err(pyerr)
 }
 
-/// Node/proc reuse lookup (`hyper nodes --json`).
-pub fn hyper_nodes_json_core(
+pub fn hyper_nodes_toon_core(
     query: &str,
     roots: Option<Vec<String>>,
     role: Option<String>,
@@ -580,235 +452,137 @@ pub fn hyper_nodes_json_core(
 ) -> Result<String, String> {
     let roots = roots.unwrap_or_default();
     let filter = if role.is_some() || op.is_some() {
-        Some(crate::hyper::NodeQuery {
-            role,
-            op,
-            in_arity: None,
-            gated: None,
-        })
+        Some(crate::hyper::NodeQuery { role, op, in_arity: None, gated: None })
     } else {
         None
     };
-    crate::hyper::nodes_json(query, &roots, filter.as_ref())
+    let j = crate::hyper::nodes_json(query, &roots, filter.as_ref())?;
+    json_str_to_toon(&j)
 }
 
 #[pyfunction]
 #[pyo3(signature = (query="", roots=None, role=None, op=None))]
-pub fn hyper_nodes_json(
+pub fn hyper_nodes_toon(
     query: &str,
     roots: Option<Vec<String>>,
     role: Option<String>,
     op: Option<String>,
 ) -> PyResult<String> {
-    hyper_nodes_json_core(query, roots, role, op).map_err(pyerr)
+    hyper_nodes_toon_core(query, roots, role, op).map_err(pyerr)
 }
 
-pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(scripts_json, m)?)?;
-    m.add_function(wrap_pyfunction!(procs_json, m)?)?;
-    m.add_function(wrap_pyfunction!(runs_json, m)?)?;
-    m.add_function(wrap_pyfunction!(db_stats_json, m)?)?;
-    m.add_function(wrap_pyfunction!(pipeline_json, m)?)?;
-    m.add_function(wrap_pyfunction!(run_json, m)?)?;
-    m.add_function(wrap_pyfunction!(script_call_json, m)?)?;
-    m.add_function(wrap_pyfunction!(hyper_similar_json, m)?)?;
-    m.add_function(wrap_pyfunction!(hyper_nodes_json, m)?)?;
-    Ok(())
+/// 内部 JSON 字符串→TOON（bridge 函数：hyper 层遗留 json 输出收编；
+/// P4 后续轮次把 hyper 层原生 TOON 化后删除）。
+fn json_str_to_toon(j: &str) -> Result<String, String> {
+    // 极小 bridge：数组/对象/标量的宽松转换（hyper 输出形状有限）
+    let v = parse_loose_json(j)?;
+    let t = toon_canonical(&v).map_err(|e| e.to_string())?;
+    String::from_utf8(t).map_err(|e| e.to_string())
 }
 
-// ─────────────────────────────────────────────────────────────
-// Unit tests (pure Rust — no Python interpreter needed)
-// ─────────────────────────────────────────────────────────────
+fn parse_loose_json(j: &str) -> Result<TVal, String> {
+    let b: Vec<char> = j.chars().collect();
+    let mut i = 0usize;
+    let v = parse_loose_value(&b, &mut i)?;
+    skip_ws(&b, &mut i);
+    if i != b.len() {
+        return Err("trailing".into());
+    }
+    Ok(v)
+}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::ast::Value;
-    use crate::core::script_card::{Concurrency, ScriptCard};
-    use std::collections::BTreeSet;
+fn skip_ws(b: &[char], i: &mut usize) {
+    while *i < b.len() && b[*i].is_whitespace() { *i += 1; }
+}
 
-    fn card(name: &str, params: &str, pure: bool, conc: Concurrency) -> ScriptCard {
-        ScriptCard {
-            name: name.into(),
-            path: "/tmp/x.sh".into(),
-            lang: "bash".into(),
-            desc: "d".into(),
-            params: params.into(),
-            output: "words(int)".into(),
-            pure,
-            idempotent: pure,
-            concurrency: conc,
-            effects: "none".into(),
-            timeout_secs: 10,
-            retries: 0,
-            mcsm: String::new(),
-            mcsm_note: String::new(),
-            args_channel: "env".to_string(),
+fn parse_loose_value(b: &[char], i: &mut usize) -> Result<TVal, String> {
+    skip_ws(b, i);
+    if *i >= b.len() { return Err("eof".into()); }
+    match b[*i] {
+        '{' => {
+            *i += 1;
+            let mut m = std::collections::BTreeMap::new();
+            skip_ws(b, i);
+            if *i < b.len() && b[*i] == '}' { *i += 1; return Ok(TVal::Obj(m)); }
+            loop {
+                skip_ws(b, i);
+                let k = parse_loose_string(b, i)?;
+                skip_ws(b, i);
+                if *i >= b.len() || b[*i] != ':' { return Err("expect :".into()); }
+                *i += 1;
+                let v = parse_loose_value(b, i)?;
+                if m.insert(k, v).is_some() { return Err("dup key".into()); }
+                skip_ws(b, i);
+                match b.get(*i) {
+                    Some(',') => { *i += 1; }
+                    Some('}') => { *i += 1; break; }
+                    _ => return Err("expect , or }".into()),
+                }
+            }
+            Ok(TVal::Obj(m))
+        }
+        '[' => {
+            *i += 1;
+            let mut items = Vec::new();
+            skip_ws(b, i);
+            if *i < b.len() && b[*i] == ']' { *i += 1; return Ok(TVal::Arr(items)); }
+            loop {
+                let v = parse_loose_value(b, i)?;
+                items.push(v);
+                skip_ws(b, i);
+                match b.get(*i) {
+                    Some(',') => { *i += 1; }
+                    Some(']') => { *i += 1; break; }
+                    _ => return Err("expect , or ]".into()),
+                }
+            }
+            Ok(TVal::Arr(items))
+        }
+        '"' => Ok(TVal::Str(parse_loose_string(b, i)?)),
+        't' => { expect_lit(b, i, "true")?; Ok(TVal::Bool(true)) }
+        'f' => { expect_lit(b, i, "false")?; Ok(TVal::Bool(false)) }
+        'n' => { expect_lit(b, i, "null")?; Ok(TVal::Null) }
+        _ => {
+            let start = *i;
+            while *i < b.len() && (b[*i].is_ascii_digit() || b[*i] == '-') { *i += 1; }
+            let s: String = b[start..*i].iter().collect();
+            if s.is_empty() { return Err("bad value".into()); }
+            let n: u64 = s.parse().map_err(|_| "num")?;
+            Ok(TVal::Num(n))
         }
     }
+}
 
-    #[test]
-    fn decode_internal_fields_pairs_and_raw_boundary() {
-        let enc = "§§FIELDS§§words=3§§lines=1§§RAW§§##DSL_RESULT\nwords=3";
-        let f = decode_internal_fields(enc).unwrap();
-        assert_eq!(
-            f,
-            vec![("words".into(), "3".into()), ("lines".into(), "1".into())]
-        );
-        // RAW 段里的 k=v 不得混入字段
-        assert_eq!(
-            decode_internal_fields("§§FIELDS§§a=1§§RAW§§b=2"),
-            Some(vec![("a".into(), "1".into())])
-        );
-        assert_eq!(decode_internal_fields("plain text"), None);
-        assert_eq!(decode_internal_fields("§§FIELDS§§§§RAW§§x"), None);
-    }
-
-    #[test]
-    fn escape_json_specials() {
-        assert_eq!(escape_json("a\"b\\c\n"), "a\\\"b\\\\c\\n");
-        assert_eq!(escape_json("中文\n"), "中文\\n"); // UTF-8 passthrough
-        assert_eq!(escape_json("\u{1}"), "\\u0001");
-    }
-
-    #[test]
-    fn split_top_level_nesting_aware() {
-        assert_eq!(
-            split_top_level("text(str, required), n(int, default=10)"),
-            vec!["text(str, required)", "n(int, default=10)"]
-        );
-        assert_eq!(split_top_level(""), Vec::<String>::new());
-        assert_eq!(split_top_level("a, , b"), vec!["a", "b"]);
-        // deep nesting survives
-        assert_eq!(
-            split_top_level("f(a(b, c), d), g"),
-            vec!["f(a(b, c), d)", "g"]
-        );
-    }
-
-    #[test]
-    fn parse_param_decl_forms() {
-        assert_eq!(
-            parse_param_decl("text(str, required)"),
-            ParamDecl {
-                name: "text".into(),
-                ptype: "str".into(),
-                required: true,
-                default: None
+fn parse_loose_string(b: &[char], i: &mut usize) -> Result<String, String> {
+    if *i >= b.len() || b[*i] != '"' { return Err("expect string".into()); }
+    *i += 1;
+    let mut out = String::new();
+    while *i < b.len() {
+        match b[*i] {
+            '\\' => {
+                *i += 1;
+                match b.get(*i) {
+                    Some('n') => out.push('\n'),
+                    Some('t') => out.push('\t'),
+                    Some('r') => out.push('\r'),
+                    Some('"') => out.push('"'),
+                    Some('\\') => out.push('\\'),
+                    Some(c) => return Err(format!("bad esc {c}")),
+                    None => return Err("eof esc".into()),
+                }
+                *i += 1;
             }
-        );
-        assert_eq!(
-            parse_param_decl("n(int, default=10)"),
-            ParamDecl {
-                name: "n".into(),
-                ptype: "int".into(),
-                required: false,
-                default: Some("10".into())
-            }
-        );
-        assert_eq!(
-            parse_param_decl("x(str)"),
-            ParamDecl {
-                name: "x".into(),
-                ptype: "str".into(),
-                required: false,
-                default: None
-            }
-        );
+            '"' => { *i += 1; return Ok(out); }
+            c => { out.push(c); *i += 1; }
+        }
     }
+    Err("unterminated".into())
+}
 
-    #[test]
-    fn params_json_shape() {
-        let j = params_json("text(str, required), n(int, default=10)");
-        assert!(j.contains("\"name\":\"text\""));
-        assert!(j.contains("\"required\":true"));
-        assert!(j.contains("\"default\":\"10\""));
-        assert_eq!(params_json(""), "[]");
+fn expect_lit(b: &[char], i: &mut usize, lit: &str) -> Result<(), String> {
+    for c in lit.chars() {
+        if b.get(*i) != Some(&c) { return Err(format!("expect {lit}")); }
+        *i += 1;
     }
-
-    #[test]
-    fn output_json_shape() {
-        let j = output_json("words(int), lines(int)");
-        assert!(j.contains("\"name\":\"words\",\"type\":\"int\""));
-        assert_eq!(output_json(""), "[]");
-    }
-
-    #[test]
-    fn script_card_json_cse_flag() {
-        let safe = script_card_json(&card("a", "x(str)", true, Concurrency::Safe));
-        assert!(safe.contains("\"cse_safe\":true"));
-        let excl = script_card_json(&card("b", "x(str)", true, Concurrency::Exclusive));
-        assert!(excl.contains("\"cse_safe\":false"));
-        let impure = script_card_json(&card("c", "x(str)", false, Concurrency::Safe));
-        assert!(impure.contains("\"cse_safe\":false"));
-    }
-
-    #[test]
-    fn exec_result_json_ok_and_fail() {
-        let mut m = BTreeMap::new();
-        m.insert("p".to_string(), Value::Text("v".into()));
-        m.insert("f".to_string(), Value::File("/tmp/a".into()));
-        m.insert("n".to_string(), Value::Null);
-        let ok = exec_result_json(&ExecResult::Success(m));
-        assert!(ok.starts_with("{\"ok\":true"));
-        assert!(ok.contains("\"type\":\"file\",\"path\":\"/tmp/a\""));
-        assert!(ok.contains("\"type\":\"null\""));
-        let fail = exec_result_json(&ExecResult::Failed {
-            error: "boom \"x\"".into(),
-            partial: BTreeMap::new(),
-        });
-        assert!(fail.starts_with("{\"ok\":false,\"error\":\"boom \\\"x\\\"\",\"err_code\":\"\""));
-        // v0.14：带 Left 的 partial 解码为干净对象
-        let mut p = BTreeMap::new();
-        let rec = crate::errflow::ErrorRecord::new(
-            "render",
-            "ffmpeg",
-            "run timed out after 5s: ffmpeg",
-            2,
-        );
-        p.insert(
-            "render".to_string(),
-            crate::core::ast::Value::Text(rec.encode()),
-        );
-        p.insert(
-            "search".to_string(),
-            crate::core::ast::Value::Text("hits".into()),
-        );
-        let fail2 = exec_result_json(&ExecResult::Failed {
-            error: "All paths failed for proc: render".into(),
-            partial: p,
-        });
-        assert!(fail2.contains("\"err_code\":\"timeout\""));
-        assert!(fail2.contains("\"render\":{\"err\":\"1\""));
-        assert!(fail2.contains("\"err_msg\":\"run timed out after 5s: ffmpeg\""));
-        assert!(fail2.contains("\"search\":{\"type\":\"text\",\"value\":\"hits\"}"));
-    }
-
-    #[test]
-    fn proc_row_and_run_row_json() {
-        let pr = ProcRow {
-            id: 1,
-            name: "gen".into(),
-            pipeline: "demo".into(),
-            description: "d".into(),
-            tags: ["a".to_string(), "b".to_string()].into_iter().collect(),
-            impl_count: 2,
-            is_deliver: false,
-        };
-        let j = proc_row_json(&pr);
-        assert!(j.contains("\"tags\":[\"a\",\"b\"]"));
-        assert!(j.contains("\"impl_count\":2"));
-
-        let rr = RunRow {
-            proc_name: "gen".into(),
-            impl_name: "w".into(),
-            status: "Ok".into(),
-            latency_ms: 42,
-            recorded_at: "t".into(),
-            rate_tokens: 0,
-            est_loss: 0.0,
-        };
-        let j = run_row_json(&rr);
-        assert!(j.contains("\"latency_ms\":42"));
-    }
+    Ok(())
 }
