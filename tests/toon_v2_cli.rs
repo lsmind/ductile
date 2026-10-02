@@ -98,12 +98,37 @@ fn ledger_cli_ed25519_create_and_mlv_compat() {
 #[test]
 fn ledger_cli_convert_v1_to_v2() {
     let d = tmpdir("conv");
-    // v1 legacy 源链（mlv init + append 两条）
+    // v1 legacy 源链：库内直构造（P4b 后 mlv 写入动词已降级，CLI 面不再产 v1 链）
     let src = d.join("src.v1");
-    let (rc, _, err) = run(&["mlv", src.to_str().unwrap(), "init"]);
-    assert_eq!(rc, 0, "{err}");
-    let (rc2, _, err2) = run(&["mlv", src.to_str().unwrap(), "create", "b1", "0", "rk-a"]);
-    assert_eq!(rc2, 0, "{err2}");
+    {
+        use ductile::kernel::mlv::{MlvLedger, MlvOp, LedgerRecord, make_envelope, effect_key, domain_hash, DOMAIN_RECORD};
+        let (_led, genesis_h) = MlvLedger::init(&src, 1_000_000_000).unwrap();
+        drop(_led); // 释放 EX 锁再 open（flock-reentrant 禁嵌套持锁）
+        // v1 create 语义（照 cmd_mlv mkrec 无 signer 分支：make_envelope 生成 mac 信封）
+        let mut led = MlvLedger::open(&src).unwrap();
+        let now = 1_000_000_001u64;
+        let (op, binding, rev, rk) = (MlvOp::CreateProposal, "b1", 0u64, "rk-a");
+        let payload = format!("{op:?}|{binding}|{rev}");
+        let digest = domain_hash(DOMAIN_RECORD, format!("{op:?}||{payload}").as_bytes());
+        let env = make_envelope(&op, binding, rev, "", &digest, now);
+        let env_digest = env.get("mac").cloned().unwrap_or_default();
+        let rec = LedgerRecord {
+            schema: 1, seq: 1, op,
+            key_id: "genesis".into(),
+            root_commitment: ductile::kernel::mlv::GENESIS_ROOT.into(),
+            effect_key: effect_key(op, binding, rev, "").unwrap(),
+            idempotency_scope: None, caller_id: Some("cli".into()), request_key: Some("".into()),
+            request_digest: digest,
+            binding_id: Some(binding.into()), revision: Some(rev), from: None, to: Some(ductile::kernel::mlv::MlvState::Proposed),
+            before_record_hash: genesis_h.clone(), accepted_at_ns: now,
+            nonce: Some(format!("nonce-1-{now}")), envelope_digest: Some(env_digest), envelope: Some(env),
+            payload: payload.clone(),
+            registry_receipt: None,
+            result: [("code".to_string(), "OK".to_string())].into_iter().collect(),
+            record_hash: String::new(),
+        };
+        led.append(rec).unwrap();
+    }
 
     // 源字节快照（convert 后必须零变化）
     let src_bytes = std::fs::read(&src).unwrap();

@@ -257,6 +257,20 @@ pub fn manifest_json(entries: &[ManifestEntry]) -> String {
 
 /// 验证一个解包后的 reproduce 目录：MANIFEST 逐文件 sha256 比对 + 账本链验证。
 pub fn verify_reproduce(dir: &Path) -> Result<(usize, u64, String), String> {
+    // P4b（规格 §四.3）：双读——MANIFEST.toon 优先（唯一产品路径）；
+    // 旧 MANIFEST.json 只读识别（显式迁移源）。
+    let toon_path = dir.join("MANIFEST.toon");
+    if toon_path.exists() {
+        let entries = verify_manifest_toon(dir)?;
+        let mut bytes = 0u64;
+        for e in &entries {
+            bytes += e.bytes;
+        }
+        let manifest_lines = entries.len() + 1; // header + entries
+        // 账本链验证同路径（fail-closed：无 ledger.jsonl=Err）
+        let (n, head) = verify_ledger(&dir.join("ledger.jsonl"))?;
+        return Ok((entries.len(), bytes, format!("MANIFEST.toon entries={} ledger_n={} head={}", manifest_lines, n, head)));
+    }
     let mpath = dir.join("MANIFEST.json");
     let f = std::fs::File::open(&mpath).map_err(|e| format!("open manifest: {e}"))?;
     let mut checked = 0usize;
@@ -372,8 +386,8 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].path, "a.jsonl");
         assert_eq!(entries[1].path, "sub/b.jsonl");
-        // 写 manifest 后打包验证
-        std::fs::write(d.join("MANIFEST.json"), manifest_json(&entries)).unwrap();
+        // 写 manifest 后打包验证（P4b：产品路径=MANIFEST.toon）
+        write_manifest_toon(&d, &entries).unwrap();
         // 无 ledger.jsonl → verify_reproduce 应报错（fail-closed）
         match verify_reproduce(&d) {
             Err(e) => assert!(e.contains("ledger"), "got: {e}"),

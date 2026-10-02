@@ -365,11 +365,8 @@ fn cmd_kernel_reproduce(args: &[String]) -> Result<i32, String> {
         // MANIFEST.json = dir 内全部产物逐文件 sha256（不含 MANIFEST 自身）
         let entries = crate::kernel::ledger::dir_manifest(&dir)
             .map_err(|e| format!("manifest: {e}"))?;
-        std::fs::write(
-            dir.join("MANIFEST.json"),
-            crate::kernel::ledger::manifest_json(&entries),
-        )
-        .map_err(|e| e.to_string())?;
+        crate::kernel::ledger::write_manifest_toon(&dir, &entries)
+            .map_err(|e| e.to_string())?;
         // 打包走系统 tar --zstd（kernel 保持零新依赖）
         let status = std::process::Command::new("tar")
             .args([
@@ -507,6 +504,17 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
         MlvOp::from_name(&v.to_uppercase().replace('-', "_")).map_err(|e| e.to_string())
     };
 
+    // ── P4b（规格 §六.0）：mlv 组写入动词降级——fail-closed 指引 ──
+    // 只读动词（status/verify）保留；一切写入动词打硬错并指向 ledger 组。
+    // 双读边界：既有 v1 账本验证走 `ductile ledger verify`（自动识别 v1/v2）。
+    const MLV_READONLY: &[&str] = &["status", "verify", "keygen"]; // keygen=钥工具，不写账本
+    if !MLV_READONLY.contains(&verb) {
+        eprintln!("ERR E422 mlv '{verb}' is a write verb: removed in TOON v2 (spec §六.0)");
+        eprintln!("     production path: ductile ledger create|append|... (v2 ed25519 chain)");
+        eprintln!("     legacy v1 ledger verification: ductile ledger verify <file>");
+        eprintln!("     migration: ductile ledger convert <v1> --out <v2> --root-key <k>");
+        std::process::exit(1);
+    }
     match verb {
         "init" => {
             // --mode legacy（默认）| ed25519 --root-key <file>（规格 §六.2）
@@ -2810,45 +2818,39 @@ fn consolidate(
     report.consolidated = ids;
 }
 
-fn explore_report_json(r: &ExploreReport) -> String {
-    let mut out = String::from("{\n");
-    out.push_str(&format!("  \"topic\": \"{}\",\n", r.topic));
-    out.push_str(&format!(
-        "  \"waves_run\": {}, \"deep_steps_run\": {},\n",
-        r.waves_run, r.deep_steps_run
-    ));
-    out.push_str(&format!(
-        "  \"stop_reason\": \"{}\",\n",
-        match &r.stop_reason {
-            Some(ExploreStop::Budget) => "Budget".into(),
-            Some(ExploreStop::CurriculumStop) => "CurriculumStop".into(),
-            Some(ExploreStop::FailClosed(e)) => format!("FailClosed({})", e),
-            None => "-".into(),
-        }
-    ));
-    out.push_str("  \"results\": {\n");
-    for (i, (id, (kind, o))) in r.results.iter().enumerate() {
+fn explore_report_toon(r: &ExploreReport) -> String {
+    // P4b/T19：探索报告=canonical TOON（规格 §五.1；JSON writer 删尽）
+    use crate::kernel::toon::{toon_canonical, TVal};
+    let stop = match &r.stop_reason {
+        Some(ExploreStop::Budget) => "Budget".to_string(),
+        Some(ExploreStop::CurriculumStop) => "CurriculumStop".to_string(),
+        Some(ExploreStop::FailClosed(e)) => format!("FailClosed({e})"),
+        None => "-".to_string(),
+    };
+    let mut results: std::collections::BTreeMap<String, TVal> = std::collections::BTreeMap::new();
+    for (id, (kind, o)) in r.results.iter() {
         let (oc, ev) = match o {
             TaskOutcome::Pass { evidence } => ("Pass", evidence.clone()),
             TaskOutcome::Fail { evidence } => ("Fail", evidence.clone()),
             TaskOutcome::Undecidable { reason } => ("Undecidable", reason.clone()),
         };
-        let comma = if i + 1 < r.results.len() { "," } else { "" };
-        out.push_str(&format!(
-            "    \"{}\": [\"{:?}\", \"{}\", \"{}\"]{}\n",
-            id,
-            kind,
-            oc,
-            ev.replace('"', "'"),
-            comma
-        ));
+        results.insert(id.clone(), TVal::Arr(vec![
+            TVal::Str(format!("{:?}", kind)),
+            TVal::Str(oc.to_string()),
+            TVal::Str(ev),
+        ]));
     }
-    out.push_str("  },\n");
-    out.push_str(&format!("  \"consolidated\": {},\n", r.consolidated.len()));
-    out.push_str(&format!("  \"has_findings\": {},\n", r.has_findings()));
-    out.push_str(&format!("  \"frozen\": {}\n", r.frozen));
-    out.push('}');
-    out
+    let obj = TVal::Obj([
+        ("consolidated".to_string(), TVal::Num(r.consolidated.len() as u64)),
+        ("frozen".to_string(), TVal::Bool(r.frozen)),
+        ("has_findings".to_string(), TVal::Bool(r.has_findings())),
+        ("results".to_string(), TVal::Obj(results)),
+        ("stop_reason".to_string(), TVal::Str(stop)),
+        ("topic".to_string(), TVal::Str(r.topic.clone())),
+        ("waves_run".to_string(), TVal::Num(r.waves_run as u64)),
+        ("deep_steps_run".to_string(), TVal::Num(r.deep_steps_run as u64)),
+    ].into_iter().collect());
+    String::from_utf8(toon_canonical(&obj).unwrap_or_default()).unwrap_or_default()
 }
 
 fn cmd_explore(path: &str, topic: &str, drs_only: bool) -> Result<i32, String> {
@@ -2934,8 +2936,8 @@ fn cmd_explore(path: &str, topic: &str, drs_only: bool) -> Result<i32, String> {
         &mut judge,
     );
     consolidate(&mut report, &task_store);
-    let json = explore_report_json(&report);
-    println!("{}", json);
+    let toon = explore_report_toon(&report);
+    println!("{}", toon);
 
     // freeze（门禁 6）：报告写入持久位置后置 frozen，二次检索走只读路径。
     // 目录 ~/.local/share/ductile/explore/（跟随主库 DUCTILE_DATA 数据根）。
@@ -2960,13 +2962,13 @@ fn cmd_explore(path: &str, topic: &str, drs_only: bool) -> Result<i32, String> {
     } else {
         safe
     };
-    let report_name = format!("{}_{}.json", safe, stamp);
+    let report_name = format!("{}_{}.toon", safe, stamp);
     let report_path = explore_dir.join(&report_name);
-    std::fs::write(&report_path, &json).map_err(|e| format!("freeze: {}", e))?;
+    std::fs::write(&report_path, &toon).map_err(|e| format!("freeze: {}", e))?;
     eprintln!("explore report (frozen): {}", report_path.display());
     eprintln!(
         "explore report id: {}",
-        report_name.trim_end_matches(".json")
+        report_name.trim_end_matches(".toon")
     );
     Ok(0)
 }
