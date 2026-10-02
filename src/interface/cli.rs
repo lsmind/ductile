@@ -234,6 +234,9 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         // v0.24 MLV v3.1 治理内核（旧动词输出字节冻结；新动词新格式）
         "mlv" if args.len() >= 3 => cmd_mlv(&args[2..]),
 
+        // v0.25 TOON v2：ledger 组=唯一生产入口（规格 §六.1；分发先于 mlv——确认审#5）
+        "ledger" if args.len() >= 2 => cmd_ledger(&args[2..]),
+
         // v0.23 深题手册：`ductile help <topic>` 把引擎行为写进二进制，
         // 终端即得——不再逼使用者进 Rust 源码排障（反馈单第 3 条）。
         "help" if args.len() >= 3 => cmd_help_topic(&args[2..].join(" ")),
@@ -3761,5 +3764,163 @@ mod tests {
         assert_eq!(run(&args).unwrap(), 1);
         assert_eq!(run(&s(&["ductile"])).unwrap(), 1);
         assert_eq!(run(&s(&["ductile", "no-such-cmd"])).unwrap(), 1);
+    }
+}
+
+/// `ductile ledger <verb> ...` — v2（TOON）唯一生产入口（规格 §六.1；P2c）。
+/// create/verify/convert/recover：默认创建与业务写入走 v2；mlv 组降级为 legacy 别名（P4 收网）。
+/// 分发优先级：ledger 组先于 mlv 组（确认审#5）。
+fn cmd_ledger(args: &[String]) -> Result<i32, String> {
+    use crate::kernel::gov::GovRegistry;
+    use crate::kernel::mlv_toon::FrameFormat;
+    let verb = args[0].as_str();
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    match verb {
+        "create" => {
+            // ductile ledger create <PATH> --root-key <file>：只创建 v2 新链。
+            // v2 链=ed25519 模式强制（typed 链必须带 auth——与 v1 typed 同约束；规格 §五.4）。
+            let path = args.get(1).ok_or("usage: ledger create <PATH> --root-key <file>")?;
+            let path = std::path::PathBuf::from(path);
+            let root_key = args.iter().position(|a| a == "--root-key")
+                .and_then(|i| args.get(i + 1))
+                .map(std::path::PathBuf::from);
+            if path.exists() {
+                eprintln!("ERR E422 target exists: {}", path.display());
+                return Ok(1);
+            }
+            let root_key = match root_key {
+                Some(k) => k,
+                None => {
+                    eprintln!("ERR E422 ledger create requires --root-key <file> (v2 chains are ed25519-mode; generate with: ductile mlv <path> keygen)");
+                    return Ok(1);
+                }
+            };
+            match GovRegistry::init_ed25519_v2(&path, now_ns, &root_key) {
+                Ok((_reg, ghash)) => { println!("OK ledger create v2 head={ghash}"); Ok(0) }
+                Err(e) => { eprintln!("{} {}", e.code(), e.detail()); Ok(1) }
+            }
+        }
+        "verify" => {
+            // 自动识别 v1/v2，只读；同构/canonical/链哈希全验（open 即全验）
+            let path = args.get(1).ok_or("usage: ledger verify <PATH>")?;
+            let path = std::path::PathBuf::from(path);
+            if !path.exists() {
+                eprintln!("ERR ledger-missing {}", path.display());
+                return Ok(2);
+            }
+            match GovRegistry::open(&path) {
+                Ok(reg) => {
+                    let head = reg.head().map_err(|e| e.to_string())?;
+                    let fmt = match reg.frame_fmt {
+                        FrameFormat::V2 => "v2(toon)",
+                        FrameFormat::V1Typed => "v1(typed)",
+                        FrameFormat::V1Legacy => "v1(legacy)",
+                    };
+                    println!("OK ledger verify format={fmt} head={head}");
+                    Ok(0)
+                }
+                Err(e) => { eprintln!("{} {}", e.code(), e.detail()); Ok(3) }
+            }
+        }
+        "convert" => {
+            // ductile ledger convert --in <PATH> --out <PATH> [--root-key <file>]：
+            // 只读 v1，原子建全新 v2 链。跨签名域（J→0x02‖T）——v1 信封认证不可迁移，
+            // --root-key 给出时全链重签（语义声明保留、认证换新根钥）；不给则记录原样
+            // 迁移但产物为未认证 v2 链（可 verify 结构，业务验签面留待新钥）。
+            let get_flag = |name: &str| -> Option<std::path::PathBuf> {
+                args.iter().position(|a| a == name)
+                    .and_then(|i| args.get(i + 1))
+                    .map(std::path::PathBuf::from)
+            };
+            let src = get_flag("--in").ok_or("convert requires --in <PATH>")?;
+            let dst = get_flag("--out").ok_or("convert requires --out <PATH>")?;
+            let root_key = get_flag("--root-key");
+            if !src.exists() {
+                eprintln!("ERR ledger-missing {}", src.display());
+                return Ok(2);
+            }
+            if dst.exists() {
+                eprintln!("ERR E422 target exists: {}", dst.display());
+                return Ok(1);
+            }
+            // 只读打开源（v1 双态皆可；v2 源=已是 v2，convert 拒绝）
+            let reg = match GovRegistry::open(&src) {
+                Ok(r) => r,
+                Err(e) => { eprintln!("{} {}", e.code(), e.detail()); return Ok(3); }
+            };
+            match reg.frame_fmt {
+                FrameFormat::V2 => {
+                    eprintln!("ERR E422 source is already v2 (convert is v1→v2 only)");
+                    return Ok(1);
+                }
+                _ => {}
+            }
+            // 重放 v1 全部记录 → v2 独立链（§三.4：v2 哈希重算=新链身份；
+            // v1 记录哈希不迁移——record_hash/before_record_hash 全链重建，prev 重接）
+            // genesis：--root-key 给出→auth 对象按新钥+v2 H0 重建；否则 payload 原文
+            let records = reg.ledger.records().map_err(|e| format!("read src: {e}"))?;
+            let tmp = dst.with_extension(format!("tmp.{}.{}", std::process::id(), now_ns));
+            let genesis_payload: String = match &root_key {
+                Some(k) => {
+                    let (sk, kid) = crate::kernel::mlv_auth::load_signing_key(k)
+                        .map_err(|e| format!("load root key: {e}"))?;
+                    let pk_hex: String = sk.verifying_key().to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+                    let h0 = crate::kernel::mlv_toon::compute_h0_v2(&kid, &pk_hex)
+                        .map_err(|e| format!("h0: {e}"))?;
+                    let t = crate::kernel::mlv_toon::auth_object_toon(&kid, &pk_hex, &h0)
+                        .map_err(|e| format!("auth toon: {e}"))?;
+                    String::from_utf8(t).map_err(|_| "utf8")?
+                }
+                None => records[0].payload.clone(),
+            };
+            let (mut led2, _g) = crate::kernel::mlv::MlvLedger::init_v2(&tmp, records[0].accepted_at_ns, &genesis_payload)
+                .map_err(|e| format!("init tmp: {e}"))?;
+            // 逐条重放：清 record_hash→v2 重算→prev 重接；
+            // --root-key：信封 v2 域重签（mac 置空、sig 换新钥）；否则剥离不可迁移的 v1 认证字段
+            let (sk, kid) = match &root_key {
+                Some(k) => {
+                    let (sk, kid) = crate::kernel::mlv_auth::load_signing_key(k)
+                        .map_err(|e| format!("load root key: {e}"))?;
+                    (Some(sk), kid)
+                }
+                None => (None, String::new()),
+            };
+            let mut prev = _g.clone();
+            for r in &records[1..] {
+                let mut rec = r.clone();
+                rec.record_hash = String::new();
+                rec.before_record_hash = prev.clone();
+                if let (Some(sk), Some(env)) = (&sk, rec.envelope.as_mut()) {
+                    env.remove("mac");
+                    env.insert("mac".into(), String::new());
+                    env.remove("sig");
+                    env.remove("sig_key_id");
+                    env.remove("sig_trust_seq");
+                    crate::kernel::mlv_toon::sign_envelope_v2(env, sk, &kid, None)
+                        .map_err(|e| format!("re-sign: {e}"))?;
+                    rec.envelope_digest = Some(String::new());
+                }
+                prev = led2.append_v2(rec).map_err(|e| format!("append: {e}"))?;
+            }
+            drop(led2);
+            // 完整验证临时链再 rename（§六.3）
+            if let Err(e) = GovRegistry::open(&tmp) {
+                let _ = std::fs::remove_file(&tmp);
+                let _ = std::fs::remove_file(tmp.with_extension("lock"));
+                eprintln!("ERR internal verify tmp failed: {e:?}");
+                return Ok(3);
+            }
+            std::fs::rename(&tmp, &dst).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                format!("rename: {e}")
+            })?;
+            let n = records.len();
+            println!("OK ledger convert records={n} -> {}", dst.display());
+            Ok(0)
+        }
+        _ => Err(format!("unknown ledger verb: {verb} (create|verify|convert)")),
     }
 }
