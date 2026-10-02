@@ -202,7 +202,7 @@ pub fn hex_decode64_pub(s: &str) -> Option<[u8; 64]> {
     hex_decode64(s)
 }
 
-fn hex_decode32(s: &str) -> Option<[u8; 32]> {
+pub fn hex_decode32(s: &str) -> Option<[u8; 32]> {
     if s.len() != 64 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
@@ -311,6 +311,8 @@ pub struct TrustState {
     pub chain_hash: String,                       // 当前链哈希（genesis 后=H0）
     pub mode_ed25519: bool,
     pub root_key_id: String,
+    /// 信任帧签名域版本（false=v1 J 域；true=v2 TOON 域+0x02）。由 genesis 链格式定。
+    pub toon: bool,
 }
 
 impl TrustState {
@@ -342,6 +344,34 @@ impl TrustState {
             chain_hash: want_h0,
             mode_ed25519: true,
             root_key_id: root_key_id.clone(),
+            toon: false,
+        })
+    }
+
+    /// v2（TOON）模式构造入口：H0 用 v2 公式校验，toon=true（信任帧验签域分流）。
+    pub fn from_genesis_auth_toon(auth: &BTreeMap<String, String>) -> Result<Self, String> {
+        let root_key_id = auth.get("root_key_id").ok_or("auth missing root_key_id")?;
+        let pk_hex = auth.get("root_public_key").ok_or("auth missing root_public_key")?;
+        let pk = hex_decode32(pk_hex).ok_or("root_public_key must be 64 hex chars")?;
+        let want_h0 = crate::kernel::mlv_toon::compute_h0_v2(root_key_id, pk_hex)?;
+        let got_h0 = auth.get("trust_hash").ok_or("auth missing trust_hash")?;
+        if &want_h0 != got_h0 {
+            return Err(format!("{DETAIL_TRUST_CHAIN}: genesis trust_hash mismatch (H0 v2)"));
+        }
+        let (derived, _) = key_id_of(&pk);
+        if &derived != root_key_id {
+            return Err(format!("{DETAIL_TRUST_CHAIN}: root_key_id does not derive from root_public_key"));
+        }
+        let mut active = BTreeMap::new();
+        active.insert(root_key_id.clone(), pk);
+        Ok(TrustState {
+            active,
+            revoked: BTreeMap::new(),
+            trust_seq: 0,
+            chain_hash: want_h0,
+            mode_ed25519: true,
+            root_key_id: root_key_id.clone(),
+            toon: true,
         })
     }
 
@@ -413,7 +443,11 @@ impl TrustState {
             if self.is_revoked(&tf.key_id, self.trust_seq) {
                 return Err(format!("{DETAIL_KEY_REVOKED}: rotate signer revoked"));
             }
-            return verify_trust_frame_sig(tf, &pk);
+            return if self.toon {
+                crate::kernel::mlv_toon::verify_trust_frame_sig_v2(tf, &pk)
+            } else {
+                verify_trust_frame_sig(tf, &pk)
+            };
         }
         // REVOKE：任意活动未吊销钥
         let mut last_err = format!("{DETAIL_SIG_INVALID}: revoke has no valid active signer");
@@ -421,7 +455,12 @@ impl TrustState {
             if self.is_revoked(kid, self.trust_seq) {
                 continue;
             }
-            if verify_trust_frame_sig(tf, pk).is_ok() {
+            let ok = if self.toon {
+                crate::kernel::mlv_toon::verify_trust_frame_sig_v2(tf, pk).is_ok()
+            } else {
+                verify_trust_frame_sig(tf, pk).is_ok()
+            };
+            if ok {
                 return Ok(());
             }
             last_err = format!("{DETAIL_SIG_INVALID}: active signer {kid} verify failed");

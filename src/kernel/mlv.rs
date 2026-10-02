@@ -1012,6 +1012,16 @@ impl MlvLedger {
 
     /// 当前 head（空账本=ZERO_HASH；不验链——验链走 replay）。
     pub fn head(&self) -> Result<String, String> {
+        // 三态感知：v2 链走 TOON 解码；v1 沿既有（P2b）
+        let data = std::fs::read(&self.path).map_err(|e| format!("read ledger: {e}"))?;
+        if !data.is_empty() && data.len() >= 10 && data[8] != b'{' && data[9] == 0x02 {
+            let (_, frames) = crate::kernel::mlv_toon::decode_ledger_tri(&data)?;
+            let h = frames.iter().rev().find_map(|f| match f {
+                crate::kernel::mlv_toon::LedgerFrame::Record(r) => Some(r.record_hash.clone()),
+                _ => None,
+            });
+            return Ok(h.unwrap_or_else(|| ZERO_HASH.to_string()));
+        }
         let (recs, _trusts) = self.records_with_trust()?;
         Ok(recs.last().map(|r| r.record_hash.clone()).unwrap_or_else(|| ZERO_HASH.to_string()))
     }

@@ -24,7 +24,7 @@ use crate::kernel::mlv::{
     DOMAIN_RECORD, GENESIS_ROOT, INIT_EFFECT_KEY, ZERO_HASH,
 };
 use crate::kernel::mlv_auth::{
-    TrustFrame, AUTH_SCHEMA, DOMAIN_SIG, DOMAIN_TRUST,
+    TrustFrame, TrustState, AUTH_SCHEMA, DOMAIN_SIG, DOMAIN_TRUST,
 };
 use crate::kernel::toon::{encode_frame_v2, parse_toon_closed, toon_canonical, TVal};
 use std::collections::BTreeMap;
@@ -542,4 +542,66 @@ impl MlvLedger {
         let data = std::fs::read(&self.path).map_err(|e| format!("read ledger: {e}"))?;
         decode_ledger_tri(&data)
     }
+}
+
+// ── TrustState v2（H0 自洽用 v2 公式；结构体复用=格式中立）─────────
+
+/// v2 genesis auth → TrustState（toon=true：信任帧验签域=v2）。
+pub fn trust_state_from_genesis_auth_v2(auth: &BTreeMap<String, String>) -> Result<TrustState, String> {
+    TrustState::from_genesis_auth_toon(auth)
+}
+
+/// v2 业务记录验签（trust 检查逻辑=verify_business_sig；签名域=v2）。
+pub fn verify_business_sig_v2(
+    env: &BTreeMap<String, String>,
+    state_at_position: &TrustState,
+) -> Result<(), String> {
+    use crate::kernel::mlv_auth::{DETAIL_KEY_REVOKED, DETAIL_TRUST_CHAIN};
+    let sig_key_id = env.get("sig_key_id")
+        .ok_or_else(|| format!("{DETAIL_TRUST_CHAIN}: envelope missing sig_key_id"))?;
+    let pk = state_at_position.pk_of(sig_key_id)
+        .ok_or_else(|| format!("{DETAIL_TRUST_CHAIN}: signing key not enrolled: {sig_key_id}"))?;
+    if let Some(declared_raw) = env.get("sig_trust_seq") {
+        let canon = !declared_raw.is_empty()
+            && declared_raw.bytes().all(|b| b.is_ascii_digit())
+            && (declared_raw.len() == 1 || !declared_raw.starts_with('0'));
+        let declared = if canon { declared_raw.parse::<u64>().ok() } else { None };
+        match declared {
+            Some(d) if d <= state_at_position.trust_seq => {}
+            _ => return Err(format!(
+                "{DETAIL_TRUST_CHAIN}: sig_trust_seq invalid or ahead: {declared_raw} vs position trust_seq {}",
+                state_at_position.trust_seq
+            )),
+        }
+    }
+    let pos_seq = state_at_position.trust_seq;
+    if state_at_position.is_revoked(sig_key_id, pos_seq) {
+        return Err(format!("{DETAIL_KEY_REVOKED}: {sig_key_id} revoked at seq {pos_seq}"));
+    }
+    verify_envelope_sig_v2(env, pk)
+}
+
+/// v2 链验证（verify_chain 的 v2 版：哈希用 record_hash_v2；其余语义同 v1）。
+pub fn verify_chain_v2(records: &[LedgerRecord]) -> Result<String, String> {
+    if records.is_empty() {
+        return Err("ledger empty".into());
+    }
+    if records[0].op != MlvOp::LedgerInit {
+        return Err("first record must be LEDGER_INIT".into());
+    }
+    let mut expect_prev = ZERO_HASH.to_string();
+    for (i, r) in records.iter().enumerate() {
+        if r.seq != i as u64 {
+            return Err(format!("seq break at {i}: got {} expect {i}", r.seq));
+        }
+        if r.before_record_hash != expect_prev {
+            return Err(format!("chain break at {i}: prev mismatch"));
+        }
+        let want = record_hash_v2(r)?;
+        if r.record_hash != want {
+            return Err(format!("record_hash mismatch at {i}"));
+        }
+        expect_prev = r.record_hash.clone();
+    }
+    Ok(expect_prev)
 }
