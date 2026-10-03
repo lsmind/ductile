@@ -27,6 +27,26 @@ pub use crate::textargs::{
 
 // ── Hot patches ──
 
+/// C线③：运行中心跳——追加一行带时间戳的进度事件到 DUCTILE_PROGRESS_FILE。
+/// cmd_run 启动时设置并截断该文件；script 子进程经 env 继承同一文件，
+/// 引擎侧 proc 边界事件与脚本 stdout 行自然交织成单一时间线，
+/// `ductile run-status` / tail -f 即可边跑边看。
+pub fn progress_note(line: &str) {
+    let Ok(path) = std::env::var("DUCTILE_PROGRESS_FILE") else { return };
+    if path.is_empty() {
+        return;
+    }
+    use std::io::Write;
+    let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else {
+        return;
+    };
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = writeln!(f, "[{ts}] {line}");
+}
+
 /// Load patches from SQLite and apply them to a cloned pipeline.
 /// Returns Cow-like: if no patches, returns original reference wrapped in Ok.
 /// Supports overriding: enabled, cost.latency, cost.risk, cost.tokens, cost.money, retry, stub.
@@ -284,6 +304,14 @@ pub fn exec_pipeline(
     for layer in &layers {
         // Execute procs in this layer (serially for now — parallel via threads later)
         for proc_name in layer {
+            // C线②热补丁检查点：每个 proc 开跑前重读 confirmed patches。
+            // 运行中 `ductile patch set <pl> <proc> <impl> enabled=false` 等
+            // 即时作用于后续 proc（impl 选择/stub/cost/retry），不动源文件；
+            // 治理语义（origin/tentative→confirmed/replay gate）原样复用。
+            if db::load_patches(&pl.name).iter().any(|p| p.status == "confirmed") {
+                pl = apply_patches(&pl);
+            }
+            progress_note(&format!("PROC {} start", proc_name));
             let proc = pl.procs.iter().find(|p| &p.name == proc_name);
             if let Some(proc) = proc {
                 if proc.deliver {

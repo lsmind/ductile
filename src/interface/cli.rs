@@ -61,6 +61,8 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         },
         "graph" if args.len() >= 3 => cmd_graph(&args[2]),
         "parse" if args.len() >= 3 => cmd_parse(&args[2]),
+        // C线③：运行中实时查看——tail 进度时间线（proc 边界 + script stdout）。
+        "run-status" if args.len() >= 3 => cmd_run_status(&args[2]),
 
         // Hyper layer — guide graph generation (compile-time), not runtime cycles
         "hyper" if args.len() >= 3 => cmd_hyper(&args[2..]),
@@ -1876,6 +1878,76 @@ fn print_usage() {
 
 // ── run ──
 
+// C线③：run-status——查看运行中管线的进度时间线（与 tail -f 等价的引擎内入口）。
+// 数据源 = cmd_run 截断重写的 target/ductile-progress/<pipeline>.log：
+//   [ts] PROC x start          引擎侧 proc 边界
+//   脚本 stdout 行             script 流式镜像（C线①）
+// 可选参数：--lines N（默认30） / --follow（持续跟随，Ctrl-C 退出）。
+fn cmd_run_status(name: &str) -> Result<i32, String> {
+    let mut lines_n: usize = 30;
+    let mut follow = false;
+    for a in std::env::args().skip(3) {
+        if a == "--follow" || a == "-f" {
+            follow = true;
+        } else if let Some(n) = a.strip_prefix("--lines=") {
+            lines_n = n.parse().unwrap_or(30);
+        } else if a == "--lines" {
+            // 空间分隔形式由下一个参数承载（cli 分发只传了 name，此处兜底）
+        }
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    let path = format!(
+        "{}/target/ductile-progress/{}.log",
+        cwd.display(),
+        name.replace('/', "_")
+    );
+    if !std::path::Path::new(&path).exists() {
+        eprintln!("no progress file for '{}' (未在跑或非本目录启动)", name);
+        eprintln!("  expected: {}", path);
+        // 提示现有进度文件
+        let dir = format!("{}/target/ductile-progress", cwd.display());
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            let mut found = Vec::new();
+            for e in rd.flatten() {
+                if let Some(f) = e.file_name().to_str() {
+                    found.push(f.trim_end_matches(".log").to_string());
+                }
+            }
+            if !found.is_empty() {
+                eprintln!("  available: {}", found.join(", "));
+            }
+        }
+        return Ok(3);
+    }
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let all: Vec<&str> = content.lines().collect();
+    let start = all.len().saturating_sub(lines_n);
+    for l in &all[start..] {
+        println!("{}", l);
+    }
+    println!("--- {} lines (file: {}) ---", all.len(), path);
+    if follow {
+        use std::io::{BufRead, Write};
+        let f = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+        let mut r = std::io::BufReader::new(f);
+        let mut clean_exit = std::io::stdout();
+        let _ = writeln!(clean_exit, "[following — Ctrl-C to exit]");
+        let _ = clean_exit.flush();
+        loop {
+            let mut line = String::new();
+            match r.read_line(&mut line) {
+                Ok(0) => std::thread::sleep(std::time::Duration::from_millis(500)),
+                Ok(_) => {
+                    let _ = write!(clean_exit, "{}", line);
+                    let _ = clean_exit.flush();
+                }
+                Err(_) => break,
+            }
+        }
+    }
+    Ok(0)
+}
+
 fn cmd_run(path: &str, topic_str: &str, policy_path: Option<&str>) -> Result<i32, String> {
     let pl = match parse_pipeline_file(path) {
         Err(e) => {
@@ -1909,6 +1981,33 @@ fn cmd_run(path: &str, topic_str: &str, policy_path: Option<&str>) -> Result<i32
     let (topic, params) = parse_topic_params(topic_str);
     println!("Pipeline: {} | Topic: {}", pl.name, topic);
     println!();
+
+    // C线③：run 级进度文件——本次运行单一时间线（proc 边界 + script stdout）。
+    // 路径 = target/ductile-progress/<pipeline>.log（或 DUCTILE_PROGRESS_FILE 覆盖），
+    // 每次运行截断重写；`ductile run-status <pipeline>` 实时查看。
+    let progress_file = std::env::var("DUCTILE_PROGRESS_FILE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+            format!(
+                "{}/target/ductile-progress/{}.log",
+                cwd.display(),
+                pl.name.replace('/', "_")
+            )
+        });
+    if let Some(dir) = std::path::Path::new(&progress_file).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&progress_file, ""); // truncate per-run
+    std::env::set_var("DUCTILE_PROGRESS_FILE", &progress_file);
+    crate::executor::progress_note(&format!(
+        "RUN start pipeline={} topic={} pid={}",
+        pl.name,
+        topic,
+        std::process::id()
+    ));
+    println!("Progress: {} (ductile run-status {})", &progress_file, pl.name);
 
     // Auto-import to DB
     db::import_pipeline(&pl, path);

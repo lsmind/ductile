@@ -2427,6 +2427,47 @@ fn exec_run(
             )
         })?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs.max(1));
+    // C线①流式旁路（run 动词同款）：stdout 行级泵到 DUCTILE_PROGRESS_FILE，
+    // 运行中 run-status 可见；同时根治 64KB 管道缓冲死锁（旧码 wait 后才收，
+    // 脚本大输出会反压阻塞）。stderr/stdout 均由泵线程收——**主线程专职
+    // try_wait + deadline + kill**（泵在主线程会阻塞在 read_line，静默进程
+    // 永远到不了超时检查——run_timeout_kills 测试实锤）。
+    let progress_file = std::env::var("DUCTILE_PROGRESS_FILE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .and_then(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).ok());
+    let out_handle = {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let mut out_io = child.stdout.take().expect("stdout piped");
+        let mut err_io = child.stderr.take().expect("stderr piped");
+        let err_handle = std::thread::spawn(move || {
+            let mut b = Vec::new();
+            let _ = err_io.read_to_end(&mut b);
+            b
+        });
+        std::thread::spawn(move || {
+            let mut so = String::new();
+            if let Some(mut pf) = progress_file {
+                let mut reader = BufReader::new(out_io);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line) {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            so.push_str(&line);
+                            let _ = pf.write_all(line.as_bytes());
+                            let _ = pf.flush();
+                        }
+                        Err(_) => break,
+                    }
+                }
+            } else {
+                let _ = out_io.read_to_string(&mut so);
+            }
+            (so, err_handle)
+        })
+    };
     let status;
     loop {
         match child.try_wait() {
@@ -2451,18 +2492,14 @@ fn exec_run(
             Err(e) => return Err(format!("run failed: {}", e)),
         }
     }
-
-    let mut stdout_pipe = child.stdout.take();
-    let mut stderr_pipe = child.stderr.take();
-    let mut stdout_buf: Vec<u8> = Vec::new();
-    let mut stderr_buf: Vec<u8> = Vec::new();
-    use std::io::Read;
-    if let Some(p) = stdout_pipe.as_mut() {
-        let _ = p.read_to_end(&mut stdout_buf);
-    }
-    if let Some(p) = stderr_pipe.as_mut() {
-        let _ = p.read_to_end(&mut stderr_buf);
-    }
+    // 子进程已死（或被组杀）→ 管道 EOF → 泵线程自然收敛；join 取全量。
+    let (stdout_text, stderr_buf) = match out_handle.join() {
+        Ok((so, eh)) => (so, eh.join().unwrap_or_default()),
+        Err(_) => {
+            eprintln!("    [warn] stdout pump panicked; result may be partial");
+            (String::new(), Vec::new())
+        }
+    };
 
     if !status.success() {
         let stderr_text = String::from_utf8_lossy(&stderr_buf);
@@ -2473,21 +2510,21 @@ fn exec_run(
         ));
     }
 
-    let stdout_text = String::from_utf8_lossy(&stdout_buf).to_string();
+    let stdout_text_final = stdout_text;
 
     // Parse ##DSL_RESULT block
-    if let Some(kvs) = parse_dsl_result_block(&stdout_text) {
+    if let Some(kvs) = parse_dsl_result_block(&stdout_text_final) {
         if !kvs.is_empty() {
             eprintln!("    -> result: {} fields", kvs.len());
-            return Ok(Value::Text(encode_structured_result(&kvs, &stdout_text)));
+            return Ok(Value::Text(encode_structured_result(&kvs, &stdout_text_final)));
         }
     }
 
     // Raw stdout (truncated)
-    let trimmed = if stdout_text.len() > 5000 {
-        format!("{}...[truncated]", crate::trunc_chars(&stdout_text, 5000))
+    let trimmed = if stdout_text_final.len() > 5000 {
+        format!("{}...[truncated]", crate::trunc_chars(&stdout_text_final, 5000))
     } else {
-        stdout_text
+        stdout_text_final
     };
     Ok(Value::Text(trimmed))
 }
@@ -2720,11 +2757,55 @@ pub fn exec_script_call(
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("script '{}' launch failed: {}", name, e))?;
-        // v0.21 资源治理③：进程组围栏——子进程自立组长，超时/失败组杀。
-        // 此前裸 child.kill() 只杀直接子进程，孙进程成孤儿（H3 生成脚本
-        // subprocess 起 python 孙进程超时后存活继续抢 GPU 实锤）。
+        // C线①流式旁路：stdout 持续抽泵到进度文件，运行中可 tail 查看。
+        // 双收益：(a) 64KB 管道缓冲死锁修复（旧码 read_to_end 在 wait 之后，
+        //     脚本 stdout 超 64KB 会填满管道阻塞脚本自身）；
+        //     (b) DUCTILE_PROGRESS_FILE 设置时，行同步镜像一份到进度文件，
+        //     `ductile run-status` / tail -f 即可边跑边看，不必等 proc 结束。
+        // 收集仍在引擎侧完整进行（结果语义零变化）。
+        // v0.21 资源治理③：子进程自立组长，超时/失败组杀（孙进程不存活）。
+        // 泵线程收流（stdout 行级镜像 + stderr 全量）——主线程专职
+        // try_wait + deadline + kill：泵在主线程会阻塞在 read_line，
+        // 静默脚本永远到不了超时检查（run_timeout_kills 同款实锤）。
         let pgid = child.id() as i32;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        let progress_path = std::env::var("DUCTILE_PROGRESS_FILE").ok().filter(|s| !s.is_empty());
+        let progress_file = progress_path.as_ref().and_then(|p| {
+            std::fs::OpenOptions::new().create(true).append(true).open(p).ok()
+        });
+        let pump = {
+            use std::io::{BufRead, BufReader, Read, Write};
+            let mut out_io = child.stdout.take().expect("stdout piped");
+            let mut err_io = child.stderr.take().expect("stderr piped");
+            // stderr 泵线程（无进度镜像，只为防死锁收全）
+            let err_handle = std::thread::spawn(move || {
+                let mut b = Vec::new();
+                let _ = err_io.read_to_end(&mut b);
+                b
+            });
+            std::thread::spawn(move || {
+                let mut so = String::new();
+                if let Some(mut pf) = progress_file {
+                    let mut reader = BufReader::new(out_io);
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        match reader.read_line(&mut line) {
+                            Ok(0) => break,
+                            Ok(_) => {
+                                so.push_str(&line);
+                                let _ = pf.write_all(line.as_bytes());
+                                let _ = pf.flush();
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                } else {
+                    let _ = out_io.read_to_string(&mut so);
+                }
+                (so, err_handle)
+            })
+        };
         let status;
         loop {
             match child.try_wait() {
@@ -2749,19 +2830,17 @@ pub fn exec_script_call(
                 Err(e) => return Err(format!("script '{}' wait failed: {}", name, e)),
             }
         }
+        // 子进程已死（或被组杀）→ 管道 EOF → 泵线程自然收敛；join 取全量。
+        let (stdout_text, stderr_buf) = match pump.join() {
+            Ok((so, eh)) => (so, eh.join().unwrap_or_default()),
+            Err(_) => {
+                eprintln!("    [warn] stdout pump panicked; result may be partial");
+                (String::new(), Vec::new())
+            }
+        };
+        let _ = &progress_path; // 借用保活（progress_file 已移入泵线程）
 
-        // 先收全 stdout/stderr 再判断成功与否
-        let mut stdout_buf = Vec::new();
-        if let Some(mut io) = child.stdout.take() {
-            use std::io::Read;
-            let _ = io.read_to_end(&mut stdout_buf);
-        }
-        let mut stderr_buf = Vec::new();
-        if let Some(mut io) = child.stderr.take() {
-            use std::io::Read;
-            let _ = io.read_to_end(&mut stderr_buf);
-        }
-        let stdout_text = String::from_utf8_lossy(&stdout_buf).to_string();
+        let stderr_text = String::from_utf8_lossy(&stderr_buf).to_string();
 
         if status.success() {
             // ##DSL_RESULT 协议复用（脚本 echo 结构化字段）
