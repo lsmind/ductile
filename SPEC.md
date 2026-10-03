@@ -178,7 +178,7 @@ Pipeline("name", "desc", cwd="...", env=["K=V", ...])
 | `verify <PATH>` | 全量链校验（自动识别 v2(toon)/v1(typed)/v1(legacy) 三格式） |
 | `convert --in <v1> --out <v2> --root-key <f>` | v1→v2 迁移（重签入新链；已 v2 拒绝） |
 
-**legacy `mlv` 组（残余接口，非别名——写动词已移除）**：`init` / `status` / `verify` / `keygen` / `revoke --key-id` 保留（keygen=钥工具不写账本）；**写动词（append/grant/decide/begin/commit/…）已移除**——`rotate` 直接报错并指引走 `ledger` 组（注意：该报错文案提及 `ledger append` 属代码遗留，实际动词面以本表为准）。v2 链写入须 `sign_envelope_v2` 信封（v1 sign_envelope 过不了 verify_business_sig_v2）；读取走 `decode_ledger_tri` 三格式统一。
+**legacy `mlv` 组（残余接口，非别名——写动词已移除）**：`init` / `status` / `verify` / `keygen` / `revoke --key-id` 保留（keygen=钥工具不写账本）；**写动词（append/grant/decide/begin/commit/…）已移除**——写动词调用直接报错并指引走 `ledger` 组。v2 链写入须 `sign_envelope_v2` 信封（v1 sign_envelope 过不了 verify_business_sig_v2）；读取走 `decode_ledger_tri` 三格式统一。
 
 **v1 内核语义（历史账本仍可 verify）**：14-Op 封闭词表、11 态状态机（终态 REVOKED/TERMINAL）、23 字段哈希链账本（帧=u64be(N)‖J‖LF，canonical 字段序即合法性）、幂等 ACK、域分隔信封、跨进程 flock、崩溃后老本/新本二择。错误码：E422 illegal-edge（否，换语义）/ E423-env 信封篡改（否）/ E423-nonce-reuse（是，换 nonce）/ E425 idempotency-conflict（否，新 key）/ receipt-required（是，登记回执后重提）/ ledger-missing（是，先 init）/ ERR terminal（否，新 rev 走 CREATE）。ACTIVATE_COMMIT 双径：ACTIVATING→ACTIVE 需回执；VERIFIED→ACTIVE 修复回径免回执；phase 唯一键 (binding,rev,op,from)。安全边界见 docs/mlv-security.md。门禁管线 `./mlv.pipeline`。
 
@@ -234,7 +234,7 @@ ductile attractor show app.ledger cell
 
 输出：TOON `k: v` 十三字段（winner/tie/m/n/memory_a/input_digest…）。幂等：input_digest 含 run 槽位 k——同槽位同输入重放拒（E425），异槽位同输入=合法新 run。
 
-**attractor show**：`ductile attractor show <ledger> <binding> [lambda] [tau]` → 重放导出记忆投影（runs/n/m/a）。**已知面**：`ductile attractor --help` 裸调用会 panic（cli.rs 索引越界，已知不修）——参数面以本表为准。
+**attractor show**：`ductile attractor show <ledger> <binding> [lambda] [tau]` → 重放导出记忆投影（runs/n/m/a）。参数面以本表为准；`attractor` 裸调/`--help` 打印 usage 退出码 1。
 
 **性能口径**：纯核 replay+decide p99=0.0071ms；CLI 端到端 ~113ms（整链 Ed25519 验签，append-only 语义成本，不属热路径责任面）。
 

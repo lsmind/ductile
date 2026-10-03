@@ -522,7 +522,7 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
     const MLV_READONLY: &[&str] = &["status", "verify", "keygen"]; // keygen=钥工具，不写账本
     if !MLV_READONLY.contains(&verb) {
         eprintln!("ERR E422 mlv '{verb}' is a write verb: removed in TOON v2 (spec §六.0)");
-        eprintln!("     production path: ductile ledger create|append|... (v2 ed25519 chain)");
+        eprintln!("     production path: ductile ledger create|verify|convert (v2 ed25519 chain)");
         eprintln!("     legacy v1 ledger verification: ductile ledger verify <file>");
         eprintln!("     migration: ductile ledger convert <v1> --out <v2> --root-key <k>");
         std::process::exit(1);
@@ -790,7 +790,12 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
             Ok(0)
         }
         "status" => {
-            let binding = args[2].clone();
+            let Some(binding) = args.get(2) else {
+                eprintln!("ERR E422 mlv status: missing <binding> argument");
+                eprintln!("     usage: ductile mlv <ledger> status <binding>");
+                return Ok(1);
+            };
+            let binding = binding.clone();
             let reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
             match reg.state_of(&binding) {
                 Some((rev, st)) => {
@@ -4074,7 +4079,12 @@ mod tests {
 fn cmd_ledger(args: &[String]) -> Result<i32, String> {
     use crate::kernel::gov::GovRegistry;
     use crate::kernel::mlv_toon::FrameFormat;
-    let verb = args[0].as_str();
+    let Some(verb) = args.first() else {
+        eprintln!("ERR E422 ledger: missing verb");
+        eprintln!("     usage: ductile ledger <create|verify|convert> <ledger-path> [opts]");
+        return Ok(1);
+    };
+    let verb = verb.as_str();
     let now_ns = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)

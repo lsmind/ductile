@@ -288,11 +288,6 @@ m = e^(−n/τ),    λ ∈ [0, 0.5]
 
 `ductile attractor show app.ledger cell` 会打印 `runs`、`n`、`m`、`a`、`lambda`、`tau`；纯核 benchmark 中决策记忆 p99=0.0071ms（CLI 端到端另有 ~113ms 的整链 Ed25519 验签成本，属 append-only 语义而非决策计算）。
 
-### 两条已知粗糙边缘
-
-- `ductile attractor --help` 裸调用会 panic；这是已知的参数面问题，参数面以 SPEC 为准，不要把这次 panic 当成正常的帮助输出。
-- `ductile mlv rotate` 的错误信息提到 `ledger append`，但实际上没有这个 verb；当前 ledger verbs 是 `create|verify|convert`。
-
 ## 五家对比：同一个问题，五种做法
 
 下面把同一个任务——把一段非结构化文本变成结构化字段——放到五家框架的同一张表上比较。如果你想自己跑，可以先执行脚本套件（全部在离线沙箱里跑草图级别对比，不依赖各家云端服务）：
