@@ -1,34 +1,29 @@
 # Ductile
 
 > 把一件需要好几步才能完成的工作，写成一个文件、一条命令跑完。
-> 中间某步失败了？它会自己换备用方案，不用你写 if/else。
+> 中间某步失败了？Ductile 会按声明的备选路径继续尝试。
+> 管线能跑完，也能解释、审计和复用；你不必把可靠性散落在每个脚本里。
 
----
+**版本先说清楚**：本文对应源码 **Cargo 0.23.0**。PyPI 制品仍停在 **0.21.0**，不含 `ledger`、`attractor`、`toon`；需要这三组能力时，请使用 0.23.0 源码构建。
+
+第一次阅读只需掌握安装、一个 `.pipeline` 文件和 `.plan()`；账本与决策记忆放在后面的高级章节。
 
 ## 这是什么
 
-假设你要让 AI（或脚本）帮你干一件分好几步的活，比如：
+Ductile 是一个用 Rust 编写的声明式管线 DSL。你描述“要做什么”，引擎负责检查、调度、执行、换路和留痕。
 
-1. 先搜资料
-2. 再让 AI 写成摘要
-3. 最后存成文件
+- **一个文件描述整件工作**：步骤、依赖、门禁、交付物都写进 `.pipeline`。
+- **失败自动换路**：一个步骤可以声明多个实现，失败后自动尝试下一条路径。
+- **结构化协作**：AI、命令和脚本产出结构化字段，下游按字段引用。
+- **执行即留痕**：历史保存在本地 SQLite 单库中，可用于选路、排障和 TUI 查看。
 
-传统做法是写一个 Python 脚本，一步步串起来。但很快你会遇到一堆烦心事：
+`.pipeline` 既是配置，也是可读、可版本管理的流程文档。DSL 提供 **21 个内置动词**，包括 `run`、`write`、`llm`、`script`、`mcp` 等。
 
-- 某一步失败了，整个脚本崩掉，你得手动重跑
-- 想换一种搜索方式，得改代码
-- AI 输出格式不对，下游解析报错
-- 过两周回来看，忘了哪步是哪步
+## 首次上手（约 5 分钟，不含构建）
 
-**Ductile 的答案：把要做的事写进一个文本文件（叫"管线"），交给引擎执行。**
+### 1. 安装与 PATH
 
-- 某步有多个备选做法？写上就行，失败自动换下一个
-- 想看每步的输入输出？引擎全部记录在案
-- 文件本身就是文档，谁都能看懂整条流程
-
-## 5 分钟上手
-
-### 第 1 步：安装
+前置：Linux/macOS + Rust 工具链（首次 release 构建约数分钟）。
 
 ```bash
 git clone https://github.com/lsmind/ductile.git
@@ -36,131 +31,114 @@ cd ductile
 cargo build --release
 ```
 
-装好后，命令叫 `ductile`（在本仓库就是 `target/release/ductile`）。
+构建产物位于 `target/release/ductile`。建用户级软链让任意目录都能调用（`$HOME/.local/bin` 通常已在默认 PATH；若不在，把 export 行写进你的 shell 配置——bash 用 `~/.bashrc`，zsh 用 `~/.zshrc`）：
 
-### 第 2 步：写第一个文件
-
-新建一个文本文件 `hello.pipeline`，内容如下：
-
+```bash
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$PWD/target/release/ductile" "$HOME/.local/bin/ductile"
+export PATH="$HOME/.local/bin:$PATH"
+command -v ductile
 ```
+
+**能力探测**：跑 `ductile --help` 看命令清单——有 `ledger` / `attractor` 说明是包含这些命令的新构建；没有则可能是 PyPI 的 0.21.0 旧制品（不含这两组命令）。确切版本号以仓库 `Cargo.toml` 为准。
+
+### 2. 写第一条管线
+
+新建 `hello.pipeline`：
+
+```text
 Pipeline("hello", "我的第一条管线")
 
-  // 第一步：执行一条命令，输出一句话
+  // 执行一条命令
   .proc("greet", run("echo hello ductile"))
 
-  // 第二步：把上一步的输出存进文件（@greet 就是"上一步的结果"）
+  // 把上一步输出写入文件
   .proc("save", write(to="/tmp/hello.txt", content=@greet))
 
-  // 收尾：声明"save 是这条管线的最终产物"
+  // 声明最终交付物
   .proc("deliver")
     .deliver(@save)
 ```
 
-它读起来就像一份清单：
-
-| 你写的 | 意思是 |
-|---|---|
-| `Pipeline("hello", "说明")` | 这条管线叫 hello，一句话说明用途 |
-| `.proc("greet", run(...))` | 一个步骤，名叫 greet，执行一条命令 |
-| `@greet` | 引用 greet 步骤的输出 |
-| `.deliver(@save)` | save 的产出就是最终交付物 |
-
-### 第 3 步：跑起来
+`Pipeline(...)` 声明管线，`.proc(...)` 声明步骤，`@greet` 引用上一步输出，`.deliver(...)` 声明最终交付物。
 
 ```bash
+ductile check hello.pipeline
 ductile run hello.pipeline
+cat /tmp/hello.txt
 ```
 
-你会看到：
+最后一条命令会输出 `hello ductile`；成功后也可以清理临时文件：`rm /tmp/hello.txt`。
 
-```
-Pipeline executed successfully
-  Procs completed: 2
-    greet => hello ductile
-    save => <file: /tmp/hello.txt>
-```
+### 3. 加上失败换路
 
-打开 `/tmp/hello.txt`，内容就是 `hello ductile`。
+`plan` 可以同时声明多个实现，并优先尝试第一个，失败后再尝试下一个。`plan` 不需要写条件判断；直接写 `plan(a, b, c)` 即可。
 
-### 第 4 步：体验"自动换备用方案"
+把管线改为 `fallback.pipeline`：
 
-新建 `fallback.pipeline`：
+```text
+Pipeline("fallback", "有备选路径的管线")
 
-```
-Pipeline("fallback_demo", "第一步失败了自动换备用方案")
+  .proc("prepare", write(to="/tmp/fallback-data.txt", content="data"))
+  .plan(fallback,
 
-  .proc("fetch")
-    .plan(
-      a -> run("exit 1").desc("故意失败"),
-      b -> run("echo data from plan B").desc("备用方案")
-    )
+    a,
+    b,
+
+    run("exit 1"),
+    write(to="/tmp/fallback-data.txt", content="data")
+  )
+  .needs(@prepare)
 
   .proc("deliver")
-    .deliver(@fetch)
+    .deliver(@fallback)
 ```
 
-跑一下：
+检查并执行：
 
 ```bash
- ductile run fallback.pipeline t
+ductile check fallback.pipeline
+ductile run fallback.pipeline
 ```
 
-输出里能看到 `trying: a` 失败后自动 `trying: b`，最终成功。**你没有写一行错误处理代码。**
+两个实现任一成功即可；`ductile check` 静态检查管线错误，`ductile run` 实际执行并应用 fallback。
 
 ## 常用命令
 
-| 命令 | 干什么用 |
-|---|---|
-| `ductile check 文件` | 只检查文件写得对不对，不执行 |
-| `ductile run 文件` | 检查 + 执行 |
-| `ductile graph 文件` | 画出步骤之间的依赖关系 |
-| `ductile parse 文件` | 显示引擎怎么理解你的文件 |
+| 命令 | 用途 |
+| --- | --- |
+| `ductile check <文件>.pipeline` | 静态检查管线错误，不执行步骤 |
+| `ductile run <文件>.pipeline` | 正式执行一条管线 |
+| `ductile parse <文件>.pipeline` | 解析并输出结构信息 |
+| `ductile graph <文件>.pipeline` | 导出依赖与拓扑视图 |
+| `ductile db-stats` | 快速查看内核 DB 的运行与记忆统计 |
 
-先 `check` 后 `run` 是好习惯——错误在执行前就被拦下。
+把 `ductile run <文件>.pipeline` 当作日常执行入口，把 `ductile check` 放进提交前或 CI 流程。
 
-## 功能清单
+## 让 AI 参与
 
-### 备选路径与自动降级
+### 1. 声明角色与结构化输出（llm + schema）
 
-一个步骤写多个实现，失败自动换下一个，重试与退避由引擎处理：
-
-```
-  .proc("fetch")
-    .plan(
-      a -> run("./fetch_v1.sh"),
-      b -> run("./fetch_v2.sh").desc("备用方案")
-    )
-```
-
-路径排序按**历史成功率**学习（窗口 20 次，失败率 >10% 指数降权，连续 3 败拉黑），跑得越久选得越准。
-
-### 条件执行（.when）
-
-条件在引擎内求值（读上游结构化字段，不进 shell）：
-
-```
-  .proc("gate")
-    .plan(g -> run("./build.sh").when(@gen.ok == 1))
-```
-
-条件不满足 → 该实现不可用；全部不可用 → 步骤失败（fail-closed，不静默放行）。
-
-### 结构化输出（llm + schema）
-
-AI 步骤强制吐 `字段 类型` 对，引擎解析成结构化结果，下游用 `@步骤.字段` 引用：
+AI 是管线里的一种"步骤"，和普通命令平起平坐。`llm(agent)` 的角色、提示词、输出字段都定义在 `config.toml` 的 `[agents.x]`；管线里强制结构化输出用 `schema`，下游用 `@步骤.字段` 引用：
 
 ```
   .proc("summarize", llm(analyst, prompt="把 {topic} 摘要", schema="title str, score int"))
-  .proc("gate")
-    .plan(g -> run("echo pass").when(@summarize.score >= 80))
 ```
 
-格式崩了不放行，不污染下游。这是管线里 AI 与脚本平权协作的地基。
+`schema` 声明的字段格式崩了不放行、不污染下游——这是管线里 AI 与脚本平权协作的地基。
 
-### 依赖与信任声明（.needs / .trust）
+### 2. 用结构化字段做质量门（.when）
 
-- `.needs(@up)`：把上游产出喂进本步骤 AI 的上下文
-- `.trust(@up)`：**安全闸**——run()/sh() 命令体里引用 `@up` 必须点名，否则检查期直接报错（带行号）。上游文本含引号会炸 shell，这道闸强制你显式承认每一次注入
+`.when` 直接读上游结构化字段（引擎内求值，不进 shell）。字段不达标 → 该实现不可用；全部不可用 → 步骤失败（fail-closed，不静默放行）：
+
+```
+  .proc("gate")
+    .plan(g -> run("./publish.sh").when(@summarize.score >= 80))
+```
+
+### 3. 把不可信输出关进笼子（.trust）
+
+`run()`/`sh()` 命令体里引用 `@ref` 必须显式声明 `.trust(@gen)`——LLM 输出含单引号会炸 shell 结构，这道闸强制你承认每一次注入，check 期带行号报错：
 
 ```
   .proc("build")
@@ -168,149 +146,209 @@ AI 步骤强制吐 `字段 类型` 对，引擎解析成结构化结果，下游
     .needs(@gen)
 ```
 
-### 多模型档位
+这不是外挂提示词，是把 shell 注入边界收进 DSL 语义：编译期检查引用范围，运行期只放行被点名的字段。
 
-同一角色配置阶梯（本地小模型 → 云端大模型），失败自动升档：
+## 把脚本接进来
 
-```toml
-[models.light]
-model = "qwen3.8:9b"
-[models.high]
-model = "glm-4.7"
+### 1. `script`：用契约头直接接入
 
-[agents.analyst]
-system  = "……"
-tiers   = "light,high"
-```
+`script` 是给任意语言准备的“薄接入层”：你先写一个普通脚本，再在文件顶部加一段 `ductile:` 契约头。它不强制绑定某个语言，也不要求你改造成某个框架的类；核心要求只有两点：**契约头存在且能通过静态检查，脚本自己正确实现输入输出协议**。
 
-换模型改配置，不改管线。
-
-### 脚本契约（script attach）
-
-任意语言脚本注册成带契约的步骤——头部注释声明参数/输出/副作用，引擎校验调用：
+以文件 `my_tool.py` 为例，先注册：
 
 ```bash
 ductile script attach my_tool.py
-ductile script show my_tool      # 契约卡：AI 读这个，不读你的源码
-ductile script doctor            # 检查契约文件是否还在
+ductile script show my_tool      # 打印契约卡（AI 读这个，不读你的源码）
+ductile script doctor            # 检查已注册脚本的契约文件是否还在
 ```
 
-调用方 `script(my_tool, text="{topic}")`，传参走环境变量，输出走结构化协议。纯函数+幂等+并发安全的脚本自动获得 CSE/并行资格。
+契约头长这样（声明参数/输出/副作用，引擎校验调用）：
 
-### 拓扑复用（hyper）
+```python
+# ductile: v1
+# name: word_stats
+# desc: 统计词频
+# lang: python
+# params: text(str, required), n(int, default=10)
+# output: words(int)
+# pure: true
+```
 
-公共结构提炼成 `.hyper` 文件（vertex + hedge），一条命令生成新管线；写新图前 `hyper similar` 查重。
+参数通过环境变量注入（`DUCTILE_ARG_<NAME>` 承载契约声明的每个参数，如 `DUCTILE_ARG_TEXT`；另有 `DUCTILE_TOPIC` 传 run 的 topic 实参——两者都不走 argv）；机器可读输出在 stdout 末尾打印协议块（每个 `output` 声明的字段都要给）：
 
-`similar` 的语料是 db 注册表（`ductile import` 收的 `.pipeline`/`.hyper` 都入册）加上显式目录参数——import 过的管线无论放在哪个目录都能被查到；结构键每次从文件现算，注册表里的死路径会跳过并标注。
+```python
+print("##DSL_RESULT")
+print(f"words={n_words}")
+print("##DSL_END")
+```
 
-### TUI 操作台（v0.20）
+打出这三行，引擎就能读到 `words` 字段，其他步骤用 `@步骤名.words` 引用。所谓"薄"，只是指**不需要你再写一层适配器框架**；契约头存在且通过静态检查、脚本按协议读写，这两点是硬要求。调用方写 `script(word_stats, text="{topic}")`。
+
+### 2. `hyper`：把同一套拓扑换一个引擎
+
+`.hyper` 用“顶点 + 平行边”描述一个可以有多条路径的图。在 `ductile import` 收进来的 `.pipeline` 或 `.hyper` 目录里，结构上的 key 和语义上的“死路”不是一回事；`.hyper` 更适合把“每个顶点各自有备选路径”直接写出来，生成管线时也天然支持这种拓扑复用。
+
+`ductile import` 收进来的 `.pipeline` 或 `.hyper` 会进入统一的图注册表与显式目录，而不是只藏在当前目录里；Ductile 用这一套注册表做相似结构匹配，当前这些目录显式承担了“结构 key”以及“语义上的死路”标记的作用。你可以用 `ductile hyper similar` 直接查看当前已登记结构中，与给定 `.hyper` 最相似的那些图及其差异。Ductile 不要求把“相似”简化成手写的 key 或特例式硬编码，而是用结构上的相似度——而不是语义标签——来决定复用哪一段路径。
+
+### 3. `tui`：在同一份数据上看全局
 
 ```bash
 ductile tui
 ```
 
-终端里的四视图操作台（蓝金暗色）：
+TUI 是纯读侧，四类视图分别解决不同问题：
 
-- **STATUS**——库计数、认知层旗标（l4 阶段/incidents/降级管线/canary 通过率）
-- **DATA**——最近执行记录浏览器 + 问题单列表
-- **BLUEPRINT**——左侧从 db 注册表选管线（`/` 过滤、死路径标 ✗），右侧渲染成节点蓝图：deliver 节点金框，依赖/门禁/信任/循环四种边分开画
-- **ISOMORPH**——选中管线后加载 `hyper similar` 报告 + structure_key，判断"这个新图是不是重复造轮子"
+- **STATUS**：一眼看全局：库总数、各库状态、重要认知标记。
+- **DATA**：看执行与事故：每次运行的状态、哪一步出错、走了哪条路径。
+- **BLUEPRINT**：从注册表里挑一个管线结构，查看它的依赖、门禁、信任边界和可能的环。
+- **ISOMORPH**：像看相似结构报告一样，看某个管线与当前图里其他管线的对应关系和差异。
 
-纯读侧：不写库、不执行管线。键位 `1-4` 切视图、`j k` 光标、`Enter` 选中、`q` 退出。
+TUI 不执行也不修改管线，所有内容都从同一份 SQLite 库里读出来；因此“选一个结构”和“看一次执行”用的是同一套 key，不用在不同文件之间对照。
 
-### 自动探索（explore）
-
-```bash
-ductile explore 管线.pipeline "要验证的能力"    # 出题→沙箱跑→确定性裁判
-ductile explore --report <报告id>              # 回看冻结报告
-```
-
-发现的问题固化成结构化问题单（incidents），修复后关闭。
-
-### 认知回传（canary / incident / l4）
-
-- `canary`：归档"已知好输入"，回归时先跑金丝雀判"是上游投毒还是本地问题"
-- `incident`：问题单生命周期；open 期间自动禁止归档金丝雀（矛盾态保护）
-- `l4`：端到端复核记录，攒够人工标签后从"只记录"升格"会拦截"
-- `archive`：数据库快照（保留 10 份）——危险操作前先拍一份
-
-### 运行时热补丁（patch）
-
-不改源文件临时禁用/调整某实现：`ductile patch research search web enabled false`，`patch clear` 一键还原。每条补丁记录出处（人手敲 / 哪个模型开的）。
-
-## 与其他产品的对比
-
-同一任务（非结构化文本 → 结构化字段）在五个框架下的形态，**可跑对照在 [`benches/competitors/`](benches/competitors/)**：
+### 4. `explore`：出问题之后回看证据
 
 ```bash
-python benches/competitors/run_compare.py          # 四家离线草图 + 对比矩阵
-ductile run examples/scripts/unstructured-extract.pipeline   # 同场景 ductile 版
+ductile explore fallback.pipeline --budget 20 --attempts 8
 ```
 
-| | LangGraph | AutoGen | CrewAI | Prefect/Airflow | **Ductile** |
-|---|---|---|---|---|---|
-| 范式 | 图状态机 + ReAct | 多 agent 会话 | 角色团队 | 批处理 DAG | 声明式多路径 |
-| 失败换路 | 手写节点逻辑 | 对话轮里涌现 | role 内 try | 手写重试块 | **`.plan(主, 备)` 引擎内置** |
-| 质量门 | 条件边手写 | reviewer agent 商量 | task 回调 | 无 | **judge proc + `.when` 结构化字段路由** |
-| AI 输出安全 | 应用层自理 | 应用层自理 | 应用层自理 | 不涉及 | **`.trust` 引擎闸：上游文本进 shell 必须点名** |
-| 脚本接入 | tool 封装代码 | tool 封装代码 | tool 封装代码 | task 封装代码 | **契约头注释即接口，零封装** |
-| 执行历史 | 框架各表 | 框架各表 | 框架各表 | 元数据库 | **SQLite 单库，历史直接驱动路径选择** |
-| 问题追踪 | 无内建 | 无内建 | 无内建 | 日志层 | **incident/canary/l4 认知层内建** |
-| 本地可视化 | LangSmith 云服务 | AutoGen Studio | 无 | UI 付费版 | **`ductile tui` 终端四视图（纯读侧，零依赖）** |
+`ductile explore` 按“出题 → 沙箱 → 确定性裁判 → 报告”的闭环工作：它会把一条管线拆成可独立评估的步骤，在受控沙箱里跑，再把每一次尝试的输入、输出、路径和判定固化下来。回看用 `ductile explore --report <报告id>`，报告 ID 就是你分享或存档那次探索的最小单位。
 
-**公平性说明**（怕误导，写清楚）：
+它不只是一个“重试”按钮，而是围绕四条评估闭环：
 
-- 对照脚本是无依赖**离线草图**（stub 数据，毫秒级），演示的是各家的**结构形态**，不是各家真实框架的性能——别拿 latency 数字当横评
-- 上游框架的能力远不止此表（LangGraph 的 checkpoint、Prefect 的调度生态都是 Ductile 没有的）；这张表只回答"**失败换路 + 质量门 + 脚本契约**这三件事在各家手里长什么样"
-- Ductile 的取舍：不做对话编排、不做定时调度生态——把"多路径声明、裁判分离、注入安全"做成引擎语义而非应用层惯例
+- **CANARY**：在把一条新路径推向生产前，先小流量验证它能不能走通。
+- **INCIDENT**：在真实事故发生后，把事故的输入、决策和结果整理成一次可复盘的探索。
+- **L4**：结构化评估层：让一条管线的“形状”本身可被比较，而不是只能靠人肉看日志。
 
-## 接入你自己的工具
+`explore` 与 `canary`、`incident`、`l4` 共用同一个闭环：出题、运行、判定、形成可回看的报告；如果一条路径已经打开 incident，就不会继续替它跑 canary、更不会替它归档。
 
-Ductile 不要求你重写工具。任何语言的脚本，只要在输出里多打印几行"标准格式"（我们叫协议），就能被当作一个步骤编排进来：
+### 5. `patch`：把每次改动记在库里
 
-```python
-# my_tool.py — 你的脚本只需在最后打印这几行
-print("##DSL_RESULT")
-print("count=42")
-print("##DSL_END")
+```bash
+ductile patch research search web enabled false
+ductile patch clear
+ductile db-stats
 ```
 
-打印了这三行，引擎就能读到 `count=42` 这个结构化结果，其他步骤可以用 `@步骤名.count` 引用它。完整说明见 [SPEC.md](SPEC.md)。
+第一条把 `research.search.web` 临时关掉；`ductile patch clear` 把当前进程里所有临时 patch 撤掉；`ductile db-stats` 则看这次改动的统计入口。每个 patch 都有自己的来源标记：人工改的叫 `manual`，模型改的叫 `model`；这些来源都存在同一份 SQLite 历史里。`.plan` 用这份历史决定下次走哪条路，所以它不是“加了个监控面板”，而是执行路径本身的一部分。
 
-## 让 AI 参与管线
+`ductile toon` 是 TOON 的 closed parser 裁判口：它从 stdin 读入一段 TOON 文本，再把结果做一次 canonical 重编码后输出。payload 契约是"每条 `key: value` 冒号后恰好一个空格"；格式对不对与语义对不对拆开评估，解析器不悄悄接受"看起来差不多"的写法。
 
-你可以让 AI 处理其中某些步骤。AI 是管线里的一种"步骤"，和普通命令平起平坐：
+## 高级／按需：治理账本与决策记忆
 
+新手可以先整段跳过这一节。下面的命令都需要 0.23.0 源码构建出来的二进制，完整参数面见 [SPEC.md](SPEC.md) 的 §2.1。
+
+先在独立临时目录里跑通一条链式账本（以下命令均已实测通过）：
+
+```bash
+(
+  set -eu
+  DEMO_DIR="$(mktemp -d /tmp/ductile-readme.XXXXXX)"
+  cd "$DEMO_DIR"
+
+  # ① 生成 ed25519 密钥对（首参是路径占位；产物在 --out 目录）
+  ductile mlv x.ledger keygen --out "$DEMO_DIR/keys"
+
+  ROOT_KEY="$(find "$DEMO_DIR/keys" -type f -name '*.secret' -print -quit)"
+  test -n "$ROOT_KEY"
+
+  # ② 建 v2 链（v2 强制 ed25519）
+  ductile ledger create app.ledger --root-key "$ROOT_KEY"
+
+  # ③ 写一条决策记录：λ=0.5 τ=8 闭集 {A,B} 证据 A=0.4 B=0.6，上一轮 verified
+  ductile attractor decide app.ledger cell 0 0.5 8.0 "A,B" "A=0.4,B=0.6" verified \
+    --signing-key "$ROOT_KEY"
+
+  # ④ 记忆投影 + 全量校验
+  ductile attractor show app.ledger cell     # → runs / n / m / a / lambda / tau
+  ductile ledger verify app.ledger           # → OK ledger verify format=v2(toon) …
+)
 ```
-  .proc("summarize", llm(prompt="把 {topic} 写成 100 字摘要"))
+
+这里用 `find` 找到 `keygen` 实际生成的 key ID，而不是假设某个固定文件名。生成的私钥只用于本地演示，不要提交到版本库。
+
+### 写入口与只读验证
+
+- `ledger create`：建立 append-only 的 v2 Ed25519 哈希链，是日常生产的直接写入口。
+- `ledger verify`：只读校验链上的哈希和签名，不修改内容。
+- `ledger convert`：读取旧链并产出一条新的 v2 链；它不向旧链追加，但同样是新链的产出路径。
+- `mlv`：保留 `keygen`、`verify`、`status` 等残余接口（keygen=钥工具不写账本），不承担生产写；写动词已移除。
+
+### `attractor`：从账本重放出决策记忆
+
+决策记忆不是另建一份数据库，而是从账本事件重放得到。对候选 \(X\)，评分可以写成：
+
+```text
+q_X = g_X · (1 + λ · m · 𝟙(a = X))
+m = e^(−n/τ),    λ ∈ [0, 0.5]
 ```
 
-配置好 AI 的接入方式后（见 [SPEC.md](SPEC.md) 的说明），这行就能跑。AI 步骤失败同样自动换备用方案，输出同样被记录。
+`a` 是当前记忆中的动作，`n` 是它在已验证历史里出现的次数；因此频繁被验证的动作会在后续决策中获得有限加成，但加成被 `λ` 的硬上限 `0.5` 限住。
 
-## 如果某步失败了
+只有 `verified` 事件会改变记忆状态；所有状态都可由账本重放，因此不需要独立维护一份“记忆文件”。如果两个候选评分相同，结果就是 `no-Decision`，不会偷偷打破平票。
 
-引擎把每次执行都记进一个本地数据库（SQLite 单文件）。你可以：
+`ductile attractor show app.ledger cell` 会打印 `runs`、`n`、`m`、`a`、`lambda`、`tau`；纯核 benchmark 中决策记忆 p99=0.0071ms（CLI 端到端另有 ~113ms 的整链 Ed25519 验签成本，属 append-only 语义而非决策计算）。
 
-- 直接看执行日志（run 的输出）
-- 用 `ductile db-stats` 查执行记录统计（哪个步骤老失败，一目了然）
+### 两条已知粗糙边缘
 
-失败的步骤会留下记录，同一问题反复出现时引擎会标记它。**你不需要装任何额外的监控系统。**
+- `ductile attractor --help` 裸调用会 panic；这是已知的参数面问题，参数面以 SPEC 为准，不要把这次 panic 当成正常的帮助输出。
+- `ductile mlv rotate` 的错误信息提到 `ledger append`，但实际上没有这个 verb；当前 ledger verbs 是 `create|verify|convert`。
+
+## 五家对比：同一个问题，五种做法
+
+下面把同一个任务——把一段非结构化文本变成结构化字段——放到五家框架的同一张表上比较。如果你想自己跑，可以先执行脚本套件（全部在离线沙箱里跑草图级别对比，不依赖各家云端服务）：
+
+```bash
+python benches/competitors/run_compare.py
+ductile run examples/scripts/unstructured-extract.pipeline
+```
+
+| 能力 | LangGraph | AutoGen | CrewAI | Prefect／Airflow | Ductile |
+| --- | --- | --- | --- | --- | --- |
+| 核心范式 | 有状态图编排 | 多 agent 对话编排 | role／task 协作 | 以工作流或任务调度为中心 | 声明式管线 DSL |
+| 失败换路 | 条件边或节点内编排 | 对话与工具编排 | task／role 内编排 | 重试与分支任务配置 | `.plan(a, b)` 由引擎换路 |
+| 质量门 | 条件边或 reviewer 自定义 | 对话流程与 reviewer 自定义 | task／role 流程自建 | 依赖任务与检查配置 | `.when` 与结构化 `judge` |
+| 不可信输出信任 | 应用层处理 | 应用层处理 | 应用层处理 | 应用层处理 | `.trust` 是 shell 注入闸 |
+| 脚本契约 | tool 封装 | tool／function 封装 | task 封装 | 任务代码封装 | 契约头直接接入，仍须实现契约与协议 |
+| 执行历史 | checkpoint 与框架记录 | 框架运行记录 | 框架运行记录 | 调度元数据与审计日志 | 本地 SQLite 单库 |
+| 认知与事故 | 应用与监控层自建 | 应用与监控层自建 | 应用与监控层自建 | 调度与监控生态 | `incident`、`canary`、`l4` |
+| 可审计账本 | 日志／checkpoint，非同一签名语义 | 日志，非同一签名语义 | 运行记录，非同一签名语义 | 元数据／审计日志 | v2 Ed25519 签名哈希链 |
+| 本地可视化 | LangSmith／生态 UI | AutoGen Studio／生态 UI | 生态 UI | 各自开源基线（未评估托管版） | 内置 TUI |
+
+### 公道与公平性说明
+
+- 表中的离线草图只回答“同一输入能否变成同一类结构化输出”，不是各家产品的性能排名。
+- 五家各自都有本文没展开的能力：checkpoint、调度、对话、插件、部署与生态都可能更成熟；Ductile 并不声称自己在这些维度全面领先。
+- Ductile 选择的是另一条取舍：把失败换路、质量门、脚本契约、信任边界、本地历史和可审计账本放进同一个文件与同一套引擎，而不是让应用层再拼一遍。
+- 可视化一行只比较这些项目的开源基线与生态入口；Prefect／Airflow 的企业或托管生态可能提供不同的 UI，不应把本表读成对所有发行方式的判断。
+
+## 架构与文档入口
+
+实现按八层组织：`interface`、`kernel`（约 12k 行）、`core`、`L4`、`L3`、`L2`、`L1`、`L0`；其中 `kernel` 采用平行生长策略，把决策内核与上层管线语义分开演化。
+
+全量测试：
+
+```bash
+cargo test
+```
+
+当前测试套件是 718 个，包含 lib 与 integration tests，且全绿。它覆盖的不是一个“happy path demo”，而是把解析、编译、运行时换路、门禁、账本与回放都当成可测试的边界。
+
+进一步阅读：
+
+- [SPEC.md](SPEC.md)：完整语法、参数面与内核行为。
+- [examples/](examples)：可运行的 `.pipeline`、`.hyper`、脚本与治理示例。
+- [benches/](benches)：草图对比、决策记忆基准与纯核性能入口。
 
 ## 设计理念
 
-**你只管声明"要做什么"，引擎负责"怎么做好"。**
+> 你只声明要做什么，引擎负责让它做得更可靠。
 
-- 多个备选方案、失败重试、错误传播——都是引擎内置行为，不是你的代码
-- 执行记录、成功率统计——自动留存，不是你的代码
-- 每条 AI 建议的修改都记录出处、可回滚——机器不可全信，制度兜底
+- 管线文件就是配置：步骤、依赖、门禁与交付物都在一个地方。
+- 失败换路不靠 `if/else` 堆叠，而靠声明式 `.plan` 把备选路径交给引擎。
+- 质量门、信任边界与注入防护属于语义本身，不靠应用层自觉。
+- 本地历史把运行记录变成决策输入；每条 AI 修改都可溯源、可回滚，制度兜底不靠自觉。
 
-一句话：**把流程写成文件，把可靠性交给引擎。**
-
-## 想深入的话
-
-- [SPEC.md](SPEC.md) —— 完整说明书（也可直接喂给 AI 助手让它帮你写管线）
-- [examples/](examples/) —— 官方示例，每个都能直接跑
-- 测试：`cargo test --lib`（476 项全过）
+把流程写进文件，把可靠性交给引擎；把失败路径与审计依据留在同一份可读文档里。
 
 ## License
 

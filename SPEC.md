@@ -1,18 +1,22 @@
-# Ductile DSL — 规格文档（v0.21.0）
+# Ductile DSL — 规格文档（v0.23.0）
 
 > 面向 AI agent / LLM 调用者与人类维护者。读完应能独立完成安装、管线编写、执行、调试、调优。
 > 本文只描述**当前状态**；历史沿革见 git log，不在此堆叠。
+>
+> **版本口径**：发布版本号以 Cargo.toml 为准（当前 0.23.0）。代码注释中的工作线标签（v0.24 语言内核 / v0.25 TOON v2）领先于发布版本号——特性已落地、版本号未随发。pyproject.toml（0.21.0）在上次 PyPI 发布后未同步，下次 publish 前须过三源一致闸。
 
 ---
 
 ## 0. 安装与快速开始
 
 ```bash
-pip install ductile          # PyPI wheel（cp311 manylinux，maturin 构建）
+pip install ductile          # PyPI wheel（**当前制品 0.21.0**，落后源码——见下方版本核验）
 ductile --help
 ```
 
-源码编译（开发态）：
+> **⚠️ 版本核验**：PyPI 制品（0.21.0）不含本文描述的 `ledger`/`attractor`/`toon` 命令。安装后先 `ductile --help` 核对；需要新命令一律走源码编译（下方）。三源现状：Cargo.toml=0.23.0 / SPEC=0.23.0 / PyPI=0.21.0——下次 publish 前过三源一致闸后消除此警告。
+
+源码编译（开发态，**要新命令走这条**）：
 
 ```bash
 git clone https://github.com/lsmind/ductile.git
@@ -103,7 +107,7 @@ Pipeline("name", "desc", cwd="...", env=["K=V", ...])
 | `@proc` | 上游 proc 完整输出文本 | 原样保留 |
 | `@proc.field` | 上游 DSL_RESULT 字段值 | `<no field:proc.field>` |
 
-### 1.5 内置动词全表（step_registry，21 个）
+### 1.5 内置动词全表（step_registry；19 行=规范名 21 个：别名 run/sh、read/read_file、search/mcp_search/web_search 各计一）
 
 | 动词 | 形态 | 说明 |
 |---|---|---|
@@ -164,44 +168,85 @@ Pipeline("name", "desc", cwd="...", env=["K=V", ...])
 | `ductile import <dir\|file>` | 批量导入 .pipeline 到库（目录递归） |
 | `ductile version save/log/diff` | 管线版本快照（`~/.local/share/ductile/versions/<name>/`） |
 
-### 2.1.1 治理账本（MLV，v0.24）
+### 2.1.1 治理账本（v2 生产路径：`ledger` 组；`mlv` 组为 legacy 别名）
 
-`ductile mlv <ledger> <verb> …` — 自组织治理超图 v3.1 内核：14-Op 封闭词表、11 态状态机（终态 REVOKED/TERMINAL）、23 字段哈希链账本（帧=u64be(N)‖J‖LF，canonical 字段序即合法性）、幂等 ACK、域分隔信封、跨进程 flock、崩溃后老本/新本二择。
+**生产入口（v0.25 TOON v2，唯一写路径）**：`ductile ledger <verb> …`
 
 | 动词 | 动作 |
 |---|---|
-| `init` | 显式建账（文件已存在且非空必拒；`LEDGER_INIT` 仅此路径） |
-| `create <b> <rev>` | CREATE_PROPOSAL（from=null 专属） |
-| `append --op O --binding b --rev N --rk k [--at t] [--payload p]` | 生产直路径追加（无 fixture 语法） |
-| `grant/decide/begin/commit/abandon <b> <rev>` | 治理链状态转移 |
-| `registry-confirm <b> <rev>` | 回执登记（ACTIVATING 路径 COMMIT 前置） |
-| `revoke/terminal/quarantine/investigate/repair <b> <rev>` | 停止/隔离/修复链 |
-| `verify` | 全量链校验（哈希链+重放） |
-| `status <b>` | 投影查询（current_rev/state/stop_gen） |
+| `create <PATH> --root-key <f>` | 创建 v2 ed25519 链（强制 auth 模式；key 用 `mlv keygen` 生成） |
+| `verify <PATH>` | 全量链校验（自动识别 v2(toon)/v1(typed)/v1(legacy) 三格式） |
+| `convert --in <v1> --out <v2> --root-key <f>` | v1→v2 迁移（重签入新链；已 v2 拒绝） |
 
-动词首选拼写：`begin`/`commit`/`decide`（`activate-begin`/`activate-commit`/`decision` 为兼容别名）。
+**legacy `mlv` 组（残余接口，非别名——写动词已移除）**：`init` / `status` / `verify` / `keygen` / `revoke --key-id` 保留（keygen=钥工具不写账本）；**写动词（append/grant/decide/begin/commit/…）已移除**——`rotate` 直接报错并指引走 `ledger` 组（注意：该报错文案提及 `ledger append` 属代码遗留，实际动词面以本表为准）。v2 链写入须 `sign_envelope_v2` 信封（v1 sign_envelope 过不了 verify_business_sig_v2）；读取走 `decode_ledger_tri` 三格式统一。
 
-ed25519 模式（v0.24，冻结规格 docs/sonet_mlv_ed25519_spec.md v1.1，本地）：`init --mode legacy|ed25519 --root-key <f>`（默认 legacy）；`keygen [--out DIR]`（.secret 0600/.pub 0644/目录 0700 原子发布）；`rotate --new-key <f> --signing-key <f>`（TRUST_ROTATE 信任帧，version=trust_seq+1 单调）；`revoke --key-id K --signing-key <f>`（TRUST_REVOKE tombstone；按参数形状与业务 `revoke <b> <rev>` 分发）；业务动词 ed25519 账本必带 `--signing-key`（缺失/未入册/已吊销=E423-env 硬错）。信任帧=独立帧类型（u64be(N)‖frame_type(1B)‖J‖LF，0=业务/1=信任；legacy 帧无此字节天然拒）；信封 sig/sig_key_id/sig_trust_seq 住内层不进 23 字段表；mac 字段保留置空串。错误 detail 三分列：`signature-invalid`/`signature-key-revoked`/`trust-chain-invalid`（均 E423-env）。
+**v1 内核语义（历史账本仍可 verify）**：14-Op 封闭词表、11 态状态机（终态 REVOKED/TERMINAL）、23 字段哈希链账本（帧=u64be(N)‖J‖LF，canonical 字段序即合法性）、幂等 ACK、域分隔信封、跨进程 flock、崩溃后老本/新本二择。错误码：E422 illegal-edge（否，换语义）/ E423-env 信封篡改（否）/ E423-nonce-reuse（是，换 nonce）/ E425 idempotency-conflict（否，新 key）/ receipt-required（是，登记回执后重提）/ ledger-missing（是，先 init）/ ERR terminal（否，新 rev 走 CREATE）。ACTIVATE_COMMIT 双径：ACTIVATING→ACTIVE 需回执；VERIFIED→ACTIVE 修复回径免回执；phase 唯一键 (binding,rev,op,from)。安全边界见 docs/mlv-security.md。门禁管线 `./mlv.pipeline`。
 
-错误码表（触发条件｜可重试性）：
 
-| 错误码 | 触发条件 | 可重试 |
+### 2.1.2 attractor 记忆闭环（v9）
+
+```
+ductile attractor decide <ledger> <binding> <rev> <lambda> <tau> <cats_csv> <evidence_csv> [prev_verdict] [--signing-key K]
+ductile attractor show <ledger> <binding> [lambda] [tau]
+```
+
+斑马鱼 attractor-integrator 架构的决策记忆核（`src/kernel/attractor.rs` 纯函数、零 I/O）：
+
+- **状态 (a, n)**：a=上次 verified 赢侧，n=距上次 verified 的 run 数；m=e^(−n/τ)；无独立存储——(a,n) 每次从账本 Decision payload 重放导出
+- **公式**：q_X = g_X·(1+λ·m·𝟙(a=X))；λ∈[0, 0.5] 硬界（R 期拒）；平票/no-Decision；仅 verified（独立判定源）改 a，rejected/no-Decision/失败恰推一次 n
+- **落账**：零新 Op/态——数据走既有 Decision payload（TOON `k: v` 封闭词表 13 字段：purpose/formula_version/lambda/tau/categories/evidence/m/n/memory_a/winner/tie/prev_verdict/input_digest）；同 binding 多 run=一族一环 `{base}#{k}`
+- **幂等**：input_digest 含 run 槽位 k——同槽位同输入=重放拒，异槽位同输入=合法新 run
+**上手动线（可复制全流程）**：
+
+```bash
+# ① 生成 ed25519 密钥对（首参=任意路径占位；.secret 0600 / .pub 0644，目录 0700）
+ductile mlv x.ledger keygen --out /tmp/mlv-keys
+# → OK keygen key_id=f882…  secret=/tmp/mlv-keys/ed25519-<key_id>….secret
+
+# ② 创建 v2 链（root-key=①的 .secret；v2 强制 ed25519）
+ductile ledger create app.ledger --root-key /tmp/mlv-keys/ed25519-….secret
+# → OK ledger create v2 head=<genesis-hash>
+
+# ③ 写入决策记录（唯一写路径；binding 用裸基名，run 槽位自动 {base}#{k} 自增）
+ductile attractor decide app.ledger cell 0 0.5 8.0 "A,B" "A=0.9,B=0.6" verified \
+    --signing-key /tmp/mlv-keys/ed25519-….secret
+
+# ④ 校验（哈希链+签名全量重放）与记忆投影
+ductile ledger verify app.ledger
+# → OK ledger verify format=v2(toon) head=<hash>
+ductile attractor show app.ledger cell
+# → runs: N  n: …  m: …  a: A
+```
+
+**attractor decide 参数表**（基数 8+1 可选+1 标志）：
+
+| 位 | 参数 | 说明 |
 |---|---|---|
-| `E422 illegal-edge` | 边表外转移/状态不匹配/伪造来源 | 否（换请求语义） |
-| `E423-env` | 信封字段篡改（MAC mismatch/声明与记录域不符） | 否 |
-| `E423-nonce-reuse` | nonce 重复 | 是（换 nonce 重构信封） |
-| `E425 idempotency-conflict` | 同 effect_key 异 request_digest | 否（新请求须新 key） |
-| `receipt-required` | ACTIVATING 路径 COMMIT 无有效回执 | 是（登记回执后重提） |
-| `ledger-missing` | 账本不存在（init 专属路径外） | 是（先 init） |
-| `ERR terminal` | 终态后复活尝试 | 否（新 rev 走 CREATE） |
+| 1 | ledger | v2 账本路径 |
+| 2 | binding | 族名，多 run 用 `{base}#{k}` |
+| 3 | rev | 修订号 |
+| 4 | lambda | λ∈[0, 0.5] 硬界，越界拒绝（浮点解析失败=E422） |
+| 5 | tau | τ>0 衰减常数 |
+| 6 | cats_csv | 闭集 C，逗号分隔（如 `"A,B"`） |
+| 7 | evidence_csv | 与 C 对齐的 `键=值` 对（如 `"A=0.9,B=0.6"`），值=非负浮点 |
+| 8 | prev_verdict | 可选：`verified`/`rejected`（封闭枚举，非法值 E422） |
+| — | --signing-key | v2 链必带；缺失=E423-env 硬错 |
 
-语义要点：`ACTIVATE_COMMIT` 双径——ACTIVATING→ACTIVE 需有效回执，VERIFIED→ACTIVE 为修复链回径免回执；phase 唯一键 `(binding,rev,op,from)`=每条边每修订恰一次。安全边界见 docs/mlv-security.md（本地）。门禁管线 `./mlv.pipeline`（37 步：冻结断言+协议串+failpoint 矩阵+race 栅栏+ed25519 四件套/golden/信任帧崩溃矩阵）。
+输出：TOON `k: v` 十三字段（winner/tie/m/n/memory_a/input_digest…）。幂等：input_digest 含 run 槽位 k——同槽位同输入重放拒（E425），异槽位同输入=合法新 run。
+
+**attractor show**：`ductile attractor show <ledger> <binding> [lambda] [tau]` → 重放导出记忆投影（runs/n/m/a）。**已知面**：`ductile attractor --help` 裸调用会 panic（cli.rs 索引越界，已知不修）——参数面以本表为准。
+
+**性能口径**：纯核 replay+decide p99=0.0071ms；CLI 端到端 ~113ms（整链 Ed25519 验签，append-only 语义成本，不属热路径责任面）。
+
+**证据源评估线**（docs/attractor-hb/）：外部 RAG 接入经外援六维审查否决（v10_rag_review）；可抄资产=指数衰减加权+收缩平滑（RiverMemo-Lite 纯 SQL，阶跃翻转环境 Q 0.622 vs 静态先验 0.300）；ECE≤0.05 判停门对二值小样本是信息论地板。
+
+**TOON 契约生死线**：payload 每行 `k: v`（冒号后恰一空格）。`ductile toon`（stdin 全文 → closed parse → canonical 重编码；`toon --schema <s>` 变体）是唯一裁判口。
 
 
 ### 2.2 检索与复用
 
 | 命令 | 动作 |
-|---|---| 
+|---|---|
 | `ductile search "q"` | proc 库 LIKE 检索（tags+name+desc） |
 | `ductile fts "q" [--json]` | BM25 全文检索（相关度排序） |
 | `ductile discover [--json]` | 跨管线同构 proc 组（tag 集相等） |
@@ -209,8 +254,7 @@ ed25519 模式（v0.24，冻结规格 docs/sonet_mlv_ed25519_spec.md v1.1，本�
 | `ductile learn [dir]` | 静态 tag 序列模式学习（频率 ≥2） |
 | `ductile similar [--json] [dirs]` | 结构键对齐检索 |
 | `ductile okr "目标"` | v0.22 OKR 编译器：NL 目标 → llm 分解 KR 树 → .hyper 草稿（parse 过才落盘，人审后 hyper build） |
-| `ductile build` | 从材料构建 |
-| `ductile cost` | cost 相关操作 |
+| `ductile cost report` | cost 缓存报告（其余 cost 子动词已退役） |
 
 v0.22 check 期同构门禁（推模式）：`ductile check` 通过后自动对 db 注册表查
 结构键等价图，命中即 stderr 提示 `[iso-gate] ≅ <名> — <路径>`。AGENTS.md
@@ -268,6 +312,7 @@ ductile explore --report <id>        # 只读检索冻结报告
 | `ductile shelve list/resolve` | 判别实验模糊搁置队列 |
 | `ductile degraded [clear <name>]` | degraded 标志管理 |
 | `ductile patch <pl> <proc> <impl> <field> <val>` / `list` / `clear` / `revert` | 运行时覆盖（不改源文件）；origin 出处标注 |
+| `ductile toon [--schema <s>]` | TOON closed parser 裁判口：stdin 全文 → canonical 重编码 stdout；拒绝=stderr 一行+exit 1（见 §2.1.2） |
 
 ### 2.6 脚本契约与维护
 
@@ -483,6 +528,16 @@ key1=value1
 - 逃生门：`# args: argv!` / `# args: env!` 后缀 `!` 跳过 lint（反射/封装读参的场景，责任自负）
 - lint 是启发式（脚本体扫描 `sys.argv`/`ARGV`/`$1`/`DUCTILE_ARG_` 痕迹），只做注册期红灯，不做运行期保证
 
+### 7.2c DSL 引号语义速查（反馈单点名补表）
+
+| 场景 | 写法 | 陷阱 |
+|---|---|---|
+| 字符串参数含空格 | `script(x, text="a b")` | DSL 引号内是字面值，不再二次解析 |
+| 参数值是 JSON | `script(x, cfg='{"a":"b"}')` | 外层必须**单引号**，内层用双引号——三层同引号必炸 |
+| @ref 含单引号 | `echo "@scan"` | `@ref` 展开后单引号会破坏 shell 结构 → 禁止 echo @ref，用 `.when` 字段或 `write` 落盘（§1.6 物理闸） |
+| 多行文本 | `run("cmd \\\\"a b\\\\"")` | run() 内是 shell 语义，嵌套引号按 shell 规则 |
+| {topic} 含引号 | `text="{topic}"` | DSL 侧安全（不进 shell）；只有 run() 里才需要防注入 |
+
 ### 7.2d 深题手册 `ductile help <topic>`（v0.23）
 
 排障知识写进二进制，终端即得（反馈单第 3 条：调试不该逼人进 Rust 源码）：
@@ -504,23 +559,6 @@ SPEC 与 help 文本同步改（内容单一事实源在 cli.rs cmd_help_topic�
 DUCTILE_BUILD_HASH）——`git show <hash>:<file>` 永远钉在构建版本。
 锚点未命中退化为符号名（rg -n 仍可定位）。新增深题时同步锚点表
 （cli.rs cmd_help_src）。
-
-### 7.2c DSL 引号语义速查（反馈单点名补表）
-
-| 场景 | 写法 | 陷阱 |
-|---|---|---|
-| 字符串参数含空格 | `script(x, text="a b")` | DSL 引号内是字面值，不再二次解析 |
-| 参数值是 JSON | `script(x, cfg='{"a":"b"}')` | 外层必须**单引号**，内层用双引号——三层同引号必炸 |
-| @ref 含单引号 | `echo "@scan"` | `@ref` 展开后单引号会破坏 shell 结构 → 禁止 echo @ref，用 `.when` 字段或 `write` 落盘（§13.5 物理闸） |
-| 多行文本 | `run("cmd \\"a b\\"")` | run() 内是 shell 语义，嵌套引号按 shell 规则 |
-| {topic} 含引号 | `text="{topic}"` | DSL 侧安全（不进 shell）；只有 run() 里才需要防注入 |
-
-### 7.3 脚本写作四律
-
-1. bash 必须 `set -euo pipefail`（否则中间失败被吞、末尾 echo 返回 0 → 静默半成功）
-2. 机器可读走 ##DSL_RESULT，人类可读走 stderr
-3. pure/concurrency 如实标注（撒谎会让编排优化破坏正确性）
-4. 幂等脚本注明 idempotent: true
 
 ## 8. 认知层（契约卡 / canary / incident / L4 / shelve）
 
@@ -588,11 +626,15 @@ log_only ──(≥8 标签 且 一致率 ≥70%)──▶ enforcing
 
 新增表必须进 SCHEMA_DDL 单一事实源（懒建表旁路是历史坑）。完整 DDL 见 `src/L0_physical/db.rs` 的 SCHEMA_DDL。
 
-## 11. 模块结构（七层认知栈）
+## 11. 模块结构（八层认知栈）
 
 ```
 src/
 ├── interface/        # cli（命令分发）、api（pyo3 32 pub fn）
+├── kernel/           # 语言内核（平行生长，不动 L0-L4 存量）：types/ast/toon/mlv_toon/
+│                     #   wal_toon/golden/mlv（v3.1 内核）/mlv_auth（ed25519）/gov（GovRegistry）/
+│                     #   attractor（v9 记忆核）/binding/check/evalfns/fd3/chaos/judge/quota/
+│                     #   ledger/hash/runadapter/wal（≈12k 行）
 ├── core/             # ast、dslresult、script_card（不依赖任何层）
 ├── L4_structure/     # hyper/learn/grow/promote/harvest
 ├── L3_dsl/           # parser/typecheck/when/config/version
@@ -601,9 +643,9 @@ src/
 └── L0_physical/      # db + 三张 schema.sql
 ```
 
-依赖铁律：只许向下（interface > L4 > L3 > L2 > L1 > L0；core 任意）。`scripts/layers_probe.py` 探针守护（selftest 门禁），违规即红。
+依赖铁律：只许向下（interface > kernel ≈ L4 > L3 > L2 > L1 > L0；core 任意；kernel 平行生长、sidecar 期与 L0-L4 前端并存，每管线固定 language_version 禁混用）。`scripts/layers_probe.py` 探针守护（selftest 门禁），违规即红。
 
-**测试**：`cargo test --lib`（476 项）。db 层双形态注入（`*_conn` 内核 + 全局薄壳）。
+**测试**：`cargo test`（lib 654 + 集成 64 = **718 项**全绿；含 attractor 黑盒 CLI 14-run 闭环与 golden 交叉验证）。db 层双形态注入（`*_conn` 内核 + 全局薄壳）。
 
 ## 12. API 层（core + 薄壳双形态）
 
