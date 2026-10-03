@@ -175,6 +175,12 @@ use a dedicated sentinel .proc(\"deliver\").deliver(@{})",
                 if chars[j] == '@'
                     && (j == 0 || !(chars[j - 1].is_alphanumeric() || chars[j - 1] == '_'))
                 {
+                    // v0.23.1 P0-A 配套：@@name = 字面 @ 转义（exec_run 在 resolve
+                    // 前剥一层）。scanner 跳过转义对，不把第二个 @ 当 ref 扫。
+                    if j + 1 < chars.len() && chars[j + 1] == '@' {
+                        j += 2;
+                        continue;
+                    }
                     let mut k = j + 1;
                     while k < chars.len() && (chars[k].is_alphanumeric() || chars[k] == '_') {
                         k += 1;
@@ -201,8 +207,11 @@ use a dedicated sentinel .proc(\"deliver\").deliver(@{})",
                     if p.trust_refs.contains(&name) {
                         continue;
                     }
-                    // 有 .trust 但没点这个名，或完全没有 .trust——仅当名字
-                    // 是真实 proc 时红（未知名可能是 @ref 之外的字符串形态）
+                    // v0.23.1 P0-A fail-closed 收紧：run()/sh() 体内的一切 @name
+                    // 只有两态——真实 proc 名（须 .trust 点名）或 ParseError。
+                    // 旧态"未知名放行"是绕闸后门：@typo 拼错名在静态闸与
+                    // resolve_vars（None => 原样保留）双处静默直达 shell。
+                    // 字面 @ 需求走显式转义形态 @@name（resolve 前剥一层）。
                     if procs.iter().any(|q| q.name == name) {
                         return Err(ParseError {
                             line: line_no,
@@ -216,6 +225,17 @@ use a dedicated sentinel .proc(\"deliver\").deliver(@{})",
                             line_text: line_text.to_string(),
                         });
                     }
+                    return Err(ParseError {
+                        line: line_no,
+                        col: 1,
+                        msg: format!(
+                            "unknown @{} in run()/sh() body: not a declared proc — \
+                             fail-closed (§1.6). If you mean a literal @{}, escape it \
+                             as @@{}. got: {}",
+                            name, name, name, full
+                        ),
+                        line_text: line_text.to_string(),
+                    });
                 } else {
                     j += 1;
                 }
@@ -2071,6 +2091,34 @@ mod tests {
             .unwrap_err()
             .msg
             .contains("unknown proc-level modifier"));
+        // 9) v0.23.1 P0-A：未知名（非任何 proc）在 run()/sh() 体内 → ParseError。
+        //    旧态"未知名放行"是绕闸后门：@typo 静态闸与 resolve_vars 双处静默直达 shell。
+        let typo = "Pipeline(\"t\")\n.proc(\"gen\")\n  .plan(a -> run(\"echo seed\"))\n.proc(\"rep\")\n  .plan(r -> run(\"echo @genn\"))\n";
+        assert!(
+            parse_pipeline(typo)
+                .unwrap_err()
+                .msg
+                .contains("unknown @genn"),
+            "unknown @name in run()/sh() must be fail-closed ParseError"
+        );
+        // 10) v0.23.1 P0-A 配套：@@name 字面转义对——scanner 跳过，不红
+        let escaped = "Pipeline(\"t\")\n.proc(\"a\")\n  .plan(x -> run(\"echo hello-@@world\"))\n";
+        assert!(
+            parse_pipeline(escaped).is_ok(),
+            "@@name escape pair must pass the static gate"
+        );
+    }
+
+    #[test]
+    fn parse_trust_gate_value_hygiene_runtime() {
+        // v0.23.1 P0-B 运行时值卫生闸（exec_run 层，此处测 scanner 辅助语义）：
+        // 中间换行=注入面 fail-closed；尾部换行=run 产物天然形态放行。
+        // exec_run 不可单测（须 spawn bash），闸体在 exec_run 内联——此测试锚定
+        // @@ 转义在 runtime scanner（first_untrusted_ref_in_cmd）中也跳过：
+        // resolve 后 @@world 不得被当未知名拦。
+        let escaped = "Pipeline(\"t\")\n.proc(\"a\")\n  .plan(x -> run(\"echo hello-@@world\"))\n";
+        let pl = parse_pipeline(escaped).unwrap();
+        assert_eq!(pl.procs.len(), 1);
     }
 
     #[test]

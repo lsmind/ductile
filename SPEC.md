@@ -137,13 +137,16 @@ Pipeline("name", "desc", cwd="...", env=["K=V", ...])
 
 `run()`/`sh()` 命令体里引用 `@proc` / `@proc.field`，必须在该 proc 声明 `.trust(@proc)`（独立行或 `.proc(...)` 行尾内联均可，语义相同）：
 
-- **parser 静态闸**：check 期扫描 run/sh 体，命中真实 proc 名且未点名 → ParseError（带行号）
-- **executor 运行时兜底**：resolve 后残留的 `@name`（动态拼接形态）同判
+- **parser 静态闸**：check 期扫描 run/sh 体，真实 proc 名未点名 → ParseError（带行号）
+- **未知名 fail-closed（v0.23.1 P0-A）**：run/sh 体内一切 `@name` 只有两态——真实 proc 名（须 `.trust` 点名）或 ParseError。旧态「未知名放行」是绕闸后门（`@typo` 拼错名在静态闸与 resolve 处双静默直达 shell），已封
+- **字面 @ 转义**：要输出字面 `@word`，写 `@@word`（resolve 前不识别、闸后剥一层，bash 收到 `@word`）
+- **值卫生闸（v0.23.1 P0-B，引号感知）**：已信任 ref 的替换值把换行注入**引号外**=注入面，硬错（引号外换行使 bash 把第二行当独立命令执行）；**引号内**换行是合法数据（bash 引号串跨行=文档化模式「多行 @ref 须引号」），放行。多行数据走 `write(content=@ref)` 落盘后 `cat` 更稳
+- **executor 运行时兜底**：resolve 后残留的 `@name`（动态拼接形态）同判，未知同红（管线执行上下文内）
 - 豁免：`@self`、`@localhost`（主机名/邮箱形态）
 - 合法的结构化消费通道（不走 shell）：`.when(@proc.field OP v)`、契约 invariants、`write(content=@ref)` 落盘后 `cat`
 - 行尾未知修饰符（`.proc(...).bogus(...)`）→ ParseError fail-closed，不静默丢
 
-> LLM 输出含单引号会炸 shell 引号结构——这是物理闸存在的根因，不是风格建议。
+> LLM 输出含单引号会炸 shell 引号结构——这是物理闸存在的根因，不是风格建议。许可（`.trust` 管「谁进」）≠ 转义（值卫生管「怎么进」）：两者都是物理闸，缺一不可。
 
 ### 1.7 已退役语法（解析期警告 + 忽略，不入 AST）
 

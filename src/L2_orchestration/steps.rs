@@ -2155,6 +2155,9 @@ fn exec_read(
 /// - .trust 里点过名的放行（NODE_CTX 中继；无 ctx = 不在管线执行内，
 ///   如单步 script call——此时 results 命中即放行，名字面量直接过）
 /// - @self / @localhost / 邮箱形态跳过
+/// - v0.23.1 P0-A 对齐：未知名（不在 results 也非豁免形态）同样报——
+///   静态闸已收紧为「未知即 ParseError」，运行期动态拼接形态同判，
+///   防止热补丁路径绕过收紧后的静态闸。字面 @ 走 @@name 转义（剥于 resolve 前）。
 fn first_untrusted_ref_in_cmd(cmd: &str, results: &BTreeMap<String, Value>) -> Option<String> {
     let trusted: Vec<String> = NODE_CTX.with(|c| {
         c.borrow()
@@ -2167,6 +2170,11 @@ fn first_untrusted_ref_in_cmd(cmd: &str, results: &BTreeMap<String, Value>) -> O
     let mut j = 0;
     while j < chars.len() {
         if chars[j] == '@' && (j == 0 || !(chars[j - 1].is_alphanumeric() || chars[j - 1] == '_')) {
+            // v0.23.1 P0-A 配套：@@name 字面转义对——跳过（exec_run 在此闸后剥层）
+            if j + 1 < chars.len() && chars[j + 1] == '@' {
+                j += 2;
+                continue;
+            }
             let mut k = j + 1;
             while k < chars.len() && (chars[k].is_alphanumeric() || chars[k] == '_') {
                 k += 1;
@@ -2177,7 +2185,14 @@ fn first_untrusted_ref_in_cmd(cmd: &str, results: &BTreeMap<String, Value>) -> O
                 continue;
             }
             if !results.contains_key(&name) {
-                continue; // 不是本管线的真实上游（字面量/别的东西）
+                // v0.23.1 P0-A 对齐：未知名同报。静态闸已收紧为「未知即
+                // ParseError」，此处运行期形态同判（动态拼接绕静态闸的路径）。
+                // 无 NODE_CTX（单步 script call 等非管线执行）不判——保持
+                // 既有行为面，避免误伤 CLI 直调场景。
+                if has_ctx {
+                    return Some(name);
+                }
+                continue;
             }
             if has_ctx && !trusted.contains(&name) {
                 return Some(name);
@@ -2196,6 +2211,11 @@ fn exec_run(
     results: &BTreeMap<String, Value>,
 ) -> Result<Value, String> {
     deny_if_shell_restricted("run")?;
+    // v0.23.1 P0-A 配套：@@name 字面转义——静态闸已收紧为「未知即 ParseError」，
+    // 字面 @ 的合法形态是 @@。剥层在 resolve_vars 与运行时兜底**之后**：
+    // resolve_vars 不识别 @@（原样保留，不会被当 ref 替换）、运行时 scanner
+    // 按转义对跳过（见 first_untrusted_ref_in_cmd），最后一刻剥成单 @ 进 bash。
+    // 顺序换了会二次踩闸：先剥 → scanner 把字面 @world 又当未知名拦截。
     let cmd_raw = extract_first_string(body);
     let cmd = resolve_vars(&cmd_raw, topic, results);
     // v0.19 审计③ 运行时兜底：resolve 后残留的 @name = 未命中 results 的
@@ -2209,10 +2229,46 @@ fn exec_run(
             bad, bad
         ));
     }
+    // v0.23.1 P0-B 值卫生闸（引号感知版）：@ref 替换值注入的换行，在引号外
+    // 才是注入面——引号外换行使 bash 把第二行当独立命令执行（实测：值 "A\n]"
+    // 未加引号拼入，第二行被 exit 127 执行）。引号内换行是合法数据（bash 引
+    // 号串跨行=文档化模式「多行 @ref 须引号」），放行。
+    // 精确语义：cmd_raw 不含换行而 resolve 后含 → 换行来自上游值；扫描时跟
+    // 踪 ' 与 " 配对状态，仅引号外换行触发。fail-closed：值内嵌引号破坏配对
+    // 的风险由「多行 @ref 须引号+单行值引号炸」既有告诫覆盖（SPEC §1.6）。
+    // 多行数据结构化通道：write(content=@ref) 落盘后 cat。
+    let cmd_raw_has_nl = cmd_raw.contains('\n') || cmd_raw.contains('\r');
+    if !cmd_raw_has_nl {
+        let mut in_squote = false;
+        let mut in_dquote = false;
+        let mut bad_nl: Option<char> = None;
+        for c in cmd.trim_end().chars() {
+            match c {
+                '\'' if !in_dquote => in_squote = !in_squote,
+                '"' if !in_squote => in_dquote = !in_dquote,
+                '\n' | '\r' if !in_squote && !in_dquote => {
+                    bad_nl = Some(c);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if let Some(_nl) = bad_nl {
+            return Err(format!(
+                "run() command became multi-line after @ref resolution — newline \
+                 outside quotes inside a value can inject a second command (one line \
+                 = one command). Quote the ref ('@ref') or use write(content=@ref) \
+                 then cat. resolved cmd head: {:?}",
+                cmd.chars().take(80).collect::<String>()
+            ));
+        }
+    }
     // v0.7 resource management: optional timeout=seconds arg (default 300s, 0 = no limit)
     let timeout_secs: u64 = extract_string_arg("timeout", body).parse().unwrap_or(300);
     // v0.7 resource management: env vars via env="K=V" args (repeatable)
     let envs = extract_all_string_args("env", body);
+    // v0.23.1 P0-A 配套：最后一刻剥 @@→@（所有闸已过，字面 @ 安全进 bash）
+    let cmd = cmd.replace("@@", "@");
     eprintln!("    -> run: {} (timeout={}s)", cmd, timeout_secs);
 
     let bash = resolve_bash()?;
