@@ -2226,19 +2226,23 @@ fn exec_run(
             bad, bad
         ));
     }
-    // v0.23.1 P0-B v5（替换点检查版，弃配对扫描）：
-    // v4 的引号配对扫描被否——值内嵌引号会翻转配对状态（ship push 实锤：
-    // commit message 含 'raw 零换行' 的单引号，配对错乱误杀），且 bash 语法
-    // 无法用计数器完整分析（heredoc/嵌套 subst）。改在**替换点**做可静态
-    // 证明的检查：
-    //   对每个 trusted ref：值 trim 尾换行后仍含换行（中间换行）→ 它在
-    //   cmd_raw 中的每次出现必须是精确 '@name'（或 '@name.field'）形态，
-    //   且值不含单引号。bash 语义保证：'...' 内除 ' 外全是字面量——
-    //   值无 ' 则其换行 100% 无执行面。任何其他形态（引号外/$() 内/
-    //   双引号内/方括号内）+中间换行 = 红。
-    //   纯尾换行（run 产物天然形态）无执行面，放行。
-    // 单行值的其他风险（含 $()/`/引号）=「单行值引号炸」既有告诫范畴，
-    // 不归本闸；结构化 argv（P1）才是终解。多行数据走 write+cat。
+    // v0.23.1 P0-B v6（raw 单引号状态机版——外援三轮否决后的终形态）：
+    // 演化史：v3 引号感知(扫 resolved)→$()洞；v4 配对扫描(扫 resolved)→
+    //   值内引号污染状态；v5 相邻字符匹配(扫 raw)→''@x''空串洞。
+    // 根因定论：**局部字符形状≠词法事实**；扫描对象必须是 cmd_raw（作者
+    //   写的良构文本，引号结构未被值污染），判定必须用全文状态机。
+    // v6 检查（仅当 trusted 值有中间换行时触发）：
+    //   1) raw 含 heredoc 起始（<<）→ 红（heredoc 无引号语义，不证明）
+    //   2) 值含 ' → 红（单引号内无法转义 '，闭合后半段变裸文本）
+    //   3) 对 cmd_raw 全文跑单引号状态机：跟踪双引号态（双引号内的 ' 是
+    //      字面量不翻转）与双引号内反斜杠转义；@name 的每次出现必须处于
+    //      单引号串内。''@x''（空串洞）在状态机下 @x 判引号外 → 红。
+    //      subst 内的 '@name'（如 $( : '@x')）@x 在单引号串内=字面量，
+    //      无执行面 → 绿（bash 词法先于 subst 展开）。
+    // 证明基础：bash 单引号串内除 ' 外全字面量；值无 ' + 出现点全在
+    //   单引号态 → 值的全部字节均在字面量区 → 无执行面。
+    // 残留声明：单行值的其他风险（$()/`/引号）=既有告诫范畴；结构化
+    //   argv（P1，env 注入+"$VAR"引用）才是终解。多行数据走 write+cat。
     {
         let trusted: Vec<String> = NODE_CTX.with(|c| {
             c.borrow()
@@ -2247,7 +2251,24 @@ fn exec_run(
                 .unwrap_or_default()
         });
         let has_ctx = NODE_CTX.with(|c| c.borrow().is_some());
+        if has_ctx && cmd_raw.contains("<<") {
+            for name in &trusted {
+                if let Some(Value::Text(t)) = results.get(name) {
+                    let core = t.trim_end_matches(|c| c == '\n' || c == '\r');
+                    if core.contains('\n') || core.contains('\r') {
+                        return Err(format!(
+                            "heredoc (<<) in run() with multi-line @{} value — \
+                             heredoc has no quote semantics, cannot prove safety \
+                             (§1.6). Use write(content=@{}) then cat.",
+                            name, name
+                        ));
+                    }
+                }
+            }
+        }
         if has_ctx {
+            // 先收集需要检查的 trusted 名（有中间换行者）
+            let mut checked: Vec<(String, &str)> = Vec::new();
             for name in &trusted {
                 let v = match results.get(name) {
                     Some(Value::Text(t)) => t.as_str(),
@@ -2267,40 +2288,58 @@ fn exec_run(
                         core.chars().take(60).collect::<String>()
                     ));
                 }
-                let needle = format!("@{}", name);
-                let chars: Vec<char> = cmd_raw.chars().collect();
-                let nchars: Vec<char> = needle.chars().collect();
-                let mut i = 0;
-                while i + nchars.len() <= chars.len() {
-                    if chars[i..i + nchars.len()] == nchars[..] {
-                        // 前一字符必须是 '
-                        let prev_ok = i > 0 && chars[i - 1] == '\'';
-                        // 后跟 .field 链，然后必须是 '
-                        let mut k = i + nchars.len();
-                        while k < chars.len() && chars[k] == '.' {
-                            k += 1;
-                            while k < chars.len()
-                                && (chars[k].is_alphanumeric() || chars[k] == '_')
+                checked.push((name.clone(), v));
+            }
+            if !checked.is_empty() {
+                // raw 全文单引号状态机：双引号态内 ' 不翻转；双引号态内
+                // 反斜杠转义下一字符；单引号态内无转义。
+                let rchars: Vec<char> = cmd_raw.chars().collect();
+                let mut in_squote = false;
+                let mut in_dquote = false;
+                let mut esc = false; // 双引号内反斜杠转义
+                // 每个 @name 出现点的合法性
+                let mut i = 0usize;
+                let names: Vec<String> = checked.iter().map(|(n, _)| n.clone()).collect();
+                while i < rchars.len() {
+                    let c = rchars[i];
+                    match c {
+                        '\\' if in_dquote && !esc => esc = true,
+                        '\'' if in_dquote || esc => esc = false,
+                        '\'' => in_squote = !in_squote,
+                        '"' if in_squote => {}
+                        '"' if esc => esc = false,
+                        '"' => in_dquote = !in_dquote,
+                        '@' if !in_squote => {
+                            // 引号外的 @：若是受检名，红
+                            if i == 0
+                                || !(rchars[i - 1].is_alphanumeric()
+                                    || rchars[i - 1] == '_')
                             {
-                                k += 1;
+                                let mut k = i + 1;
+                                while k < rchars.len()
+                                    && (rchars[k].is_alphanumeric() || rchars[k] == '_')
+                                {
+                                    k += 1;
+                                }
+                                let word: String = rchars[i + 1..k].iter().collect();
+                                if names.iter().any(|n| n == &word) {
+                                    return Err(format!(
+                                        "trusted @{} value has newline but appears \
+                                         outside a single-quoted string in the \
+                                         command — newline outside quotes is an \
+                                         injection surface (§1.6). Write it as \
+                                         '@{}' (value must not contain quotes) or \
+                                         use write(content=@{}) then cat.",
+                                        word, word, word
+                                    ));
+                                }
                             }
                         }
-                        let next_ok = k < chars.len() && chars[k] == '\'';
-                        if !(prev_ok && next_ok) {
-                            return Err(format!(
-                                "trusted @{} value has newline but is not quoted as \
-                                 '@{}' in the command — newline outside a plain \
-                                 single-quoted string is an injection surface (§1.6). \
-                                 Write it as '@{}' (value must not contain quotes) or \
-                                 use write(content=@{}) then cat.",
-                                name, name, name, name
-                            ));
-                        }
-                        i = k;
-                    } else {
-                        i += 1;
+                        _ => esc = false,
                     }
+                    i += 1;
                 }
+                // 全部出现点在单引号内 → 值字面量无执行面，放行
             }
         }
     }
