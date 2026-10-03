@@ -141,7 +141,7 @@ Pipeline("name", "desc", cwd="...", env=["K=V", ...])
 - **未知名 fail-closed（v0.23.1 P0-A）**：run/sh 体内一切 `@name` 只有两态——真实 proc 名（须 `.trust` 点名）或 ParseError。旧态「未知名放行」是绕闸后门（`@typo` 拼错名在静态闸与 resolve 处双静默直达 shell），已封
 - **字面 @ 转义**：要输出字面 `@word`，写 `@@word`（resolve 前不识别、闸后剥一层，bash 收到 `@word`）
 - **值卫生闸（v0.23.1 P0-B，引号感知）**：已信任 ref 的替换值把换行注入**引号外**=注入面，硬错（引号外换行使 bash 把第二行当独立命令执行）；**引号内**换行是合法数据（bash 引号串跨行=文档化模式「多行 @ref 须引号」），放行。多行数据走 `write(content=@ref)` 落盘后 `cat` 更稳
-- **executor 运行时兜底**：resolve 后残留的 `@name`（动态拼接形态）同判，未知同红（管线执行上下文内）
+- **executor 运行时兜底**：resolve 后残留且在 results 内的 `@name`（真 ref 未 trust）同判；不在 results 的 @word 是值内数据性文本（bash 不展开惰性 @），不报——名字边界在静态闸
 - 豁免：`@self`、`@localhost`（主机名/邮箱形态）
 - 合法的结构化消费通道（不走 shell）：`.when(@proc.field OP v)`、契约 invariants、`write(content=@ref)` 落盘后 `cat`
 - 行尾未知修饰符（`.proc(...).bogus(...)`）→ ParseError fail-closed，不静默丢

@@ -2155,9 +2155,9 @@ fn exec_read(
 /// - .trust 里点过名的放行（NODE_CTX 中继；无 ctx = 不在管线执行内，
 ///   如单步 script call——此时 results 命中即放行，名字面量直接过）
 /// - @self / @localhost / 邮箱形态跳过
-/// - v0.23.1 P0-A 对齐：未知名（不在 results 也非豁免形态）同样报——
-///   静态闸已收紧为「未知即 ParseError」，运行期动态拼接形态同判，
-///   防止热补丁路径绕过收紧后的静态闸。字面 @ 走 @@name 转义（剥于 resolve 前）。
+/// - v0.23.1：未知名（不在 results）**不报**——resolve 后的此类 @word 是
+///   上游值内的数据性文本（如 commit message 提到 @name），bash 不展开
+///   惰性 @word，无执行面。名字边界在 parser 静态闸（P0-A 未知即红）。
 fn first_untrusted_ref_in_cmd(cmd: &str, results: &BTreeMap<String, Value>) -> Option<String> {
     let trusted: Vec<String> = NODE_CTX.with(|c| {
         c.borrow()
@@ -2185,13 +2185,10 @@ fn first_untrusted_ref_in_cmd(cmd: &str, results: &BTreeMap<String, Value>) -> O
                 continue;
             }
             if !results.contains_key(&name) {
-                // v0.23.1 P0-A 对齐：未知名同报。静态闸已收紧为「未知即
-                // ParseError」，此处运行期形态同判（动态拼接绕静态闸的路径）。
-                // 无 NODE_CTX（单步 script call 等非管线执行）不判——保持
-                // 既有行为面，避免误伤 CLI 直调场景。
-                if has_ctx {
-                    return Some(name);
-                }
+                // v0.23.1 教训（ship.pipeline push 实锤）：resolve 后不在 results
+                // 的 @word 来自**上游值内的数据性文本**（如 commit message 提到
+                // @name）——bash 不展开 @word，惰性文本无执行面。静态闸（P0-A）
+                // 才是名字边界；此处保持 v0.19 原语义：只报「真 ref 未 trust」。
                 continue;
             }
             if has_ctx && !trusted.contains(&name) {
