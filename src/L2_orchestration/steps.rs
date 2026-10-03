@@ -2226,75 +2226,82 @@ fn exec_run(
             bad, bad
         ));
     }
-    // v0.23.1 P0-B 值卫生闸 v4（外援复审回炉版）：
-    // 洞① 修复：触发条件不再是「raw 零换行」（那是 fail-open：raw 多行命令
-    //   中的 @ref 注入换行照样执行，如 `echo start\necho @commit`+值含
-    //   `\ntouch /pwn`）。改为**换行计数**：resolved 的 \n+\r 数 > raw 的
-    //   → 有换行来自上游值 → 触发检查。作者写的换行不受影响。
-    // 洞② 修复：引号感知不够——bash 的 $()/反引号**命令替换上下文内**，
-    //   换行是命令分隔符（双引号内也一样：`"$(x a\nb)"` 会执行 b）。
-    //   扫描器跟踪 subst 深度（$(` 与 `` ` `` 进入，配对 `)` 退出），subst
-    //   内任何换行（无论引号状态）一律硬错。双引号内 `\"` 不翻转配对。
-    // 已知残留（如实声明，非完整 bash 语法分析）：heredoc、嵌套奇形引号。
-    //   结构化 argv（P1）才是终解。多行数据走 write(content=@ref)+cat。
-    let raw_nl = cmd_raw.matches('\n').count() + cmd_raw.matches('\r').count();
-    let resolved_nl = cmd.matches('\n').count() + cmd.matches('\r').count();
-    if resolved_nl > raw_nl {
-        let mut in_squote = false;
-        let mut in_dquote = false;
-        let mut subst_depth: u32 = 0; // $( 与 ` 命令替换嵌套深度
-        let mut prev_backslash = false;
-        let mut bad = false;
-        for c in cmd.chars() {
-            match c {
-                '\\' if in_dquote && !prev_backslash => prev_backslash = true,
-                '\\' if in_dquote => prev_backslash = false, // \\ = 字面反斜杠
-                '"' if !in_squote && !prev_backslash => {
-                    in_dquote = !in_dquote;
-                    prev_backslash = false;
+    // v0.23.1 P0-B v5（替换点检查版，弃配对扫描）：
+    // v4 的引号配对扫描被否——值内嵌引号会翻转配对状态（ship push 实锤：
+    // commit message 含 'raw 零换行' 的单引号，配对错乱误杀），且 bash 语法
+    // 无法用计数器完整分析（heredoc/嵌套 subst）。改在**替换点**做可静态
+    // 证明的检查：
+    //   对每个 trusted ref：值 trim 尾换行后仍含换行（中间换行）→ 它在
+    //   cmd_raw 中的每次出现必须是精确 '@name'（或 '@name.field'）形态，
+    //   且值不含单引号。bash 语义保证：'...' 内除 ' 外全是字面量——
+    //   值无 ' 则其换行 100% 无执行面。任何其他形态（引号外/$() 内/
+    //   双引号内/方括号内）+中间换行 = 红。
+    //   纯尾换行（run 产物天然形态）无执行面，放行。
+    // 单行值的其他风险（含 $()/`/引号）=「单行值引号炸」既有告诫范畴，
+    // 不归本闸；结构化 argv（P1）才是终解。多行数据走 write+cat。
+    {
+        let trusted: Vec<String> = NODE_CTX.with(|c| {
+            c.borrow()
+                .as_ref()
+                .map(|i| i.trust_refs.clone())
+                .unwrap_or_default()
+        });
+        let has_ctx = NODE_CTX.with(|c| c.borrow().is_some());
+        if has_ctx {
+            for name in &trusted {
+                let v = match results.get(name) {
+                    Some(Value::Text(t)) => t.as_str(),
+                    _ => continue,
+                };
+                let core = v.trim_end_matches(|c| c == '\n' || c == '\r');
+                if !core.contains('\n') && !core.contains('\r') {
+                    continue; // 无中间换行：尾换行/单行值不触发
                 }
-                '\'' if !in_dquote => {
-                    in_squote = !in_squote;
-                    prev_backslash = false;
+                if core.contains('\'') {
+                    return Err(format!(
+                        "trusted @{} value has newline + single-quote — cannot \
+                         enter bash in any quoted form safely (§1.6). Use \
+                         write(content=@{}) then cat. value head: {:?}",
+                        name,
+                        name,
+                        core.chars().take(60).collect::<String>()
+                    ));
                 }
-                '$' if !prev_backslash => {
-                    // 只认紧随的 ( ；$var 不是 subst
-                    prev_backslash = false;
-                }
-                '(' => {
-                    subst_depth += 1;
-                    prev_backslash = false;
-                }
-                ')' if subst_depth > 0 => {
-                    subst_depth -= 1;
-                    prev_backslash = false;
-                }
-                '`' => {
-                    subst_depth += 1;
-                    prev_backslash = false;
-                }
-                '\n' | '\r' => {
-                    // subst 上下文内：命令分隔符，无论引号
-                    // 引号外：独立命令行
-                    // 引号内（非 subst）：合法多行数据
-                    if subst_depth > 0 || (!in_squote && !in_dquote) {
-                        bad = true;
-                        break;
+                let needle = format!("@{}", name);
+                let chars: Vec<char> = cmd_raw.chars().collect();
+                let nchars: Vec<char> = needle.chars().collect();
+                let mut i = 0;
+                while i + nchars.len() <= chars.len() {
+                    if chars[i..i + nchars.len()] == nchars[..] {
+                        // 前一字符必须是 '
+                        let prev_ok = i > 0 && chars[i - 1] == '\'';
+                        // 后跟 .field 链，然后必须是 '
+                        let mut k = i + nchars.len();
+                        while k < chars.len() && chars[k] == '.' {
+                            k += 1;
+                            while k < chars.len()
+                                && (chars[k].is_alphanumeric() || chars[k] == '_')
+                            {
+                                k += 1;
+                            }
+                        }
+                        let next_ok = k < chars.len() && chars[k] == '\'';
+                        if !(prev_ok && next_ok) {
+                            return Err(format!(
+                                "trusted @{} value has newline but is not quoted as \
+                                 '@{}' in the command — newline outside a plain \
+                                 single-quoted string is an injection surface (§1.6). \
+                                 Write it as '@{}' (value must not contain quotes) or \
+                                 use write(content=@{}) then cat.",
+                                name, name, name, name
+                            ));
+                        }
+                        i = k;
+                    } else {
+                        i += 1;
                     }
-                    prev_backslash = false;
                 }
-                _ => prev_backslash = false,
             }
-        }
-        if bad {
-            return Err(format!(
-                "run() command gained newline from @ref resolution inside a \
-                 shell-executable context (outside quotes, or inside $()/backtick \
-                 substitution where newline separates commands) — injection surface, \
-                 fail-closed. Quote the ref in plain quotes ('@ref') or use \
-                 write(content=@ref) then cat. resolved cmd head: {:?}",
-                cmd.chars().take(80).collect::<String>()
-            ));
         }
     }
     // v0.7 resource management: optional timeout=seconds arg (default 300s, 0 = no limit)
