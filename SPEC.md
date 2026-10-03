@@ -3,18 +3,18 @@
 > 面向 AI agent / LLM 调用者与人类维护者。读完应能独立完成安装、管线编写、执行、调试、调优。
 > 本文只描述**当前状态**；历史沿革见 git log，不在此堆叠。
 >
-> **版本口径**：发布版本号以 Cargo.toml 为准（当前 0.23.0）。代码注释中的工作线标签（v0.24 语言内核 / v0.25 TOON v2）领先于发布版本号——特性已落地、版本号未随发。pyproject.toml（0.21.0）在上次 PyPI 发布后未同步，下次 publish 前须过三源一致闸。
+> **版本口径**：发布版本号以 Cargo.toml 为准（当前 0.23.0）。代码注释中的工作线标签（v0.24 语言内核 / v0.25 TOON v2）领先于发布版本号——特性已落地、版本号未随发。pyproject.toml 与 PyPI 已同步 0.23.0（2026-10-03 过三源一致闸）。
 
 ---
 
 ## 0. 安装与快速开始
 
 ```bash
-pip install ductile          # PyPI wheel（**当前制品 0.21.0**，落后源码——见下方版本核验）
+pip install ductile          # PyPI wheel（0.23.0，与源码同版）
 ductile --help
 ```
 
-> **⚠️ 版本核验**：PyPI 制品（0.21.0）不含本文描述的 `ledger`/`attractor`/`toon` 命令。安装后先 `ductile --help` 核对；需要新命令一律走源码编译（下方）。三源现状：Cargo.toml=0.23.0 / SPEC=0.23.0 / PyPI=0.21.0——下次 publish 前过三源一致闸后消除此警告。
+三源一致闸已过：Cargo.toml=0.23.0 / pyproject.toml=0.23.0 / PyPI=0.23.0。安装后 `ductile --help` 应见 `ledger` / `attractor` / `toon` 命令组。
 
 源码编译（开发态，**要新命令走这条**）：
 

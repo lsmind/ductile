@@ -4,7 +4,7 @@
 > 中间某步失败了？Ductile 会按声明的备选路径继续尝试。
 > 管线能跑完，也能解释、审计和复用；你不必把可靠性散落在每个脚本里。
 
-**版本先说清楚**：本文对应源码 **Cargo 0.23.0**。PyPI 制品仍停在 **0.21.0**，不含 `ledger`、`attractor`、`toon`；需要这三组能力时，请使用 0.23.0 源码构建。
+**版本**：本文对应 **0.23.0**（Cargo / pyproject / PyPI 三源同版）。`ledger`、`attractor`、`toon` 命令组均已随 0.23.0 发布。
 
 第一次阅读只需掌握安装、一个 `.pipeline` 文件和 `.plan()`；账本与决策记忆放在后面的高级章节。
 
@@ -40,7 +40,7 @@ export PATH="$HOME/.local/bin:$PATH"
 command -v ductile
 ```
 
-**能力探测**：跑 `ductile --help` 看命令清单——有 `ledger` / `attractor` 说明是包含这些命令的新构建；没有则可能是 PyPI 的 0.21.0 旧制品（不含这两组命令）。确切版本号以仓库 `Cargo.toml` 为准。
+**版本核验**：跑 `ductile --version` 或 `ductile --help` 看命令清单——0.23.0 应含 `ledger` / `attractor` / `toon` 命令组。
 
 ### 2. 写第一条管线
 
