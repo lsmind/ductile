@@ -2291,17 +2291,53 @@ fn exec_run(
                 checked.push((name.clone(), v));
             }
             if !checked.is_empty() {
-                // raw 全文单引号状态机：双引号态内 ' 不翻转；双引号态内
-                // 反斜杠转义下一字符；单引号态内无转义。
+                // v6.2 外援第四轮整改+金丝雀校准：奇异记号判定并入状态机——
+                // 仅在**引号外**命中才红（selftest 实锤：grep 模式 '^1$' 尾部
+                // 的 $' 在单引号串内，无 ANSI-C 语义，全文 contains 误杀）。
+                // 引号外语义：$'=ANSI-C 串、<( =进程替换、case =模式区、
+                // @(/+(/!(/?(=extglob——单引号语义在这些上下文不保证全局
+                // 一致，fail-closed。正常用法（echo '@ref'|grep）零误杀。
                 let rchars: Vec<char> = cmd_raw.chars().collect();
                 let mut in_squote = false;
                 let mut in_dquote = false;
                 let mut esc = false; // 双引号内反斜杠转义
-                // 每个 @name 出现点的合法性
                 let mut i = 0usize;
                 let names: Vec<String> = checked.iter().map(|(n, _)| n.clone()).collect();
                 while i < rchars.len() {
                     let c = rchars[i];
+                    // 引号外奇异记号检查（两字符记号；case 字符级判避免
+                    // 中文命令下 char索引→byte切片 panic）
+                    if !in_squote && !in_dquote {
+                        let two: String =
+                            rchars[i..(i + 2).min(rchars.len())].iter().collect();
+                        let hit: Option<String> = if [
+                            "<(", "@(", "*(", "+(", "!(", "?(", "$'",
+                        ]
+                        .contains(&two.as_str())
+                        {
+                            Some(two)
+                        } else if rchars[i] == 'c'
+                            && rchars.len() >= i + 5
+                            && rchars[i + 1] == 'a'
+                            && rchars[i + 2] == 's'
+                            && rchars[i + 3] == 'e'
+                            && rchars[i + 4] == ' '
+                        {
+                            Some("case ".to_string())
+                        } else {
+                            None
+                        };
+                        if let Some(sig) = hit {
+                            let n = checked[0].0.clone();
+                            return Err(format!(
+                                "run() contains exotic shell construct {:?} outside \
+                                 quotes with multi-line @{} value — unmodelled context, \
+                                 fail-closed (§1.6). Plain-quote usage ('@{}) without \
+                                 these constructs, or write(content=@{}) then cat.",
+                                sig, n, n, n
+                            ));
+                        }
+                    }
                     match c {
                         '\\' if in_dquote && !esc => esc = true,
                         '\'' if in_dquote || esc => esc = false,
