@@ -723,7 +723,7 @@ resolver 的 system 写死两类推断纪律：限制性推断（须原话明确
 ## 14. AI 调用者速查（写管线前必读的坑）
 
 1. **抄范本，禁止凭记忆**——`examples/` 与 `pipelines/` 是正典
-2. 多行 @ref 必须引号包裹：`echo "@scan" | grep x`（裸替换管道符掉行首 → bash 语法错）
+2. 多行 @ref 必须单引号包裹：`echo '@scan' | grep x`（v0.23.1 值卫生闸要求精确单引号态；双引号内换行/裸替换=注入面红）
 3. write() 的 `\n` 是字面量两字符，不转义；要换行拆 impl 或 printf
 4. 一个 proc 只暴露获胜 impl 的值；两个统计量拆两个 proc
 5. 管道末位命令决定 exit code：计数用 `find … | wc -l`
