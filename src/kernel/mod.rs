@@ -24,3 +24,4 @@ pub mod binding;
 pub mod mlv;
 pub mod gov;
 pub mod mlv_auth;
+pub mod attractor;

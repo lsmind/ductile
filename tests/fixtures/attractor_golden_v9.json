@@ -1,0 +1,147 @@
+{
+ "categories": [
+  "A",
+  "B"
+ ],
+ "formula_version": "attractor.v9",
+ "lambda": 0.5,
+ "tau": 8.0,
+ "vectors": [
+  {
+   "a": null,
+   "evidence": {
+    "A": 1.0,
+    "B": 0.6
+   },
+   "m": 0.0,
+   "n": 0,
+   "name": "no_memory_pure_evidence",
+   "note": "A 赢纯证据",
+   "q": {
+    "A": 1.0,
+    "B": 0.6
+   },
+   "tie": false,
+   "winner": "A"
+  },
+  {
+   "a": null,
+   "evidence": {
+    "A": 1.0,
+    "B": 1.0
+   },
+   "m": 0.0,
+   "n": 0,
+   "name": "tie_no_memory",
+   "note": "平票 no-Decision",
+   "q": {
+    "A": 1.0,
+    "B": 1.0
+   },
+   "tie": true,
+   "winner": null
+  },
+  {
+   "a": "A",
+   "evidence": {
+    "A": 1.0,
+    "B": 1.0
+   },
+   "m": 1.0,
+   "n": 0,
+   "name": "full_boost_tie_break",
+   "note": "记忆破平 A（设计语义）",
+   "q": {
+    "A": 1.5,
+    "B": 1.0
+   },
+   "tie": false,
+   "winner": "A"
+  },
+  {
+   "a": "A",
+   "evidence": {
+    "A": 1.0,
+    "B": 1.5
+   },
+   "m": 1.0,
+   "n": 0,
+   "name": "flip_boundary_tie",
+   "note": "临界 g_B=1.5=1.0*(1+0.5) 恰平票→no-Decision（源码形态临界）",
+   "q": {
+    "A": 1.5,
+    "B": 1.5
+   },
+   "tie": true,
+   "winner": null
+  },
+  {
+   "a": "A",
+   "evidence": {
+    "A": 1.0,
+    "B": 1.5001
+   },
+   "m": 1.0,
+   "n": 0,
+   "name": "flip_boundary_over",
+   "note": "反超 1.5001 → B",
+   "q": {
+    "A": 1.5,
+    "B": 1.5001
+   },
+   "tie": false,
+   "winner": "B"
+  },
+  {
+   "a": "A",
+   "evidence": {
+    "A": 1.0,
+    "B": 1.3
+   },
+   "m": 0.367879441171,
+   "n": 8,
+   "name": "decay_n8",
+   "note": "m=e^-1≈0.3679 boost=1.184 → q_A=1.184 < 1.3 → B（衰减后证据翻回）",
+   "q": {
+    "A": 1.183939720586,
+    "B": 1.3
+   },
+   "tie": false,
+   "winner": "B"
+  },
+  {
+   "a": "A",
+   "evidence": {
+    "A": 1.0,
+    "B": 1.1
+   },
+   "m": 0.367879441171,
+   "n": 8,
+   "name": "decay_n8_hold",
+   "note": "q_A=1.184 > 1.1 → A 保持（弱反证不够）",
+   "q": {
+    "A": 1.183939720586,
+    "B": 1.1
+   },
+   "tie": false,
+   "winner": "A"
+  },
+  {
+   "a": "A",
+   "evidence": {
+    "X": 1.0,
+    "Y": 1.0
+   },
+   "m": 1.0,
+   "n": 0,
+   "name": "a_not_in_c",
+   "note": "a=A 不在闭集 → m=0 平票（墙10 只取消 boost）",
+   "q": {
+    "A": 0.0,
+    "B": 0.0
+   },
+   "tie": true,
+   "winner": null
+  }
+ ]
+}

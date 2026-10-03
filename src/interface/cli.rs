@@ -238,6 +238,9 @@ pub fn run(args: &[String]) -> Result<i32, String> {
 
         // v0.24 MLV v3.1 治理内核（旧动词输出字节冻结；新动词新格式）
         "mlv" if args.len() >= 3 => cmd_mlv(&args[2..]),
+        // attractor 闭环（v9）：独立组——mlv 写面已 P4b 降级，读写都走 GovRegistry
+        "attractor" if args.len() >= 4 && args[2] == "decide" => cmd_attractor(&args[3..]),
+        "attractor" if args.len() >= 3 && args[2] == "show" => cmd_attractor_show(&args[3..]),
 
         // v0.25 TOON v2：ledger 组=唯一生产入口（规格 §六.1；分发先于 mlv——确认审#5）
         "ledger" if args.len() >= 2 => cmd_ledger(&args[2..]),
@@ -400,6 +403,53 @@ fn cmd_kernel_reproduce(args: &[String]) -> Result<i32, String> {
 
 /// v0.24 自组织治理超图 MLV 子命令。
 /// `ductile mlv <ledger> <verb> ...` — v3.1 治理内核。
+fn emit_outcome(r: Result<crate::kernel::gov::ApplyOutcome, crate::kernel::gov::GovErr>, label: &str, rev: u64) -> Result<i32, String> {
+    use crate::kernel::gov::{ApplyOutcome, GovErr};
+    match r {
+        Ok(ApplyOutcome::Committed { record_hash, .. }) => {
+            println!("OK {label} rev={rev} record={record_hash}");
+            Ok(0)
+        }
+        Ok(ApplyOutcome::Acked { result }) => {
+            println!("ACK {label} rev={rev} code={}", result.get("code").unwrap_or(&"OK".into()));
+            Ok(0)
+        }
+        Err(e) => {
+            eprintln!("{} {}", e.code(), e.detail());
+            Ok(1)
+        }
+    }
+}
+
+fn mkrec(seq: u64, op: crate::kernel::mlv::MlvOp, binding: &str, rev: u64, from: Option<crate::kernel::mlv::MlvState>, to: Option<crate::kernel::mlv::MlvState>, prev: &str, request_key: &str, at: u64, payload: &str, signer: Option<&(ed25519_dalek::SigningKey, String)>, trust_seq: Option<u64>) -> crate::kernel::mlv::LedgerRecord {
+    use crate::kernel::mlv::{domain_hash, effect_key, LedgerRecord, MlvOp, MlvState, DOMAIN_RECORD, GENESIS_ROOT};
+    // f7 冻结：request_digest=D(record域, op|request_key|payload)——payload 入 digest 不入 effect_key
+    let digest = domain_hash(DOMAIN_RECORD, format!("{op:?}|{request_key}|{payload}").as_bytes());
+    let mut env = crate::kernel::mlv::make_envelope(&op, binding, rev, request_key, &digest, at);
+    let mut env_digest = env.get("mac").cloned().unwrap_or_default();
+    if let Some((sk, kid)) = signer {
+        // ed25519 模式：mac 置空串，信封签名（规格 §二.2）
+        env.insert("mac".into(), String::new());
+        env_digest = String::new();
+        crate::kernel::mlv_toon::sign_envelope_v2(&mut env, sk, kid, trust_seq).unwrap();
+    }
+    LedgerRecord {
+        schema: 1, seq, op,
+        key_id: "genesis".into(), root_commitment: GENESIS_ROOT.into(),
+        effect_key: effect_key(op, binding, rev, request_key).unwrap(),
+        idempotency_scope: None, caller_id: Some("cli".into()),
+        request_key: Some(request_key.into()),
+        request_digest: digest,
+        binding_id: Some(binding.into()), revision: Some(rev),
+        from, to, before_record_hash: prev.into(), accepted_at_ns: at,
+        nonce: Some(format!("nonce-{seq}-{at}")), envelope_digest: Some(env_digest), envelope: Some(env),
+        payload: if payload.is_empty() { format!("{op:?}|{binding}|{rev}") } else { payload.to_string() }, registry_receipt: None,
+        result: [("code".into(), "OK".into())].into_iter().collect(),
+        record_hash: String::new(),
+    }
+}
+
+
 fn cmd_mlv(args: &[String]) -> Result<i32, String> {
     use crate::kernel::gov::{ApplyOutcome, GovErr, GovRegistry};
     use crate::kernel::mlv::{effect_key, LedgerRecord, MlvOp, MlvState, DEFAULT_SKEW_NS, DOMAIN_RECORD, domain_hash, GENESIS_ROOT, DOMAIN_RECEIPT};
@@ -461,49 +511,6 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
         }
     };
 
-    fn emit_outcome(r: Result<ApplyOutcome, GovErr>, label: &str, rev: u64) -> Result<i32, String> {
-        match r {
-            Ok(ApplyOutcome::Committed { record_hash, .. }) => {
-                println!("OK {label} rev={rev} record={record_hash}");
-                Ok(0)
-            }
-            Ok(ApplyOutcome::Acked { result }) => {
-                println!("ACK {label} rev={rev} code={}", result.get("code").unwrap_or(&"OK".into()));
-                Ok(0)
-            }
-            Err(e) => {
-                eprintln!("{} {}", e.code(), e.detail());
-                Ok(1)
-            }
-        }
-    }
-
-    fn mkrec(seq: u64, op: MlvOp, binding: &str, rev: u64, from: Option<MlvState>, to: Option<MlvState>, prev: &str, request_key: &str, at: u64, payload: &str, signer: Option<&(ed25519_dalek::SigningKey, String)>, trust_seq: Option<u64>) -> LedgerRecord {
-        // f7 冻结：request_digest=D(record域, op|request_key|payload)——payload 入 digest 不入 effect_key
-        let digest = domain_hash(DOMAIN_RECORD, format!("{op:?}|{request_key}|{payload}").as_bytes());
-        let mut env = crate::kernel::mlv::make_envelope(&op, binding, rev, request_key, &digest, at);
-        let mut env_digest = env.get("mac").cloned().unwrap_or_default();
-        if let Some((sk, kid)) = signer {
-            // ed25519 模式：mac 置空串，信封签名（规格 §二.2）
-            env.insert("mac".into(), String::new());
-            env_digest = String::new();
-            mlv_auth::sign_envelope(&mut env, sk, kid, trust_seq).unwrap();
-        }
-        LedgerRecord {
-            schema: 1, seq, op,
-            key_id: "genesis".into(), root_commitment: GENESIS_ROOT.into(),
-            effect_key: effect_key(op, binding, rev, request_key).unwrap(),
-            idempotency_scope: None, caller_id: Some("cli".into()),
-            request_key: Some(request_key.into()),
-            request_digest: digest,
-            binding_id: Some(binding.into()), revision: Some(rev),
-            from, to, before_record_hash: prev.into(), accepted_at_ns: at,
-            nonce: Some(format!("nonce-{seq}-{at}")), envelope_digest: Some(env_digest), envelope: Some(env),
-            payload: if payload.is_empty() { format!("{op:?}|{binding}|{rev}") } else { payload.to_string() }, registry_receipt: None,
-            result: [("code".into(), "OK".into())].into_iter().collect(),
-            record_hash: String::new(),
-        }
-    }
 
     let op_of = |v: &str| -> Result<MlvOp, String> {
         MlvOp::from_name(&v.to_uppercase().replace('-', "_")).map_err(|e| e.to_string())
@@ -797,6 +804,217 @@ fn cmd_mlv(args: &[String]) -> Result<i32, String> {
     }
 }
 
+/// 从账本抽出该 binding 族的全部 attractor Decision payload（按 seq 序）
+/// 族语义：binding `{base}#{k}` = base 流的第 k run（治理生命周期一 run 一环）
+/// 三格式统一：decode_ledger_tri（v2 typed / v1 typed / v1 legacy）
+/// 非 attractor payload 跳过不炸；格式损坏的 attractor payload 拒绝（fail-closed）
+fn attractor_decisions(path: &std::path::Path, base: &str) -> Result<Vec<crate::kernel::attractor::DecisionPayload>, String> {
+    use crate::kernel::attractor::DecisionPayload;
+    use crate::kernel::mlv::MlvOp;
+    use crate::kernel::mlv_toon::{decode_ledger_tri, LedgerFrame};
+    let prefix = format!("{base}#");
+    let data = std::fs::read(path).map_err(|e| format!("read ledger: {e}"))?;
+    let (_fmt, frames) = decode_ledger_tri(&data).map_err(|e| format!("decode: {e}"))?;
+    let mut out = Vec::new();
+    for f in frames {
+        if let LedgerFrame::Record(r) = f {
+            if r.op == MlvOp::Decision {
+                if let Some(bid) = r.binding_id.as_deref() {
+                    if bid.starts_with(&prefix) && bid[prefix.len()..].parse::<u64>().is_ok() {
+                        if let Ok(p) = DecisionPayload::parse(&r.payload) {
+                            out.push(p);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+
+// ── attractor 闭环（v9）：零新 Op/态，数据走 Decision payload（TOON k: v）──
+// ductile attractor decide <ledger> <binding> <rev> <lambda> <tau> <cats_csv> <evidence_csv> [prev_verdict] [--signing-key K]
+//   重放导出 (a,n) → 纯函数 decide → mkrec(payload) → submit（同锁写路径）
+fn cmd_attractor(args: &[String]) -> Result<i32, String> {
+    use crate::kernel::attractor::{self, DecisionPayload};
+    use crate::kernel::gov::{GovRegistry};
+    use crate::kernel::mlv::MlvOp;
+    // args 从 <ledger> 开始
+    let ledger_path = std::path::PathBuf::from(&args[0]);
+    let binding = args[1].clone();
+    let rev: u64 = args[2].parse().map_err(|_| "rev number")?;
+    let lambda: f64 = args[3].parse().map_err(|_| "lambda float")?;
+    let tau: f64 = args[4].parse().map_err(|_| "tau float")?;
+    let cats: Vec<String> = args[5].split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
+    let evidence: Vec<(String, f64)> = args[6].split(',')
+        .map(|pair| {
+            let (c, g) = pair.split_once('=')
+                .ok_or_else(|| format!("evidence pair: {pair:?}"))?;
+            let g: f64 = g.trim().parse().map_err(|_| format!("evidence g: {pair:?}"))?;
+            Ok((c.trim().to_string(), g))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let prev_verdict: Option<String> = args.get(7).filter(|v| !v.starts_with("--")).cloned();
+    if let Some(v) = &prev_verdict {
+        if !attractor::VERDICTS.contains(&v.as_str()) {
+            eprintln!("ERR E422 prev_verdict-invalid: {v} (allowed: {:?})", attractor::VERDICTS);
+            return Ok(2);
+        }
+    }
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
+    // 签名钥提前加载（bootstrap 与 Decision 都要用）
+    let signing_key_path = scan_signing_key(args);
+    let signer = match signing_key_path {
+        Some(p) => Some(crate::kernel::mlv_auth::load_signing_key(&p).map_err(|e| format!("load key: {e}"))?),
+        None => None,
+    };
+    if reg.frames_typed && signer.is_none() {
+        eprintln!("ERR E423-env signature-invalid: --signing-key required for ed25519 ledger");
+        return Ok(1);
+    }
+    let payloads = attractor_decisions(&ledger_path, &binding)?;
+    let mut mem = attractor::replay_memory(&payloads);
+    // v9 九步序：verdict 绑定后进入下一 run——本调用携带的 prev_verdict 认证上一 run
+    // 执行结果，须在决策前并入记忆（fail-closed：矛盾组合全拒）
+    {
+        use attractor::TrialEvent;
+        let last_winner = payloads.last().and_then(|p| p.winner.clone());
+        match (prev_verdict.as_deref(), last_winner) {
+            (None, _) if payloads.is_empty() => {} // 首 run 无前序
+            (None, _) => mem = mem.step(&TrialEvent::CompletedUnverified),
+            (Some("verified"), Some(w)) => mem = mem.step(&TrialEvent::Verified(w)),
+            (Some("rejected"), _) => mem = mem.step(&TrialEvent::CompletedUnverified),
+            (Some("no-decision"), None) => mem = mem.step(&TrialEvent::CompletedUnverified),
+            (Some("verified"), None) => {
+                eprintln!("ERR E422 prev_verdict=verified but prior run has no winner to certify");
+                return Ok(2);
+            }
+            (Some("no-decision"), Some(_)) => {
+                eprintln!("ERR E422 prev_verdict=no-decision but prior run had a winner");
+                return Ok(2);
+            }
+            _ => unreachable!(),
+        }
+    }
+    // run binding：`{base}#{k}`，k=已入账 run 数（0 起）——一 run 一完整治理环
+    let run_binding = format!("{binding}#{}", payloads.len());
+    let eff_rev = 0; // 每 run 子 binding 全新生命周期，rev 恒 0
+    let signer0 = signer.clone();
+    for (op, lbl) in [(MlvOp::CreateProposal, "attractor-bootstrap-propose"), (MlvOp::Grant, "attractor-bootstrap-grant")] {
+        let prev = reg.head().map_err(|e| e.to_string())?;
+        let seq = reg.record_count();
+        let (f, t) = crate::kernel::gov::derive_edge(op, &run_binding, eff_rev, &reg);
+        let rk = format!("rk-att-{}-{k}", if op == MlvOp::CreateProposal { "propose" } else { "grant" }, k = payloads.len());
+        let rec = mkrec(seq, op, &run_binding, eff_rev, f, t, &prev, &rk, now_ns, "", signer0.as_ref(), Some(reg.trust.trust_seq));
+        if let Err(e) = reg.submit(rec, now_ns) {
+            eprintln!("{} {} (bootstrap {lbl})", e.code(), e.detail());
+            return Ok(1);
+        }
+    }
+    let params = attractor::Params {
+        formula_version: attractor::FORMULA_VERSION.into(),
+        lambda, tau, categories: cats.clone(),
+    };
+    if let Err(e) = params.validate() { eprintln!("{e}"); return Ok(2); }
+    let ev_map: std::collections::BTreeMap<String, f64> = evidence.iter().cloned().collect();
+    let out = match attractor::decide(&params, &mem, &attractor::Evidence(ev_map)) {
+        Ok(o) => o,
+        Err(e) => { eprintln!("{e}"); return Ok(2); }
+    };
+    let digest = attractor::input_digest(lambda, tau, &cats, &evidence, prev_verdict.as_deref());
+    // 幂等短路：同 input_digest 已在账上 → 拒重复入账
+    if payloads.iter().any(|p| p.input_digest == digest) {
+        eprintln!("ERR E409 duplicate input_digest (idempotent replay)");
+        return Ok(1);
+    }
+    let payload = DecisionPayload {
+        lambda, tau, categories: cats,
+        evidence, m: out.m, n: mem.n,
+        memory_a: mem.a.clone(),
+        winner: out.winner.clone(), tie: out.tie,
+        prev_verdict: prev_verdict.clone(),
+        input_digest: digest,
+    };
+    let payload_s = payload.encode();
+    let prev = reg.head().map_err(|e| e.to_string())?;
+    let seq = reg.record_count();
+    let (from, to) = crate::kernel::gov::derive_edge(MlvOp::Decision, &run_binding, eff_rev, &reg);
+    let rec = mkrec(seq, MlvOp::Decision, &run_binding, eff_rev, from, to, &prev, &format!("rk-att-decide-{k}", k = payloads.len()), now_ns, &payload_s, signer.as_ref(), Some(reg.trust.trust_seq));
+    if emit_outcome(reg.submit(rec, now_ns), "attractor-decide", eff_rev)? != 0 {
+        return Ok(1);
+    }
+    match (&out.winner, out.tie) {
+        (Some(w), _) => println!("winner: {w}"),
+        (None, true) => println!("winner: - (tie, no-Decision)"),
+        (None, false) => println!("winner: -"),
+    }
+    println!("m: {:.12}", out.m);
+    println!("n: {}", mem.n);
+    println!("a: {}", mem.a.as_deref().unwrap_or("-"));
+    Ok(0)
+}
+
+// ductile attractor show <ledger> <binding> [lambda] [tau] → 投影重放 (a, n, m)
+fn cmd_attractor_show(args: &[String]) -> Result<i32, String> {
+    use crate::kernel::attractor;
+    use crate::kernel::gov::GovRegistry;
+    let ledger_path = std::path::PathBuf::from(&args[0]);
+    let binding = args[1].clone();
+    let reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
+    let payloads = attractor_decisions(&ledger_path, &binding)?;
+    if payloads.is_empty() {
+        eprintln!("no attractor decisions for binding={binding}");
+        return Ok(1);
+    }
+    let last = payloads.last().unwrap();
+    let mem = attractor::replay_memory(&payloads);
+    let lambda = args.get(2).and_then(|x| x.parse::<f64>().ok()).unwrap_or(last.lambda);
+    let tau = args.get(3).and_then(|x| x.parse::<f64>().ok()).unwrap_or(last.tau);
+    let m = match &mem.a {
+        None => 0.0,
+        Some(a) => {
+            let base = (-(mem.n as f64) / tau).exp();
+            if last.categories.contains(a) { base } else { 0.0 }
+        }
+    };
+    println!("runs: {}", payloads.len());
+    println!("a: {}", mem.a.as_deref().unwrap_or("-"));
+    println!("n: {}", mem.n);
+    println!("m: {m:.12}");
+    println!("lambda: {lambda:.12}");
+    println!("tau: {tau:.12}");
+    println!("formula_version: {}", attractor::FORMULA_VERSION);
+    Ok(0)
+}
+
+/// --signing-key 扫描（双形式 KEY / =KEY；重复=硬错）
+fn scan_signing_key(args: &[String]) -> Option<std::path::PathBuf> {
+    let mut p: Option<std::path::PathBuf> = None;
+    let mut seen = false;
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--signing-key" && i + 1 < args.len() {
+            if seen { eprintln!("ERR E422 duplicate --signing-key"); std::process::exit(1); }
+            p = Some(std::path::PathBuf::from(&args[i + 1]));
+            seen = true;
+            i += 2;
+            continue;
+        }
+        if let Some(v) = a.strip_prefix("--signing-key=") {
+            if seen { eprintln!("ERR E422 duplicate --signing-key"); std::process::exit(1); }
+            p = Some(std::path::PathBuf::from(v));
+            seen = true;
+        }
+        i += 1;
+    }
+    p
+}
 /// `ductile kernel-binding <ledger> propose <binding_id> <revision> <actor>`
 /// `ductile kernel-binding <ledger> advance <binding_id> <revision> <to_state> <actor>`
 /// `ductile kernel-binding <ledger> status <binding_id>`
