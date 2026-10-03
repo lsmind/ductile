@@ -308,10 +308,11 @@ pub fn replay_memory(payloads: &[DecisionPayload]) -> MemoryState {
     st
 }
 
-/// input_digest：全证据向量 + params + prev_verdict 的稳定摘要（绑定幂等语义）
-pub fn input_digest(lambda: f64, tau: f64, categories: &[String], evidence: &[(String, f64)], prev_verdict: Option<&str>) -> String {
+/// input_digest：run 槽位 + 全证据向量 + params + prev_verdict 的稳定摘要
+/// （k=run 序号：同槽位同输入=重复重放拒；不同槽位同输入=合法——记忆态不同）
+pub fn input_digest(k: u64, lambda: f64, tau: f64, categories: &[String], evidence: &[(String, f64)], prev_verdict: Option<&str>) -> String {
     let ev = evidence.iter().map(|(c, g)| format!("{c}={g:.12}")).collect::<Vec<_>>().join(",");
-    let raw = format!("{FORMULA_VERSION}|{lambda:.12}|{tau:.12}|{}|{ev}|{}",
+    let raw = format!("{FORMULA_VERSION}|run{k}|{lambda:.12}|{tau:.12}|{}|{ev}|{}",
         categories.join(","), prev_verdict.unwrap_or("-"));
     // FNV-1a 64（仓库无 sha2 依赖时的稳定哈希；collision 域=试点 cell，可接受）
     let mut h: u64 = 0xcbf29ce484222325;
@@ -476,7 +477,7 @@ mod tests {
             memory_a: Some("A".into()),
             winner: None, tie: true,
             prev_verdict: Some("verified".into()),
-            input_digest: input_digest(0.5, 8.0, &["A".into(), "B".into()],
+            input_digest: input_digest(7, 0.5, 8.0, &["A".into(), "B".into()],
                 &[("A".into(), 1.0), ("B".into(), 1.5)], Some("verified")),
         }
     }
@@ -610,14 +611,16 @@ mod tests {
     fn digest_stable_and_sensitive() {
         let ev = vec![("A".into(), 1.0), ("B".into(), 1.0)];
         let cats2 = vec!["A".into(), "B".into()];
-        let d1 = input_digest(0.5, 8.0, &cats2, &ev, None);
-        let d2 = input_digest(0.5, 8.0, &cats2, &ev, None);
-        assert_eq!(d1, d2); // 稳定
+        let d1 = input_digest(0, 0.5, 8.0, &cats2, &ev, None);
+        let d2 = input_digest(0, 0.5, 8.0, &cats2, &ev, None);
+        assert_eq!(d1, d2); // 同槽位同输入稳定
         assert!(d1.starts_with("fnv1a64:"));
         // 证据变 → digest 变
         let ev2 = vec![("A".into(), 1.0000001), ("B".into(), 1.0)];
-        assert_ne!(d1, input_digest(0.5, 8.0, &cats2, &ev2, None));
+        assert_ne!(d1, input_digest(0, 0.5, 8.0, &cats2, &ev2, None));
         // verdict 变 → digest 变
-        assert_ne!(d1, input_digest(0.5, 8.0, &cats2, &ev, Some("verified")));
+        assert_ne!(d1, input_digest(0, 0.5, 8.0, &cats2, &ev, Some("verified")));
+        // run 槽位变 → digest 变（不同 run 同输入合法）
+        assert_ne!(d1, input_digest(1, 0.5, 8.0, &cats2, &ev, None));
     }
 }

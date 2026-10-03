@@ -25,3 +25,5 @@ pub mod mlv;
 pub mod gov;
 pub mod mlv_auth;
 pub mod attractor;
+#[cfg(test)]
+mod attractor_bench;

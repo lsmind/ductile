@@ -926,7 +926,7 @@ fn cmd_attractor(args: &[String]) -> Result<i32, String> {
         Ok(o) => o,
         Err(e) => { eprintln!("{e}"); return Ok(2); }
     };
-    let digest = attractor::input_digest(lambda, tau, &cats, &evidence, prev_verdict.as_deref());
+    let digest = attractor::input_digest(payloads.len() as u64, lambda, tau, &cats, &evidence, prev_verdict.as_deref());
     // 幂等短路：同 input_digest 已在账上 → 拒重复入账
     if payloads.iter().any(|p| p.input_digest == digest) {
         eprintln!("ERR E409 duplicate input_digest (idempotent replay)");
