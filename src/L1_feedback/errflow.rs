@@ -379,6 +379,10 @@ impl ErrorRecord {
         dslresult::encode_structured_result(
             &[
                 ("err".to_string(), "1".to_string()),
+                // v0.24 内核 §1 Outcome 协议：失败也是值——ok=0/status=Failed
+                // 与 err=1 同在，下游 @x.ok/@x.status 无需区分成败即可消费。
+                ("ok".to_string(), "0".to_string()),
+                ("status".to_string(), "Failed".to_string()),
                 ("err_code".to_string(), self.code.code().to_string()),
                 ("err_proc".to_string(), self.proc.clone()),
                 ("err_impl".to_string(), self.impl_.clone()),
@@ -873,6 +877,37 @@ mod tests {
         let r = ErrorRecord::new("p", "i", "boom", 1);
         let v = crate::core::ast::Value::Text(r.encode());
         assert!(is_error_value(&v));
+    }
+
+    // ── v0.24 内核 §1：失败侧 Outcome 协议字段 ──
+    #[test]
+    fn error_record_encodes_outcome_protocol_fields() {
+        let r = ErrorRecord::new("p", "run", "boom", 0);
+        let enc = r.encode();
+        assert_eq!(
+            dslresult::extract_field("ok", &enc).as_deref(),
+            Some("0"),
+            "failed ok=0: {}",
+            enc
+        );
+        assert_eq!(
+            dslresult::extract_field("status", &enc).as_deref(),
+            Some("Failed"),
+            "failed status=Failed: {}",
+            enc
+        );
+        // err=1 仍在（is_error_value 依赖）
+        assert_eq!(dslresult::extract_field("err", &enc).as_deref(), Some("1"));
+        // 传播记录同样携带协议字段
+        let up = r.encode();
+        let p = ErrorRecord::propagated("downstream", "p", &up);
+        let penc = p.encode();
+        assert_eq!(
+            dslresult::extract_field("ok", &penc).as_deref(),
+            Some("0"),
+            "propagated ok=0: {}",
+            penc
+        );
     }
 
     #[test]
