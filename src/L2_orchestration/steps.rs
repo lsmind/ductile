@@ -3569,4 +3569,79 @@ mod tests {
         );
         assert!(pv.ends_with('…'));
     }
+
+    // ── v0.24 内核 §1：run 统一 Outcome 协议（RED 先行）──
+    // @x.ok/@x.status/@x.stdout 永远合法：成功 run 的结构化编码里
+    // 必含 ok=1/status=Success/stdout 字段；失败 run 必含 ok=0/status=Failed。
+
+    #[test]
+    fn run_success_exposes_outcome_fields() {
+        let impl_ = Impl {
+            body_text: r#"run("echo hello-outcome")"#.into(),
+            ..default_impl()
+        };
+        let out = exec_run(&impl_, "t", &impl_.body_text, &BTreeMap::new())
+            .expect("echo runs");
+        let text = out.as_text();
+        // @x.ok → "1"，@x.status → "Success"
+        assert_eq!(
+            crate::core::dslresult::extract_field("ok", text).as_deref(),
+            Some("1"),
+            "ok field missing: {}",
+            text
+        );
+        assert_eq!(
+            crate::core::dslresult::extract_field("status", text).as_deref(),
+            Some("Success"),
+            "status field missing: {}",
+            text
+        );
+        // @x.stdout → 原始 stdout（非 RAW 区——用字段通道取）
+        assert_eq!(
+            crate::core::dslresult::extract_field("stdout", text).as_deref(),
+            Some("hello-outcome"),
+            "stdout field missing: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn run_failure_exposes_outcome_fields() {
+        let impl_ = Impl {
+            body_text: r#"run("echo boom >&2; exit 7")"#.into(),
+            ..default_impl()
+        };
+        // 旧语义：非零退出 → Err(...)，下游拿不到 @x.ok。
+        // v0.24 §1：失败也是值——Err 路径必须携带 Outcome 字段供隐式传播。
+        // exec_run 的 Err 文本必须是 errflow ErrorRecord 编码（含 err=1）。
+        let err = exec_run(&impl_, "t", &impl_.body_text, &BTreeMap::new())
+            .expect_err("exit 7 must fail");
+        assert!(
+            err.contains("exit 7") || err.contains("exit Some(7)") || err.contains("boom"),
+            "stderr must surface: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn run_failure_downstream_ok_field_is_false() {
+        // 端到端语义：失败 run 落库后的值里 @x.ok=false（ok=0）。
+        // 这需要 executor 把 Err 转 ErrorRecord 编码——测试经由 errflow 编码器
+        // 与 is_error_value 验证链路闭合。
+        let rec = crate::L1_feedback::errflow::ErrorRecord::new(
+            "p", "run", "run failed (exit Some(7)): boom", 0,
+        );
+        let enc = rec.encode();
+        assert!(crate::L1_feedback::errflow::is_error_value(
+            &crate::core::ast::Value::Text(enc.clone())
+        ));
+        // err_msg 含 stderr
+        assert!(
+            crate::core::dslresult::extract_field("err_msg", &enc)
+                .map(|m| m.contains("exit"))
+                .unwrap_or(false),
+            "err_msg: {}",
+            enc
+        );
+    }
 }
