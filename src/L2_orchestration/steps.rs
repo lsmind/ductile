@@ -2512,21 +2512,33 @@ fn exec_run(
 
     let stdout_text_final = stdout_text;
 
-    // Parse ##DSL_RESULT block
-    if let Some(kvs) = parse_dsl_result_block(&stdout_text_final) {
-        if !kvs.is_empty() {
-            eprintln!("    -> result: {} fields", kvs.len());
-            return Ok(Value::Text(encode_structured_result(&kvs, &stdout_text_final)));
+    // v0.24 内核 §1：run 统一 Outcome 协议——@x.ok/@x.status/@x.stdout
+    // 永远合法。成功 run 的结构化编码必含三字段（ok=1/status=Success/
+    // stdout=全文）。脚本自带 ##DSL_RESULT 字段与协议字段合并——
+    // 协议字段不可被脚本同名键覆盖（stdout 冲突时以引擎实测为准）。
+    {
+        let mut kvs: Vec<(String, String)> = vec![
+            ("ok".to_string(), "1".to_string()),
+            ("status".to_string(), "Success".to_string()),
+            (
+                "stdout".to_string(),
+                stdout_text_final.trim_end_matches('\n').to_string(),
+            ),
+        ];
+        if let Some(script_kvs) = parse_dsl_result_block(&stdout_text_final) {
+            for (k, v) in script_kvs {
+                let reserved = k == "ok" || k == "status" || k == "stdout" || k == "err";
+                if !reserved {
+                    kvs.push((k, v));
+                }
+            }
         }
+        eprintln!("    -> result: {} fields (outcome protocol)", kvs.len());
+        return Ok(Value::Text(encode_structured_result(
+            &kvs,
+            &stdout_text_final,
+        )));
     }
-
-    // Raw stdout (truncated)
-    let trimmed = if stdout_text_final.len() > 5000 {
-        format!("{}...[truncated]", crate::trunc_chars(&stdout_text_final, 5000))
-    } else {
-        stdout_text_final
-    };
-    Ok(Value::Text(trimmed))
 }
 
 pub fn find_bridge(script: &str) -> String {
