@@ -18,3 +18,4 @@ experiments/fopt-derive/build_foptcmp/
 !/docs/mlv-security.md
 !/docs/quota.md
 data_judge/
+ductile.db
