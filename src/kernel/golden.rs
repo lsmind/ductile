@@ -53,7 +53,7 @@ pub struct GoldenResult {
 pub fn run_golden(nodes: &[GoldenNode], plan_fingerprint: &str) -> GoldenResult {
     use std::collections::BTreeMap;
 
-    let by_id: BTreeMap<&str, &GoldenNode> =
+    let _by_id: BTreeMap<&str, &GoldenNode> =
         nodes.iter().map(|n| (n.id, n)).collect();
 
     let mut statuses: BTreeMap<&str, Outcome> = BTreeMap::new();

@@ -2127,14 +2127,14 @@ mod conn_tests {
         record_pref_conn(&conn, "", "p", "i", true); // 1.0 × 1.1
         let w1 = load_impl_prefs_conn(&conn)
             .into_iter()
-            .find(|(pl, p, i, _)| p == "p" && i == "i")
+            .find(|(_pl, p, i, _)| p == "p" && i == "i")
             .unwrap()
             .3;
         assert!((w1 - 1.1).abs() < 1e-9);
         record_pref_conn(&conn, "", "p", "i", false); // 1.1 ÷ 1.5
         let w2 = load_impl_prefs_conn(&conn)
             .into_iter()
-            .find(|(pl, p, i, _)| p == "p" && i == "i")
+            .find(|(_pl, p, i, _)| p == "p" && i == "i")
             .unwrap()
             .3;
         assert!((w2 - 1.1 / 1.5).abs() < 1e-9);
@@ -2144,7 +2144,7 @@ mod conn_tests {
         }
         let w3 = load_impl_prefs_conn(&conn)
             .into_iter()
-            .find(|(pl, p, i, _)| p == "p" && i == "i")
+            .find(|(_pl, p, i, _)| p == "p" && i == "i")
             .unwrap()
             .3;
         assert!((w3 - 0.05).abs() < 1e-9);

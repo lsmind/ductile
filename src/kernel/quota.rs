@@ -9,7 +9,7 @@
 //!     → E312 Args；不再无条件信任任意 DUCTILE_ARG_*
 //!   - 审计：sandbox_mode 字段如实记录 nsjail/rlimit/none
 
-use crate::kernel::types::{ErrCode, Outcome, Value};
+use crate::kernel::types::{ErrCode, Outcome};
 use std::collections::BTreeMap;
 
 // ── 沙箱探测 ─────────────────────────────────────────────

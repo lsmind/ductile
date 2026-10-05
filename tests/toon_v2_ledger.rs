@@ -8,7 +8,7 @@
 use ductile::kernel::mlv::{domain_hash, LedgerRecord, MlvLedger, MlvOp, DOMAIN_RECORD};
 use ductile::kernel::mlv_auth::{TrustFrame, generate_keypair};
 use ductile::kernel::mlv_toon::*;
-use ductile::kernel::toon::{toon_canonical, TVal};
+use ductile::kernel::toon::toon_canonical;
 use std::collections::BTreeMap;
 
 fn tmpdir(tag: &str) -> std::path::PathBuf {

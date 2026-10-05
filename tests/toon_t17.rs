@@ -39,7 +39,7 @@ fn judge(input: &str) -> (i32, String, String) {
 /// 首判 → 拒则剥 fence 修复一次 → 终判 fail-closed）。
 fn closed_repair_once(content: &str) -> (bool, bool) {
     let text = format!("{}\n", content.trim());
-    let (code, out, err) = judge(&text);
+    let (code, _out, err) = judge(&text);
     if code == 0 {
         return (true, false);
     }

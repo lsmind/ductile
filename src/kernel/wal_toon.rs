@@ -17,7 +17,7 @@ use crate::kernel::hash::sha256_hex;
 use crate::kernel::toon::{encode_frame_v2, parse_toon_closed, toon_canonical, TVal};
 use crate::kernel::types::EffectKey;
 use crate::kernel::wal::{Recovered, WalRecord};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 
 pub const FT_WAL: u8 = 0x00;

@@ -145,7 +145,7 @@ pub fn parse_record_v2(t: &[u8]) -> Result<LedgerRecord, String> {
     }
     let get = |k: &str| m.get(k).ok_or_else(|| format!("v2 missing field: {k}"));
     let op = MlvOp::from_name(&tval_str(get("op")?, "op")?)?;
-    let mut rec = LedgerRecord {
+    let rec = LedgerRecord {
         accepted_at_ns: tval_num(get("accepted_at_ns")?, "accepted_at_ns")?,
         before_record_hash: tval_str(get("before_record_hash")?, "before_record_hash")?,
         binding_id: tval_opt_str(get("binding_id")?, "binding_id")?,

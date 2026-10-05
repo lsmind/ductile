@@ -2840,7 +2840,7 @@ pub fn exec_script_call(
         };
         let _ = &progress_path; // 借用保活（progress_file 已移入泵线程）
 
-        let stderr_text = String::from_utf8_lossy(&stderr_buf).to_string();
+        let _stderr_text = String::from_utf8_lossy(&stderr_buf).to_string();
 
         if status.success() {
             // ##DSL_RESULT 协议复用（脚本 echo 结构化字段）
@@ -3221,7 +3221,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn spawn_wait_kill_cycle() {
-        let mut results = BTreeMap::new();
+        let results = BTreeMap::new();
         // spawn 一个 sleep 30 的后台进程
         let sp = exec_spawn(
             &default_impl(),

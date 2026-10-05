@@ -7,8 +7,7 @@
 
 use crate::kernel::mlv::*;
 use crate::kernel::mlv_auth::{
-    parse_auth_payload, verify_business_sig, TrustFrame, TrustState, LedgerFrame,
-    decode_frames_mixed, DETAIL_SIG_INVALID,
+    parse_auth_payload, verify_business_sig, TrustState, DETAIL_SIG_INVALID,
 };
 use crate::kernel::mlv_toon::{
     decode_ledger_tri, trust_state_from_genesis_auth_v2, verify_business_sig_v2,
@@ -187,7 +186,7 @@ impl GovRegistry {
 
     /// ed25519 模式显式 init：genesis payload=auth 对象，帧格式=typed。
     pub fn init_ed25519(path: &Path, at: u64, signing_key: &std::path::Path) -> Result<(Self, String), GovErr> {
-        use crate::kernel::mlv_auth::{auth_object_json, compute_h0, key_id_of, load_signing_key};
+        use crate::kernel::mlv_auth::{auth_object_json, compute_h0, load_signing_key};
         let (sk, root_key_id) = load_signing_key(signing_key).map_err(GovErr::Internal)?;
         let pk_hex: String = sk.verifying_key().to_bytes().iter().map(|b| format!("{b:02x}")).collect();
         let h0 = compute_h0(&root_key_id, &pk_hex);
@@ -235,7 +234,7 @@ impl GovRegistry {
 
     /// v2（TOON）模式显式 init：genesis payload=auth TOON 对象，帧格式=v2。
     pub fn init_ed25519_v2(path: &std::path::Path, at: u64, signing_key: &std::path::Path) -> Result<(Self, String), GovErr> {
-        use crate::kernel::mlv_auth::{key_id_of, load_signing_key};
+        use crate::kernel::mlv_auth::load_signing_key;
         use crate::kernel::mlv_toon::{auth_object_toon, compute_h0_v2, parse_auth_payload_toon, trust_state_from_genesis_auth_v2};
         let (sk, root_key_id) = load_signing_key(signing_key).map_err(GovErr::Internal)?;
         let pk_hex: String = sk.verifying_key().to_bytes().iter().map(|b| format!("{b:02x}")).collect();
@@ -745,7 +744,7 @@ mod tests {
         let d = tmp("t17"); let p = d.join("l.jsonl");
         let mut reg = setup(&p);
         let head = reg.head().unwrap();
-        let mut rec = mk_rec(1, MlvOp::CreateProposal, "b1", 0, None, Some(MlvState::Proposed), &head, "rk");
+        let rec = mk_rec(1, MlvOp::CreateProposal, "b1", 0, None, Some(MlvState::Proposed), &head, "rk");
         // mk_rec 信封 at=100（expires=100+10*skew）——submit t 远超窗口
         let err = reg.submit(rec, 100 + 11 * DEFAULT_SKEW_NS).unwrap_err();
         assert!(matches!(err, GovErr::EnvelopeInvalid(ref m) if m.contains("expired")), "got: {err:?}");
@@ -756,7 +755,7 @@ mod tests {
     /// 把一个 binding 推到指定状态（canonical 路径构造夹具，禁伪造不可能状态）。
     fn reach(path: &std::path::Path, binding: &str, target: MlvState) -> Option<u64> {
         let mut reg = GovRegistry::init(path, 1).ok()?;
-        let head = reg.head().ok()?;
+        let _head = reg.head().ok()?;
         let seq = 1;
         let s = |op: MlvOp, from: Option<MlvState>, to: Option<MlvState>, rk: &str, nseq: u64, h: &str| {
             mk_rec(nseq, op, binding, 0, from, to, h, rk)
@@ -1009,7 +1008,7 @@ mod tests {
         let d = tmp("f5rb"); let p = d.join("l.jsonl");
         let mut reg = setup(&p);
         let head = reg.head().unwrap();
-        let before = std::fs::read(&p).unwrap();
+        let _before = std::fs::read(&p).unwrap();
         // 非法边
         let e1 = mk_rec(1, MlvOp::Grant, "b1", 0, Some(MlvState::Proposed), Some(MlvState::Granted), &head, "e1");
         assert!(matches!(reg.submit(e1, 100), Err(GovErr::IllegalEdge))); // b1 不存在

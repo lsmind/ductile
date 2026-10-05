@@ -1397,7 +1397,7 @@ mod prim_tests {
     #[test]
     fn merge_classes_nodes_survive_when_rb_wins_rank() {
         let mut eg = EGraph::default();
-        let mut mk = |eg: &mut EGraph| {
+        let mk = |eg: &mut EGraph| {
             let id = eg.uf.make_set();
             eg.classes.push(EClass::default());
             id

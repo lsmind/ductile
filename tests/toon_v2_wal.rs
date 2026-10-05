@@ -150,7 +150,7 @@ fn t14_wal_v2_rejects_v1_mixed_and_bad_frames() {
     let p5 = d.join("chainbreak.v2");
     let mut cb = good.clone();
     // 改帧体一字节（0 帧的 in 字段值首字符）
-    let n0 = u64::from_be_bytes(cb[0..8].try_into().unwrap()) as usize;
+    let _n0 = u64::from_be_bytes(cb[0..8].try_into().unwrap()) as usize;
     cb[10 + 5] = b'Q';
     std::fs::write(&p5, &cb).unwrap();
     assert!(read_wal_v2(&p5).is_err());

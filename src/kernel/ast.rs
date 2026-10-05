@@ -14,7 +14,7 @@
 //! 类型规则：字面量精确定型、禁隐式转换；==/!= 同型；序比较仅 str/int/float；
 //! 谓词必须 bool（E207）；未解析=编译期硬错（E202），绝不原样保留。
 
-use crate::kernel::types::{ErrCode, RefPath, Schema, Value};
+use crate::kernel::types::{RefPath, Schema, Value};
 use std::collections::BTreeMap;
 use std::fmt;
 

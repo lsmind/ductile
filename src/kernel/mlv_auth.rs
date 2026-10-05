@@ -545,7 +545,7 @@ pub enum LedgerFrame {
 }
 
 pub fn decode_frames_mixed(data: &[u8]) -> Result<(bool, Vec<LedgerFrame>), String> {
-    use crate::kernel::mlv::{parse_record_json, LedgerRecord};
+    use crate::kernel::mlv::parse_record_json;
     let mut out = Vec::new();
     let mut i = 0usize;
     let mut typed: Option<bool> = None;

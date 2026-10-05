@@ -13,8 +13,8 @@
 
 use crate::kernel::hash::sha256_hex;
 use crate::kernel::judge::{DeliverChannel, Deliverable, Deliverer};
-use crate::kernel::types::{results_match, EffectKey, Outcome, Value};
-use crate::kernel::wal::{recover, verify_chain, EffectExecutor, IdempotentRunner, Wal, WalRecord};
+use crate::kernel::types::{results_match, EffectKey, Outcome};
+use crate::kernel::wal::{recover, verify_chain, IdempotentRunner, Wal, WalRecord};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -145,7 +145,7 @@ fn run_full(
         .collect();
     let crit_ref: BTreeMap<String, &Outcome> =
         critical.iter().map(|(k, v)| (k.clone(), v)).collect();
-    let mut runner = IdempotentRunner { wal, acked, exec: chan };
+    let runner = IdempotentRunner { wal, acked, exec: chan };
     let mut d = Deliverer { runner };
     let out = d.deliver(&sc.deliver_items, &crit_ref, &sc.plan_fp);
     critical.clear();
@@ -200,7 +200,7 @@ pub fn chaos_once(dir: &Path, kp: KillPoint, seed: u64) -> Result<ChaosVerdict, 
     let base_path = dir.join(format!("base-{}-{}.jsonl", kp.name(), seed));
     let _ = std::fs::remove_file(&base_path);
     let mut base_wal = Wal::open(&base_path).map_err(|e| e.to_string())?;
-    let mut base_chan = RecordingChannel::default();
+    let base_chan = RecordingChannel::default();
     let (base_out, base_chan) = run_full(&mut base_wal, BTreeSet::new(), base_chan, &sc);
 
     // —— crash 场景：跑到一半按 killpoint 截断 ——
@@ -208,7 +208,7 @@ pub fn chaos_once(dir: &Path, kp: KillPoint, seed: u64) -> Result<ChaosVerdict, 
     let _ = std::fs::remove_file(&crash_path);
     // 先完整跑出 WAL，再按 killpoint 截断（等效于在那些点被杀）
     let mut cw = Wal::open(&crash_path).map_err(|e| e.to_string())?;
-    let mut crash_chan = RecordingChannel::default();
+    let crash_chan = RecordingChannel::default();
     let _ = run_full(&mut cw, BTreeSet::new(), crash_chan, &sc);
     let full_lines: Vec<String> = std::io::BufReader::new(
         std::fs::File::open(&crash_path).map_err(|e| e.to_string())?,
@@ -246,7 +246,7 @@ pub fn chaos_once(dir: &Path, kp: KillPoint, seed: u64) -> Result<ChaosVerdict, 
         .collect();
     let acked_count = rec.acked_effects.len();
     let mut rec_wal = Wal::open(&crash_path).map_err(|e| e.to_string())?;
-    let mut replay_chan = RecordingChannel::default();
+    let replay_chan = RecordingChannel::default();
     let (replay_out, replay_chan) = run_full(&mut rec_wal, rec.acked_effects, replay_chan, &sc);
 
     // —— 判据 ——

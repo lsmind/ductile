@@ -9,7 +9,6 @@ use ductile::kernel::mlv_auth::{generate_keypair, TrustFrame};
 use ductile::kernel::mlv_toon::sign_envelope_v2;
 use ductile::kernel::mlv::effect_key;
 use ductile::kernel::gov::{ApplyOutcome, GovRegistry};
-use std::collections::BTreeMap;
 
 fn tmpdir(tag: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("ductile-govv2-{}-{}", std::process::id(), tag));

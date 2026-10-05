@@ -5,9 +5,9 @@
 //! deliver（规范 §4+补丁④）：critical 集=所选路径必要生产者闭包；
 //!   幂等 outbox=副作用按 EffectKey 走 WAL ack——重复 deliver 零重复副作用。
 
-use crate::kernel::types::{ErrCode, Outcome, SkipReason, Value};
-use crate::kernel::wal::{EffectExecutor, IdempotentRunner, Wal};
-use std::collections::{BTreeMap, BTreeSet};
+use crate::kernel::types::{ErrCode, Outcome, Value};
+use crate::kernel::wal::{EffectExecutor, IdempotentRunner};
+use std::collections::BTreeMap;
 
 // ── judge：确定性规则桩 ──────────────────────────────────
 
@@ -174,8 +174,10 @@ impl<C: DeliverChannel> EffectExecutor for ChannelAsExecutor<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::types::SkipReason;
     use crate::kernel::wal::Wal;
     use std::cell::Cell;
+    use std::collections::BTreeSet;
 
     // —— judge ——
 

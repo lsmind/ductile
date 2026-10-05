@@ -12,7 +12,7 @@
 //! 标准转义。依赖维持 std+sha2。
 
 use crate::kernel::hash::sha256_hex;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 

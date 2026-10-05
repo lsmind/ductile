@@ -15,7 +15,7 @@
 //!   - Diagnostic：code+span+expected/got+可复制 fix 命令
 
 use crate::kernel::ast::*;
-use crate::kernel::types::{ErrCode, RefPath, SkipReason, Value};
+use crate::kernel::types::{ErrCode, RefPath, Value};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -729,7 +729,7 @@ mod tests {
 
     #[test]
     fn builtin_calls_closed() {
-        use crate::kernel::ast::Expr::Call;
+        
         let mk = |name: &str, args: Vec<Expr>| Expr::Call {
             name: name.to_string(),
             args,
@@ -751,7 +751,7 @@ mod tests {
     #[test]
     fn predicate_must_be_bool() {
         // 谓词 int → E207
-        let sc = scope_with_fields();
+        let _sc = scope_with_fields();
         let e = check_predicate(&i(1), &scope_with_fields()).unwrap_err();
         assert_eq!(e.code, ErrCode::E207);
         // 合法谓词

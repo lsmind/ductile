@@ -17,7 +17,7 @@
 //! （cmd_patch_confirm_replay）拒掉 Reject——制度保证，不靠 LLM 自觉。
 
 use crate::core::ast::Pipeline;
-use crate::core::replay_eval::{beta_sweep, replay_score, ReplayTrace};
+use crate::core::replay_eval::{replay_score, ReplayTrace};
 use crate::db;
 use crate::L3_dsl::parser::parse_pipeline_file;
 use std::collections::BTreeMap;

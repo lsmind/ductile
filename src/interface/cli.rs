@@ -406,7 +406,7 @@ fn cmd_kernel_reproduce(args: &[String]) -> Result<i32, String> {
 /// v0.24 自组织治理超图 MLV 子命令。
 /// `ductile mlv <ledger> <verb> ...` — v3.1 治理内核。
 fn emit_outcome(r: Result<crate::kernel::gov::ApplyOutcome, crate::kernel::gov::GovErr>, label: &str, rev: u64) -> Result<i32, String> {
-    use crate::kernel::gov::{ApplyOutcome, GovErr};
+    use crate::kernel::gov::ApplyOutcome;
     match r {
         Ok(ApplyOutcome::Committed { record_hash, .. }) => {
             println!("OK {label} rev={rev} record={record_hash}");
@@ -424,7 +424,7 @@ fn emit_outcome(r: Result<crate::kernel::gov::ApplyOutcome, crate::kernel::gov::
 }
 
 fn mkrec(seq: u64, op: crate::kernel::mlv::MlvOp, binding: &str, rev: u64, from: Option<crate::kernel::mlv::MlvState>, to: Option<crate::kernel::mlv::MlvState>, prev: &str, request_key: &str, at: u64, payload: &str, signer: Option<&(ed25519_dalek::SigningKey, String)>, trust_seq: Option<u64>) -> crate::kernel::mlv::LedgerRecord {
-    use crate::kernel::mlv::{domain_hash, effect_key, LedgerRecord, MlvOp, MlvState, DOMAIN_RECORD, GENESIS_ROOT};
+    use crate::kernel::mlv::{domain_hash, effect_key, LedgerRecord, DOMAIN_RECORD, GENESIS_ROOT};
     // f7 冻结：request_digest=D(record域, op|request_key|payload)——payload 入 digest 不入 effect_key
     let digest = domain_hash(DOMAIN_RECORD, format!("{op:?}|{request_key}|{payload}").as_bytes());
     let mut env = crate::kernel::mlv::make_envelope(&op, binding, rev, request_key, &digest, at);
@@ -453,8 +453,8 @@ fn mkrec(seq: u64, op: crate::kernel::mlv::MlvOp, binding: &str, rev: u64, from:
 
 
 fn cmd_mlv(args: &[String]) -> Result<i32, String> {
-    use crate::kernel::gov::{ApplyOutcome, GovErr, GovRegistry};
-    use crate::kernel::mlv::{effect_key, LedgerRecord, MlvOp, MlvState, DEFAULT_SKEW_NS, DOMAIN_RECORD, domain_hash, GENESIS_ROOT, DOMAIN_RECEIPT};
+    use crate::kernel::gov::GovRegistry;
+    use crate::kernel::mlv::{MlvOp, MlvState, DEFAULT_SKEW_NS, domain_hash, DOMAIN_RECEIPT};
     use crate::kernel::mlv_auth;
     let ledger_path = std::path::PathBuf::from(&args[0]);
     let verb = args[1].as_str();
@@ -850,7 +850,7 @@ fn cmd_attractor(args: &[String]) -> Result<i32, String> {
     // args 从 <ledger> 开始
     let ledger_path = std::path::PathBuf::from(&args[0]);
     let binding = args[1].clone();
-    let rev: u64 = args[2].parse().map_err(|_| "rev number")?;
+    let _rev: u64 = args[2].parse().map_err(|_| "rev number")?;
     let lambda: f64 = args[3].parse().map_err(|_| "lambda float")?;
     let tau: f64 = args[4].parse().map_err(|_| "tau float")?;
     let cats: Vec<String> = args[5].split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
@@ -972,7 +972,7 @@ fn cmd_attractor_show(args: &[String]) -> Result<i32, String> {
     use crate::kernel::gov::GovRegistry;
     let ledger_path = std::path::PathBuf::from(&args[0]);
     let binding = args[1].clone();
-    let reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
+    let _reg = GovRegistry::open(&ledger_path).map_err(|e| format!("{} {}", e.code(), e.detail()))?;
     let payloads = attractor_decisions(&ledger_path, &binding)?;
     if payloads.is_empty() {
         eprintln!("no attractor decisions for binding={binding}");

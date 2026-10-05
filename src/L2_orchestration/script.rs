@@ -569,7 +569,7 @@ mod tests {
         assert!(cse_safe(&card));
     }
 
-    use super::*;
+    
 
     const GOOD: &str = r#"#!/usr/bin/env python3
 # ductile: v1

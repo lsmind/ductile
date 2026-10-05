@@ -280,7 +280,7 @@ mod tests {
     fn rank_divides_by_learned_weight() {
         // reliable-but-expensive impl should win once its learned weight is high
         let weights = Weights::default();
-        let mut recent = BTreeMap::new();
+        let recent = BTreeMap::new();
         let mut prefs = ImplPrefs::default();
         let expensive = mk_impl("expensive", 10_000);
         let cheap = mk_impl("cheap", 1_000);

@@ -34,7 +34,7 @@ fn ledger_cli_create_verify_roundtrip() {
     assert_eq!(rk, 0);
     let secret = {
         // keygen 输出 secret=<path>
-        let (_, out, _) = run(&["mlv", "x", "keygen", "--out", keydir.to_str().unwrap()]);
+        let (_, _out, _) = run(&["mlv", "x", "keygen", "--out", keydir.to_str().unwrap()]);
         // 第一次 keygen 已占用 key_id 目录名（同钥不同文件）；直接扫目录
         let mut s = None;
         for e in std::fs::read_dir(&keydir).unwrap() {
@@ -107,7 +107,7 @@ fn ledger_cli_convert_v1_to_v2() {
         // v1 create 语义（照 cmd_mlv mkrec 无 signer 分支：make_envelope 生成 mac 信封）
         let mut led = MlvLedger::open(&src).unwrap();
         let now = 1_000_000_001u64;
-        let (op, binding, rev, rk) = (MlvOp::CreateProposal, "b1", 0u64, "rk-a");
+        let (op, binding, rev, _rk) = (MlvOp::CreateProposal, "b1", 0u64, "rk-a");
         let payload = format!("{op:?}|{binding}|{rev}");
         let digest = domain_hash(DOMAIN_RECORD, format!("{op:?}||{payload}").as_bytes());
         let env = make_envelope(&op, binding, rev, "", &digest, now);
@@ -136,7 +136,7 @@ fn ledger_cli_convert_v1_to_v2() {
     let dst = d.join("dst.v2");
     // keygen 新钥（convert 重签用）
     let kd = d.join("keys");
-    let (_, kout, _) = run(&["mlv", "z", "keygen", "--out", kd.to_str().unwrap()]);
+    let (_, _kout, _) = run(&["mlv", "z", "keygen", "--out", kd.to_str().unwrap()]);
     let secret = {
         let mut s = None;
         for e in std::fs::read_dir(&kd).unwrap() {

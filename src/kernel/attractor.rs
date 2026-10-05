@@ -159,7 +159,7 @@ pub fn decide(p: &Params, mem: &MemoryState, ev: &Evidence) -> Result<DecisionOu
         }
     }
     // 平票判定：严格最大者唯一才出 winner
-    if let Some((wcat, wq)) = &best {
+    if let Some((_wcat, wq)) = &best {
         let max_count = q.values().filter(|v| **v == *wq).count();
         if max_count > 1 {
             return Ok(DecisionOut { winner: None, q, m, tie: true });
@@ -526,7 +526,7 @@ mod tests {
     fn payload_lambda_bound_checked_on_parse() {
         let mut p = sample_payload();
         p.lambda = 0.9;
-        let s = p.encode();
+        let _s = p.encode();
         // parse 层不查 λ（DecisionPayload 只是载体），decide 层才拒——
         // 但重放侧必须拒，这里直接验证 Params::validate 会拒
         let params = Params { formula_version: FORMULA_VERSION.into(), lambda: 0.9, tau: 8.0, categories: cats() };

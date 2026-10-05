@@ -18,7 +18,7 @@
 
 use crate::kernel::hash::sha256_hex;
 use crate::kernel::ledger::{append_event, verify_ledger};
-use crate::kernel::types::{EffectKey, ErrCode, Outcome, Value};
+use crate::kernel::types::{EffectKey, ErrCode};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;

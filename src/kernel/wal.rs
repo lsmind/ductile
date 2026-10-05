@@ -15,7 +15,7 @@
 //!   - 无 intent → 未开始
 
 use crate::kernel::hash::sha256_hex;
-use crate::kernel::types::{AuditEvent, EffectKey, ErrCode, Outcome, Value};
+use crate::kernel::types::{AuditEvent, EffectKey, ErrCode};
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 

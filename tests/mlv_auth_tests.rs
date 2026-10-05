@@ -557,7 +557,7 @@ fn a18_trust_frame_negative_battery() {
 /// 终审#4：逐字段篡改矩阵（信封声明的每个签名字段被改=拒——防域外字段逃逸）
 #[test]
 fn a19_envelope_field_tamper_matrix() {
-    use std::collections::BTreeMap;
+    
     let (p, sk, kid) = signed_ledger("a19");
     let mut reg = GovRegistry::open(&p).unwrap();
     let prev = reg.head().unwrap();
