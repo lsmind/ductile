@@ -778,6 +778,19 @@ fn exec_proc_inner(
                 missing.join(", ")
             )
         };
+        // v0.24.1 .optional()：门禁空转是作者声明的合法缺席——产 skipped 型
+        // LEFT（err_code=skipped→respond Ignore，流不炸）而非 contract Exit。
+        // FAIL 清单回喂是修复回路的正解，optional 是修复臂的结构性存在权。
+        if proc.optional {
+            eprintln!(
+                "  [{}] SKIP: gated off by .when (optional) — {}",
+                proc.name, missing_detail
+            );
+            return Ok(Value::Text(format!(
+                "§§FIELDS§§err=1§§ok=0§§status=Skipped§§err_code=skipped§§err_proc={}§§err_impl=-§§err_msg=gated off by .when (optional): {}§§RAW§§",
+                proc.name, missing_detail
+            )));
+        }
         return Err(format!(
             "no eligible impl: proc '{}' gated off by .when — {}",
             proc.name, missing_detail
@@ -1301,6 +1314,7 @@ mod tests {
             foreach_var: String::new(),
             pick_by: "cost".into(),
             trust_refs: Vec::new(),
+            optional: false,
             description: String::new(),
         }
     }
@@ -1353,6 +1367,7 @@ mod tests {
             foreach_var: String::new(),
             pick_by: "egraph".into(),
             trust_refs: Vec::new(),
+            optional: false,
             description: String::new(),
         };
         let pl = Pipeline {
@@ -1465,6 +1480,7 @@ mod tests {
                 foreach_var: String::new(),
                 pick_by: "cost".into(),
                 trust_refs: Vec::new(),
+                optional: false,
                 description: String::new(),
             }],
         };

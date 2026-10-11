@@ -161,6 +161,14 @@ pub struct Proc {
     /// run()/sh() 命令体里注入 @ref 必须在此声明（§13.5 引擎层封死，
     /// 不再靠作者自觉）。parser 静态校验 + executor 运行时兜底双闸。
     pub trust_refs: Vec<String>,
+    /// v0.24.1：`.optional()`——门禁空转许可。`.when` 门死全部 impl 时：
+    /// 默认（无 optional）= contract error → Exit 整流（fail-closed，路由错）；
+    /// 标 optional = 产出 skipped 型 LEFT 值（err_code=skipped），
+    /// needs 它的下游正常传播 LEFT（不 healthy 但不炸流），
+    /// deliver 闭包外=完全无害。动机：条件修复臂（FAIL 才跑）在
+    /// 绿路径的结构性存在权（sigou_v3 五炸实证），作者显式声明
+    /// "此节点缺席是合法态"——制度>自觉：缺席合法性必须显式。
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -401,6 +409,7 @@ mod tests {
                     foreach_var: String::new(),
                     pick_by: "cost".into(),
                     trust_refs: Vec::new(),
+                    optional: false,
                 },
                 Proc {
                     name: "b".into(),
@@ -420,6 +429,7 @@ mod tests {
                     foreach_var: String::new(),
                     pick_by: "cost".into(),
                     trust_refs: Vec::new(),
+                    optional: false,
                 },
             ],
             weights: Weights::default(),
@@ -455,6 +465,7 @@ mod tests {
                 foreach_var: String::new(),
                 pick_by: "cost".into(),
                 trust_refs: Vec::new(),
+                optional: false,
             }],
             weights: Weights::default(),
             cwd: None,

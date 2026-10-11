@@ -38,6 +38,11 @@ pub enum ErrCode {
     /// 用户中断（SIGINT/cancelled）——意图明确，禁止任何自动重试
     Cancelled,
     Crash,
+    /// v0.24.1 optional 门禁空转（.optional 的 gated-off）：不是错误，是
+    /// 作者声明的合法缺席。respond=Ignore（不重试不炸流）；fatal_left 里
+    /// 与 Crash 同列——deliver 闭包内的 optional 节点缺席仍算关键失败
+    /// （缺席合法 ≠ 交付物可缺席）。
+    Skipped,
 }
 
 impl ErrCode {
@@ -58,6 +63,7 @@ impl ErrCode {
             "data" => Some(ErrCode::Data),
             "contract" => Some(ErrCode::Contract),
             "cancelled" => Some(ErrCode::Cancelled),
+            "skipped" => Some(ErrCode::Skipped),
             "crash" => Some(ErrCode::Crash),
             _ => None,
         }
@@ -78,6 +84,7 @@ impl ErrCode {
             ErrCode::Schema => "schema",
             ErrCode::Data => "data",
             ErrCode::Contract => "contract",
+            ErrCode::Skipped => "skipped",
             ErrCode::Cancelled => "cancelled",
             ErrCode::Crash => "crash",
         }
@@ -470,6 +477,7 @@ impl Backoff {
 pub fn strategy(code: ErrCode) -> Action {
     match code {
         ErrCode::Cancelled => Action::Escalate,
+        ErrCode::Skipped => Action::Escalate, // 合法缺席非事故，无自动动作（escalate=仅上报记录）
         ErrCode::Timeout => Action::Retry {
             budget: 2,
             backoff: Backoff::Linear,
@@ -541,6 +549,7 @@ pub fn respond(code: ErrCode) -> Response {
         ErrCode::Auth | ErrCode::Data | ErrCode::Format | ErrCode::Schema => Response::Switch,
         ErrCode::Truncation => Response::Wait,
         ErrCode::Dependency | ErrCode::Permission | ErrCode::Crash => Response::Ignore,
+        ErrCode::Skipped => Response::Ignore, // 合法缺席：局部无事故
         ErrCode::Contract => Response::Exit,
     }
 }

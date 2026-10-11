@@ -925,6 +925,7 @@ mod tests {
             foreach_var: String::new(),
             pick_by: "history".into(),
             trust_refs: Vec::new(),
+            optional: false,
         }
     }
 

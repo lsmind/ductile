@@ -480,6 +480,7 @@ pub(crate) fn extract_quoted(s: &str) -> Option<String> {
 // ── Parse a single .proc block ──
 fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseError> {
     let mut needs: Vec<String> = Vec::new(); // v0.17.3 .needs(@ref) 数据依赖
+    let mut optional = false; // v0.24.1 .optional() 门禁空转许可
     let mut constraint_fields: Vec<String> = Vec::new(); // v0.18.1 .constraint(fields) 链级约束字段
     let mut idx = start_idx;
     // v0.18.14 跨行动词调用：`.proc("x", llm(a,\n  prompt="..."))` 的后续行
@@ -796,6 +797,31 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
                     needs.push(r);
                 }
             }
+            continue;
+        }
+
+        // v0.24.1 .optional() — 门禁空转许可（无参数；gated-off 时产 skipped 型
+        // LEFT 而非 contract Exit）。与 .needs 同一 proc 级修饰符区块。
+        if trimmed.starts_with(".optional(") || trimmed.starts_with(".optional (") || trimmed == ".optional" {
+            let after = if trimmed == ".optional" { "" } else { &trimmed[9..] };
+            if !after.is_empty() {
+                let close = find_matching_paren(after).ok_or_else(|| ParseError {
+                    line: start_idx + 1,
+                    col: 1,
+                    msg: "unbalanced parens in .optional(...)".into(),
+                    line_text: lines[start_idx].to_string(),
+                })?;
+                let inner = &after[1..close];
+                if !inner.trim().is_empty() {
+                    return Err(ParseError {
+                        line: start_idx + 1,
+                        col: 1,
+                        msg: ".optional() takes no arguments".into(),
+                        line_text: lines[start_idx].to_string(),
+                    });
+                }
+            }
+            optional = true;
             continue;
         }
         if trimmed.starts_with(".trust(") || trimmed.starts_with(".trust (") {
@@ -1167,6 +1193,32 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
             continue;
         }
 
+        // v0.24.1 .optional() — 门禁空转许可（无参数）：gated-off 时产 skipped 型
+        // LEFT 而非 contract Exit。条件修复臂在绿路径的结构性存在权。
+        if trimmed.starts_with(".optional(") || trimmed.starts_with(".optional (") || trimmed == ".optional" {
+            let after = if trimmed == ".optional" { "" } else { &trimmed[9..] };
+            if !after.is_empty() {
+                let close = find_matching_paren(after).ok_or_else(|| ParseError {
+                    line: idx + 1,
+                    col: 1,
+                    msg: "unbalanced parens in .optional(...)".into(),
+                    line_text: lines[idx].to_string(),
+                })?;
+                let inner = &after[1..close];
+                if !inner.trim().is_empty() {
+                    return Err(ParseError {
+                        line: idx + 1,
+                        col: 1,
+                        msg: ".optional() takes no arguments".into(),
+                        line_text: lines[idx].to_string(),
+                    });
+                }
+            }
+            optional = true;
+            idx += 1;
+            continue;
+        }
+
         // .foreach(source=@proc, var=item)
         if trimmed.starts_with(".foreach(") || trimmed.starts_with(".foreach (") {
             let (src, var) = parse_foreach_line(trimmed)?;
@@ -1275,6 +1327,7 @@ fn parse_proc(lines: &[&str], start_idx: usize) -> Result<(Proc, usize), ParseEr
             contract: contract.unwrap_or_default(),
             deliver: is_deliver,
             needs,
+            optional,
             constraint_fields,
             deliver_refs,
             foreach: foreach_src,
@@ -2212,6 +2265,19 @@ mod tests {
         let pl = parse_pipeline(input).unwrap();
         let audit = pl.procs.iter().find(|p| p.name == "audit").unwrap();
         assert_eq!(audit.needs, vec!["gen".to_string(), "req".to_string()]);
+
+    }
+
+    // v0.24.1 .optional() 解析 + gated-off 空转
+    #[test]
+    fn optional_modifier_parses() {
+        let src = "Pipeline(\"t\", \"d\")\n  .proc(\"fix\", run(\"echo x\"))\n    .when(@g.failed != \"0\")\n    .optional()\n";
+        let pl = parse_pipeline(src).expect("parse");
+        assert!(pl.procs[0].optional);
+        // 无 optional = false（默认 fail-closed）
+        let src2 = "Pipeline(\"t\", \"d\")\n  .proc(\"fix\", run(\"echo x\"))\n    .when(@g.failed != \"0\")\n";
+        let pl2 = parse_pipeline(src2).expect("parse2");
+        assert!(!pl2.procs[0].optional);
     }
 
     #[test]
@@ -2938,6 +3004,7 @@ mod prim_tests {
             foreach_var: String::new(),
             pick_by: String::new(),
             trust_refs: Vec::new(),
+            optional: false,
         };
         // L1 通过 + L2 通过
         let ok_val = Value::Text("§§FIELDS§§score=85§§note=x§§RAW§§raw".into());

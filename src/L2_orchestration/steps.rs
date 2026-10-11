@@ -3441,6 +3441,7 @@ mod tests {
             foreach_var: String::new(),
             pick_by: String::new(),
             trust_refs: Vec::new(),
+            optional: false,
         }
     }
 

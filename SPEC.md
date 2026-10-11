@@ -118,7 +118,7 @@ Pipeline("name", "desc", cwd="...", env=["K=V", ...])
 - script 契约参数注入键=`DUCTILE_ARG_<大写名>`（`ep` → `DUCTILE_ARG_EP`），脚本侧 `getenv("DUCTILE_ARG_EP")`
 
 **门禁语义三条（多轮门链设计前必读）**：
-1. `.when` 门死唯一 impl = **contract error → Exit 整流退出**（不是跳过）：条件修复臂（FAIL 才跑）在绿路径必炸链。修复回喂的正确形态=FAIL 清单落盘 → 生成器 prompt 常挂清单 → 重跑管线收敛（材料层修复，非调度层）
+1. `.when` 门死唯一 impl = **contract error → Exit 整流退出**（不是跳过）：条件修复臂（FAIL 才跑）在绿路径必炸链。两条出路：①修复回喂（FAIL 清单落盘 → 生成器 prompt 常挂清单 → 重跑管线收敛，材料层修复）；②`.optional()`（v0.24.1 起）——显式声明"此节点缺席是合法态"，gated-off 时产 `status=Skipped/err_code=skipped` 型 LEFT（respond=Ignore，流不炸，needs 下游正常传播）；optional 节点在 deliver 闭包内缺席仍算关键失败（缺席合法 ≠ 交付物可缺席）
 2. `.needs` 只建排序边不拦执行，且**不进 impl refs**（hyper check 的 after 边只认 body @ref / impl.when / 融合后的 proc 级 when）
 3. needs 上游 LEFT → 下游 "propagated" 传播失败；幂等汇聚哨兵的 needs 必须挂在**任何路径都必跑**的节点上
 

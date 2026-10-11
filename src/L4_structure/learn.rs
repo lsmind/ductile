@@ -175,6 +175,7 @@ mod tests {
                     foreach_var: String::new(),
                     pick_by: "cost".into(),
                     trust_refs: Vec::new(),
+                    optional: false,
                 },
                 Proc {
                     name: "b".into(),
@@ -202,6 +203,7 @@ mod tests {
                     foreach_var: String::new(),
                     pick_by: "cost".into(),
                     trust_refs: Vec::new(),
+                    optional: false,
                 },
             ],
             weights: Weights::default(),
