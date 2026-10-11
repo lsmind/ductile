@@ -106,6 +106,21 @@ Pipeline("name", "desc", cwd="...", env=["K=V", ...])
 | `{var.field}` | 同上，字段通道 | 原样保留 |
 | `@proc` | 上游 proc 完整输出文本 | 原样保留 |
 | `@proc.field` | 上游 DSL_RESULT 字段值 | `<no field:proc.field>` |
+| `${NAME}` | **Pipeline env 变量**（`Pipeline(..., env=["NAME=…"])`，v0.24.1 起） | 原样保留（`$` 后非法标识符不动；进程 env 如 `$HOME` 不属于本层） |
+
+**`${NAME}` 语义注记（v0.24.1，sigou_v3 十二跑实证）**：run() 体内 `${VAR}` 一直可用——那是 bash 展开（Pipeline env 注入 bash 进程）。但 script()/llm()/write() 等**非 bash 通道**的 kv 参数里 `${VAR}` 此前静默保持字面量落库——同一管线两种语义，`script(ep="${EPN}")` 会把字面 `${EPN}` 注入 `DUCTILE_ARG_EP`。v0.24.1 起 resolve_vars 尾部统一按 Pipeline env 展开。`{topic}` 仍是首选写法（无 env 声明依赖）。
+
+**动词结果字段速查（`.when` 门禁前必读）**：
+- `run()`/`sh()`：成功织入 `ok=1/status=Success/stdout` 协议字段（v0.24 Outcome 协议）；脚本 `##DSL_RESULT` 字段合并且 `ok/status/stdout/err` 不可覆盖
+- `script()`：字段=契约脚本 stdout 的 `##DSL_RESULT` 块
+- `llm()`：`meta_*` 字段（model/tokens/finish_reason），`content` 非字段
+- `read()`/`write()`：**无固定字段**（内容即值）——对 read/write 结果做 `.when(@x.ok)` 永假；必经步用 `.needs` 排序 + 上游 run/llm 节点的字段做门
+- script 契约参数注入键=`DUCTILE_ARG_<大写名>`（`ep` → `DUCTILE_ARG_EP`），脚本侧 `getenv("DUCTILE_ARG_EP")`
+
+**门禁语义三条（多轮门链设计前必读）**：
+1. `.when` 门死唯一 impl = **contract error → Exit 整流退出**（不是跳过）：条件修复臂（FAIL 才跑）在绿路径必炸链。修复回喂的正确形态=FAIL 清单落盘 → 生成器 prompt 常挂清单 → 重跑管线收敛（材料层修复，非调度层）
+2. `.needs` 只建排序边不拦执行，且**不进 impl refs**（hyper check 的 after 边只认 body @ref / impl.when / 融合后的 proc 级 when）
+3. needs 上游 LEFT → 下游 "propagated" 传播失败；幂等汇聚哨兵的 needs 必须挂在**任何路径都必跑**的节点上
 
 ### 1.5 内置动词全表（step_registry；19 行=规范名 21 个：别名 run/sh、read/read_file、search/mcp_search/web_search 各计一）
 

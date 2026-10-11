@@ -1,0 +1,30 @@
+#!/usr/bin/env -S ductile run
+// drama.pipeline — 漫剧三道门禁生产链 v1（2026-10-05 用户御定）
+//
+// 链→剧本→提示词三审制（skill: video-dramaturgy「三道门禁生产流程」的 ductile 物化）：
+//   门0 chain   逻辑链文件存在且含 F/L/C 三节（单向线性，每跳≤1）
+//   门1+2 audit drama_chain_audit.py：剧本⊆链 + 提示词⊆剧本（台词/VO/画面文字机审）
+//   渲染放行    任一门 FAIL 即非零退出，render 哨兵不达
+//
+// 用法：ductile run pipelines/drama.pipeline            （EP 缺省 EP001）
+//       ductile script call drama_chain_audit ep=EP001  （单跑机审）
+
+Pipeline("drama", "v2 漫剧三道门禁：链→剧本→提示词→渲染（v13秒表制式兼容）", cwd="/home/beef/projects/ductile", env=["EP=S002", "SIGOU_ROOT=/home/beef/projects/ai/sigou"])
+
+  // ── 门0：逻辑链前置 ────────────────────────────────────────────
+  .proc("chain-exists", run("test -f /home/beef/projects/ai/sigou/season1/剧集/${EP}/逻辑链.md"))
+    .desc("门0a 逻辑链文件存在（生成剧本前必须先写链）")
+
+  .proc("chain-shape", run("grep -q '^## A. 世界设定事实' /home/beef/projects/ai/sigou/season1/剧集/${EP}/逻辑链.md && grep -q '^## B.' /home/beef/projects/ai/sigou/season1/剧集/${EP}/逻辑链.md && grep -q '^## C. 审核对照表' /home/beef/projects/ai/sigou/season1/剧集/${EP}/逻辑链.md"))
+    .desc("门0b 链文件含 F/L/C 三节")
+    .needs(@chain-exists)
+
+  // ── 门1+2：机审（script 契约：scripts/drama_chain_audit.py）────
+  .proc("audit", script(drama_chain_audit, ep="S002"))
+    .desc("门1 剧本⊆链 + 门2 提示词⊆剧本（台词/VO/画面文字逐句；道具动作/SFX/连续性留人审）")
+    .needs(@chain-shape)
+
+  // ── 渲染哨兵：三门全过才打印放行 ───────────────────────────────
+  .proc("render", run("echo '门禁全过: 可提交渲染 (scripts/ep001_batch.py <SEG> <PORT>)'"))
+    .desc("渲染放行哨兵（任一门 FAIL 即链断，此步不达）")
+    .needs(@audit)

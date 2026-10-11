@@ -170,7 +170,47 @@ pub fn resolve_vars(text: &str, topic: &str, results: &BTreeMap<String, Value>) 
         result.push(chars[i]);
         i += 1;
     }
-    result
+    // v0.24.1 ${VAR} 展开（Pipeline env）：run() 体内 ${VAR} 由 bash 展开
+    // （Pipeline env 注入 bash 进程），但 script()/llm() 等非 bash 通道的
+    // kv 参数里 ${VAR} 此前静默保持字面量——同一管线两种语义（sigou_v3
+    // 十二跑实证：script(ep="${EPN}") 落进脚本变字面 '${EPN}' 路径炸
+    // FileNotFoundError）。此处统一：${NAME} 命中 Pipeline env 则替换；
+    // 未命中原样保留（bash 风格兼容，不 fail-closed——run() 体内
+    // ${VAR} 合法依赖 bash 自行展开，引擎无法区分意图）。
+    expand_pipeline_env(&result)
+}
+
+/// ${NAME} ← Pipeline env（PIPELINE_CTX；未设置管线 = 空表，全字面保留）。
+/// 仅识别 NAME ∈ [A-Za-z_][A-Za-z0-9_]*（bash 合法标识符）；$HOME 等
+/// 进程 env 不属于本层——那是 bash 的职责。
+pub fn expand_pipeline_env(text: &str) -> String {
+    let env = crate::L2_orchestration::steps::PipelineCtx::env_pairs();
+    if env.is_empty() || !text.contains('$') {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
+            if let Some(close) = chars[i + 2..].iter().position(|&c| c == '}') {
+                let name: String = chars[i + 2..i + 2 + close].iter().collect();
+                let valid = !name.is_empty()
+                    && name.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                    && name.chars().all(|c| c.is_alphanumeric() || c == '_');
+                if valid {
+                    if let Some((_, v)) = env.iter().find(|(k, _)| *k == name) {
+                        out.push_str(v);
+                        i += close + 3;
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
 }
 
 // ── Env-param hygiene ──
@@ -387,6 +427,35 @@ pub fn short_hash(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    // v0.24.1 ${VAR}（Pipeline env）展开——sigou_v3 script(ep="${EPN}") 字面量事故
+    #[test]
+    fn dollar_brace_expands_from_pipeline_env() {
+        let mut pl = crate::core::ast::Pipeline::default();
+        pl.env = vec!["EPN=S004".to_string()];
+        let _g = crate::L2_orchestration::steps::PipelineCtx::set(&pl);
+        let r = resolve_vars("ep=\"${EPN}\"", "S004", &Default::default());
+        assert_eq!(r, "ep=\"S004\"");
+    }
+
+    #[test]
+    fn dollar_brace_unknown_stays_literal() {
+        // 未命中 Pipeline env：原样保留（run() 体内合法依赖 bash 展开）
+        let r = resolve_vars("${NOT_SET}", "t", &Default::default());
+        assert_eq!(r, "${NOT_SET}");
+    }
+
+    #[test]
+    fn dollar_brace_invalid_name_untouched() {
+        let mut pl = crate::core::ast::Pipeline::default();
+        pl.env = vec!["A=1".to_string()];
+        let _g = crate::L2_orchestration::steps::PipelineCtx::set(&pl);
+        // $HOME（非花括号）与 ${1}（数字开头非法标识符）都不动
+        let r = resolve_vars("$HOME ${1} ${A}", "t", &Default::default());
+        assert_eq!(r, "$HOME ${1} 1");
+    }
+
     use super::*;
 
     // ── detect_func ──
