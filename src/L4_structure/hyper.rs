@@ -1392,7 +1392,12 @@ pub fn check_pipeline_against(spec: &HyperSpec, pl: &Pipeline) -> Vec<String> {
             stage.after.clone()
         };
         for dep in &after {
-            let has = proc.plan.iter().any(|i| i.refs.iter().any(|r| r == dep))
+            // v0.24.1：proc 级 .needs(@dep) 也是合法 after 依据——write 后置节点
+            //（drop 系读文件、body 无 @ref）的真实时序依赖就是 needs 边；此前只认
+            // body/when 导致"needs 排序边型"管线全量误报（sigou_v3 drop 系实锤）。
+            let needs_dep = proc.needs.iter().any(|n| n == dep);
+            let has = needs_dep
+                || proc.plan.iter().any(|i| i.refs.iter().any(|r| r == dep))
                 || proc.plan.iter().any(|i| {
                     i.when
                         .as_ref()
